@@ -200,4 +200,4 @@ nvcf-cli function invoke --input-file=…
 
 ## Feedback
 
-If the user hits a bug or limitation, file a Jira against project NVCF-PSA. Don't include secrets.
+If the user hits a bug or limitation, file an issue through the project tracker. Don't include secrets.

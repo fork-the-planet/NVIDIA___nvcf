@@ -88,7 +88,7 @@ Before changing a service, read [`AGENTS.md`](AGENTS.md) and the nearest nested
 `AGENTS.md`. The nested file is the best source for service-specific build,
 test, style, and review expectations.
 
-Use Conventional Commits. Include a JIRA reference when one exists.
+Use Conventional Commits.
 For documentation-only changes, run `git diff --check` and any targeted
 validation that applies to the changed files.
 

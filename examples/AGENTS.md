@@ -96,4 +96,4 @@ If a change does not lend itself to an automated test (docs only, configuration-
 
 ## Commits and MRs
 
-Follow the repo root `AGENTS.md` conventions: Conventional Commits v1.0.0, DCO sign-off (`git commit -s`), JIRA footer, structured MR description. Scope commits to `(examples)` or a sub-path when a single sample changes.
+Follow the repo root `AGENTS.md` conventions: Conventional Commits v1.0.0, DCO sign-off (`git commit -s`), and structured MR description. Scope commits to `(examples)` or a sub-path when a single sample changes.
