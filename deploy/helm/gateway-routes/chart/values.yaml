@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default values for nvcf-gateway-routes
+# This is a YAML-formatted file declaring Gateway API resources for NVCF
+
+nvcfGatewayRoutes:
+  # Enable/disable ingress deployment
+  enabled: true
+
+  # Domain for hostname routing
+  domain: "localhost"
+
+  # Gateway reference (expects Gateway to be provisioned by Cluster Operator)
+  gateways:
+    # Shared Gateway for common L7 services
+    shared:
+      # Name of the Gateway resource to attach HTTPRoutes to
+      name: gateway
+      # Namespace where the Gateway exists
+      namespace: gateway
+      # Listener (sectionName) on the Gateway to attach routes to
+      listenerName: http
+    # Exclusive Gateway for gRPC services over L4
+    grpc:
+      # Name of the Gateway resource to attach TCPRoutes to
+      name: tcp-gateway
+      # Namespace where the Gateway exists
+      namespace: gateway
+      # Listener (sectionName) on the Gateway to attach routes to
+      listenerName: tcp
+
+  # HTTPRoute configurations
+  routes:
+    # NVCF API HTTPRoute
+    nvcfApi:
+      enabled: true
+      name: nvcf-api
+      hostnames:
+        - "api.{{ .Values.nvcfGatewayRoutes.domain }}"
+      backend:
+        name: api
+        namespace: nvcf
+        port: 8080
+      routeAnnotations: {}
+    
+    # NVCT API HTTPRoute
+    nvctApi:
+      enabled: true
+      name: nvct-api
+      hostnames:
+        - "tasks.{{ .Values.nvcfGatewayRoutes.domain }}"
+      backend:
+        name: nvct-api
+        namespace: nvcf
+        port: 8080
+      routeAnnotations: {}
+
+    # API Keys HTTPRoute
+    apiKeys:
+      enabled: true
+      name: api-keys
+      hostnames:
+        - "api-keys.{{ .Values.nvcfGatewayRoutes.domain }}"
+      backend:
+        name: api-keys
+        namespace: api-keys
+        port: 8080
+      routeAnnotations: {}
+
+    # Invocation Service HTTPRoute
+    invocation:
+      enabled: true
+      name: invocation-service
+      hostnames:
+        # Wildcard hostname for dynamic function routing
+        - "*.invocation.{{ .Values.nvcfGatewayRoutes.domain }}"
+        # Apex domain for health checks and base invocation endpoint
+        - "invocation.{{ .Values.nvcfGatewayRoutes.domain }}"
+      backend:
+        name: invocation
+        namespace: nvcf
+        port: 8080
+      routeAnnotations: {}
+
+    # LLM API Gateway HTTPRoute
+    llmApiGateway:
+      enabled: true
+      name: llm-api-gateway
+      hostnames:
+        - "llm.{{ .Values.nvcfGatewayRoutes.domain }}"
+      backend:
+        name: llm-api-gateway
+        namespace: nvcf
+        port: 8080
+      routeAnnotations: {}
+
+    # LLM Invocation HTTPRoute
+    llmInvocation:
+      enabled: false
+      name: llm-invocation
+      hostnames:
+        - "llm.invocation.{{ .Values.nvcfGatewayRoutes.domain }}"
+      backend:
+        name: llm-api-gateway
+        namespace: nvcf
+        port: 8080
+      routeAnnotations: {}
+
+    # SIS (Service Identity Service) HTTPRoute
+    # Exposes SIS outside the cluster so tools like `nvcf-cli cluster register`
+    # can reach it without a kubectl port-forward workaround.
+    sis:
+      enabled: true
+      name: sis
+      hostnames:
+        - "sis.{{ .Values.nvcfGatewayRoutes.domain }}"
+      backend:
+        name: api
+        namespace: sis
+        port: 8080
+      routeAnnotations: {}
+
+    # gRPC Route (standalone gRPC proxy service) (Uses TCPRoute)
+    grpc:
+      enabled: true
+      name: grpc
+      hostnames:
+        - "grpc.{{ .Values.nvcfGatewayRoutes.domain }}"
+      backend:
+        name: grpc
+        namespace: nvcf
+        port: 10081
+      routeAnnotations: {}
+
+  # PodMonitors for Envoy Gateway proxy pods.
+  podMonitors:
+    enabled: false

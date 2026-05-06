@@ -1,0 +1,312 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+version: 1
+target: main
+registries:
+  nvidia-omniverse:
+    host: nvcr.io
+    namespace: nvidia/omniverse
+  staging:
+    host: nvcr.io
+    namespace: 0833294136851237/nvcf-ncp-staging
+stack:
+  name: nvcf-self-managed-stack
+  version: 0.6.0-rc.15
+  registry: staging
+  gitlab_project_id: 182049
+  package_name: ncp-deploy
+  artifacts_file: artifacts-0.6.0-rc.15.txt
+artifacts:
+  - name: admin-token-issuer-proxy
+    type: image
+    registry: staging
+    version: 1.0.1
+  - name: alpine-k8s
+    type: image
+    registry: staging
+    version: 1.30.12
+  - name: bitnami-cassandra
+    type: image
+    registry: staging
+    version: 5.0.6-nv-1
+  - name: ess-api
+    type: image
+    registry: staging
+    version: v0.57.3
+  - name: helm-admin-token-issuer-proxy
+    type: chart
+    registry: staging
+    version: 1.3.1
+  - name: helm-nvcf-api-keys
+    type: chart
+    registry: staging
+    version: 1.3.1
+  - name: helm-nvcf-api
+    type: chart
+    registry: staging
+    version: 1.17.0
+  - name: helm-nvcf-cassandra
+    type: chart
+    registry: staging
+    version: 0.14.1
+  - name: helm-nvcf-ess-api
+    type: chart
+    registry: staging
+    version: 1.5.2
+  - name: helm-nvcf-grpc-proxy
+    type: chart
+    registry: staging
+    version: 1.6.2
+  - name: helm-nvcf-invocation-service
+    type: chart
+    registry: staging
+    version: 1.5.2
+  - name: helm-nvcf-llm-api-gateway
+    type: chart
+    registry: staging
+    version: 1.1.0
+  - name: helm-nvcf-llm-request-router
+    type: chart
+    registry: staging
+    version: 1.2.1
+  - name: helm-nvcf-nats-auth-callout-service
+    type: chart
+    registry: staging
+    version: 1.0.1
+  - name: helm-nvcf-nats
+    type: chart
+    registry: staging
+    version: 0.6.0
+  - name: helm-nvcf-notary-service
+    type: chart
+    registry: staging
+    version: 1.3.1
+  - name: helm-nvcf-openbao-server
+    type: chart
+    registry: staging
+    version: 0.30.4
+  - name: helm-nvcf-sis
+    type: chart
+    registry: staging
+    version: 1.13.6
+  - name: helm-nvcf-state-metrics
+    type: chart
+    registry: staging
+    version: 1.0.1
+  - name: helm-nvct-api
+    type: chart
+    registry: staging
+    version: 1.0.1
+  - name: helm-reval
+    type: chart
+    registry: staging
+    version: 1.3.0
+  - name: nats-box
+    type: image
+    registry: staging
+    version: 0.19.2-nonroot
+  - name: nats-server-config-reloader
+    type: image
+    registry: staging
+    version: 0.20.0
+  - name: nats-server
+    type: image
+    registry: staging
+    version: 2.11.10-alpine3.22
+  - name: notary-service
+    type: image
+    registry: staging
+    version: 1.9.4
+  - name: nv-api-keys
+    type: image
+    registry: staging
+    version: 0.0.6
+  - name: nvcf-cassandra-migrations
+    type: image
+    registry: staging
+    version: 0.6.1
+  - name: nvcf-gateway-routes
+    type: chart
+    registry: staging
+    version: 1.10.0
+  - name: nvcf-grpc-proxy
+    type: image
+    registry: staging
+    version: 1.27.0
+  - name: nvcf-invocation-service
+    type: image
+    registry: staging
+    version: 0.5.2
+  - name: nvcf-nats-auth-callout-service
+    type: image
+    registry: staging
+    version: 0.3.3
+  - name: nvcf-openbao-migrations
+    type: image
+    registry: staging
+    version: 0.11.0
+  - id: nvcf-openbao-1
+    name: nvcf-openbao
+    type: image
+    registry: staging
+    version: 2.2.2-nv-1
+  - id: nvcf-openbao-2
+    name: nvcf-openbao
+    type: image
+    registry: staging
+    version: 2.5.1-nv-1.2.1
+  - name: nvcf-service-oss
+    type: image
+    registry: staging
+    version: 1.1.1
+  - name: nvct-service-oss
+    type: image
+    registry: staging
+    version: 1.2.11
+  - name: oss-vault-k8s
+    type: image
+    registry: staging
+    version: 1.6.0
+  - name: reval-server
+    type: image
+    registry: staging
+    version: 0.15.0
+  - name: spot
+    type: image
+    registry: staging
+    version: 1.556.0-v3474d670
+supplemental_artifacts:
+  - name: nvcf-cli
+    type: resource
+    registry: staging
+    version: 0.0.30
+  - name: strap
+    type: image
+    registry: staging
+    version: 2.242.2
+  - name: llm-api-gateway
+    type: image
+    registry: staging
+    version: 0.3.0
+  - name: llm-request-router
+    type: image
+    registry: staging
+    repository_name: stargate
+    version: 0.2.0
+  - name: nvca
+    type: image
+    registry: staging
+    version: 3.0.0-rc.11
+  - name: nvca-operator
+    type: image
+    registry: staging
+    version: 3.0.0-rc.11
+  - name: helm-nvca-operator
+    type: chart
+    registry: staging
+    version: 1.9.0
+  - name: nvcf_worker_utils
+    type: image
+    registry: staging
+    version: 2.101.0
+  - name: nvcf_worker_init
+    type: image
+    registry: staging
+    version: 2.102.0
+  - name: nvcf_worker_niclls
+    type: image
+    registry: staging
+    version: 2.105.7
+  - name: ess-agent
+    type: image
+    registry: staging
+    version: 1.0.5
+  - name: nvcf-image-credential-helper
+    type: image
+    registry: staging
+    version: 0.5.1
+  - name: load_tester_supreme
+    type: image
+    registry: staging
+    version: 0.0.8
+  - name: nvcf-observability-reference-stack
+    type: chart
+    registry: staging
+    version: 1.7.0
+  - name: nvcf-example-dashboards
+    type: chart
+    registry: staging
+    version: 1.6.0
+  - name: nvcf-container-cache
+    type: image
+    registry: staging
+    version: v1.1.31
+  - name: helm-nvcf-container-cache
+    type: chart
+    registry: staging
+    repository_name: nvcf-container-cache
+    version: 0.25.6
+  - name: nvcf-proxy-tls-certs
+    type: image
+    registry: staging
+    version: 1.2.0
+  - name: gxcache-webhook
+    type: image
+    registry: staging
+    version: 59bd8ec5
+  - name: gxcache-init
+    type: image
+    registry: staging
+    version: 1e47f722
+  - name: gxcache-service
+    type: image
+    registry: staging
+    version: b206ce39
+  - name: helm-gxcache
+    type: chart
+    registry: staging
+    repository_name: gxcache
+    version: 0.8.2
+  - name: ddcs-dist-kv
+    type: image
+    registry: nvidia-omniverse
+    version: 5.0.0
+  - name: usd-content-cache
+    type: image
+    registry: nvidia-omniverse
+    version: 3.0.1
+  - name: storage-service
+    type: image
+    registry: nvidia-omniverse
+    version: 1.0.2
+  - name: simple-nginx
+    type: image
+    registry: nvidia-omniverse
+    version: 1.0.2
+  - name: streaming-proxy
+    type: image
+    registry: staging
+    version: 2.0.1
+  - name: gdn-streaming
+    type: chart
+    registry: staging
+    version: 2.0.1
+outputs:
+  - path: docs/user/manifest.md
+    blocks:
+      - marker: manifest-artifact-registry-paths
+        renderer: manifest-artifact-registry-paths
+  - path: docs/user/image-mirroring.md
+    blocks:
+      - marker: image-mirroring-resource-examples
+        renderer: image-mirroring-resource-examples
+      - marker: image-mirroring-stack-snippet
+        renderer: image-mirroring-stack-snippet
+      - marker: image-mirroring-cli-snippet
+        renderer: image-mirroring-cli-snippet
+  - path: docs/user/standalone-infrastructure.md
+  - path: docs/user/standalone-core-services.md
+  - path: docs/user/standalone-gateway.md
+  - path: docs/user/cluster-management/self-managed.md
+  - path: docs/user/cluster-management/reference.md
