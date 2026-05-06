@@ -1,7 +1,7 @@
 # EKS Cluster Terraform (Optional)
 
 <Warning>
-This guide is completely optional. If you already have a Kubernetes cluster with GPU nodes, you can skip this page and proceed directly to [helmfile-installation](./helmfile-installation) to install the NVCF control plane.
+This guide is completely optional. If you already have a Kubernetes cluster with GPU nodes, you can skip this page and proceed directly to [helmfile-installation](./helmfile-installation.md) to install the NVCF control plane.
 
 </Warning>
 
@@ -14,7 +14,7 @@ This guide provides instructions for deploying the Amazon EKS infrastructure fou
 - Infrastructure prerequisites for optional enhancements (LLS streaming, simulation caching)
 
 <Note>
-This guide covers infrastructure deployment only. Some Terraform options configure AWS resources (IAM policies, S3 buckets) required by optional enhancements deployed later. See [self-hosted-optional-enhancements](./optional-enhancements) for details on these components.
+This guide covers infrastructure deployment only. Some Terraform options configure AWS resources (IAM policies, S3 buckets) required by optional enhancements deployed later. See [self-hosted-optional-enhancements](./optional-enhancements.md) for details on these components.
 
 </Note>
 
@@ -35,8 +35,8 @@ This guide covers infrastructure deployment only. Some Terraform options configu
 
 - **AWS Account** with permissions for EKS, VPC, EC2, IAM, S3
 - **NGC API Key** from [ngc.nvidia.com](https://ngc.nvidia.com) authenticated with `nvcf-onprem` organization
-  \- See [self-hosted-image-mirroring](./image-mirroring) for more details on required NGC Service Key scopes.
-- The `nvcf-base` repository must be downloaded to your local machine (see [download-nvcf-base](./image-mirroring)).
+  \- See [self-hosted-image-mirroring](./image-mirroring.md) for more details on required NGC Service Key scopes.
+- The `nvcf-base` repository must be downloaded to your local machine (see [download-nvcf-base](./image-mirroring.md)).
 
 ### Configure AWS Credentials
 
@@ -111,7 +111,7 @@ The Terraform configuration supports flexible node pool designs for different de
 - `self-managed`: 5 node pools (compute, GPU, control-plane, database, and secrets management), the extra compute node pool is primarily for supporting optional simulation components and can be disabled for inference-only self-hosted NVCF
 - `byoc`: 2 node pools (compute and GPU) - if deploying with this configuration, `nodeSelectors` must be disabled in the self-hosted stack environment configuration file.
 
-Please refer to the codebase `nvcf-base/terraform/tfvars-examples` for the full list of node configurations and deployment options. Though the `byoc` configuration may support a self-hosted stack deployment, it is primarily meant for BYOC cluster deployments with NVIDIA-managed NVCF control plane services (see [cluster-setup-management](./cluster-management)).
+Please refer to the codebase `nvcf-base/terraform/tfvars-examples` for the full list of node configurations and deployment options. Though the `byoc` configuration may support a self-hosted stack deployment, it is primarily meant for BYOC cluster deployments with NVIDIA-managed NVCF control plane services (see [cluster-setup-management](./cluster-management/index.md)).
 
 <Note>
 You can customize node pools (instance types, capacities, and configurations) by copying one of the example tfvars files from `terraform/tfvars-examples/` to your environment directory and modifying it to match your requirements.
@@ -138,7 +138,7 @@ Replace `<your-environment>` with your environment name (e.g., `nvcf-prod`, `sta
 
 ### Step 2: Configure Environment
 
-Edit `terraform/envs/<your-environment>/terraform.tfvars` to match your requirements. The key sections are described below. Feel free to use this example terraform.tfvars directly to bring up an EKS cluster ready for NVCF self-hosted control plane deployment. LLS (Low Latency Streaming) is disabled by default; enable it only if you plan to deploy simulation or streaming VM workloads (see [self-hosted-lls-installation](./lls-installation)).
+Edit `terraform/envs/<your-environment>/terraform.tfvars` to match your requirements. The key sections are described below. Feel free to use this example terraform.tfvars directly to bring up an EKS cluster ready for NVCF self-hosted control plane deployment. LLS (Low Latency Streaming) is disabled by default; enable it only if you plan to deploy simulation or streaming VM workloads (see [self-hosted-lls-installation](./lls-installation.md)).
 
 <Accordion title="Example terraform.tfvars Configuration">
 </Accordion>
@@ -359,9 +359,9 @@ Requires `NGC_API_KEY` environment variable set before running `terraform apply`
 
 </Info>
 
-See [ecr-automated-mirroring](./image-mirroring) for details on what's included (control plane, LLS, worker components) and what's not (simulation cache, custom streaming apps).
+See [ecr-automated-mirroring](./image-mirroring.md) for details on what's included (control plane, LLS, worker components) and what's not (simulation cache, custom streaming apps).
 
-If you're not using ECR or prefer manual mirroring, set `create_sm_ecr_repos = false` and follow [self-hosted-image-mirroring](./image-mirroring).
+If you're not using ECR or prefer manual mirroring, set `create_sm_ecr_repos = false` and follow [self-hosted-image-mirroring](./image-mirroring.md).
 
 **GPU Node Configuration**
 
@@ -560,8 +560,8 @@ The GPU Operator installs:
 
 With the infrastructure and GPU Operator deployed:
 
-1. Begin control plane deployment by following [helmfile-installation](./helmfile-installation).
-2. Deploy optional application components (including simulation components such as DDCS, UCC, Storage API, LLS) under `nvcf-base/core-apps`. See [self-hosted-optional-enhancements](./optional-enhancements).
+1. Begin control plane deployment by following [helmfile-installation](./helmfile-installation.md).
+2. Deploy optional application components (including simulation components such as DDCS, UCC, Storage API, LLS) under `nvcf-base/core-apps`. See [self-hosted-optional-enhancements](./optional-enhancements.md).
 
 ## Operations
 
@@ -587,7 +587,7 @@ helmfile apply --selector component=gpu
 ```
 
 <Note>
-To upgrade optional enhancements (container caching, simulation caching, LLS), re-run the corresponding `make deploy-*` commands from [self-hosted-optional-enhancements](./optional-enhancements).
+To upgrade optional enhancements (container caching, simulation caching, LLS), re-run the corresponding `make deploy-*` commands from [self-hosted-optional-enhancements](./optional-enhancements.md).
 
 </Note>
 

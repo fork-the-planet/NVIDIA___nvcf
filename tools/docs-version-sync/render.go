@@ -148,7 +148,7 @@ func renderManifestArtifactRegistryPaths(catalog *Catalog) (string, error) {
 		},
 		{
 			Heading:     "Observability Components",
-			Description: "Optional example components for monitoring and observability. These are provided as reference implementations only and are not intended for production use. See [self-hosted-example-dashboards](./example-dashboards) for deployment instructions.",
+			Description: "Optional example components for monitoring and observability. These are provided as reference implementations only and are not intended for production use. See [self-hosted-example-dashboards](./example-dashboards.md) for deployment instructions.",
 			Names: []string{
 				"nvcf-observability-reference-stack",
 				"nvcf-example-dashboards",

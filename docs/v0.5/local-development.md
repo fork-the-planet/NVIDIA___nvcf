@@ -19,7 +19,7 @@ This guide assumes:
 
 If you are using a different registry (e.g., Amazon ECR, a private Harbor instance, or a
 local mirror), update the `helm.sources` and `image` sections in the environment file
-and adjust the pull secret configuration accordingly. See [self-hosted-image-mirroring](./image-mirroring)
+and adjust the pull secret configuration accordingly. See [self-hosted-image-mirroring](./image-mirroring.md)
 for details on mirroring artifacts to other registries.
 
 <Tip>
@@ -110,7 +110,7 @@ kubectl get nodes
 ### Step 2: Install the Fake GPU Operator
 
 The fake GPU operator simulates GPU resources on the pre-labeled nodes so the NVCA agent
-can discover them. See [fake-gpu-operator](./fake-gpu-operator) for full details.
+can discover them. See [fake-gpu-operator](./fake-gpu-operator.md) for full details.
 
 ```bash
 # Install KWOK (required by the fake GPU operator)
@@ -149,7 +149,7 @@ helm install csi-driver-smb csi-driver-smb/csi-driver-smb \
 
 ### Deploy the NVCF Stack
 
-With the cluster ready, follow the [helmfile-installation](./helmfile-installation) guide. The steps
+With the cluster ready, follow the [helmfile-installation](./helmfile-installation.md) guide. The steps
 below call out the local-specific differences for each step.
 
 ## Step 1 (Ingress)

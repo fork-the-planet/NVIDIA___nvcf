@@ -3,10 +3,10 @@
 This section covers the installation of the NVCF control plane components, which are required for all self-hosted NVCF deployments.
 
 By default, the NVCF self-hosted stack is deployed using the provided Helmfile as described here. However, you can also install each Helm chart
-individually using `helm install` or `helm upgrade` (see [self-hosted-standalone-deployment](./standalone-deployment)).
+individually using `helm install` or `helm upgrade` (see [self-hosted-standalone-deployment](./standalone-deployment.md)).
 
 <Info>
-This guide assumes you have already downloaded and extracted the `nvcf-self-managed-stack` helmfile bundle (see [download-nvcf-self-managed-stack](./image-mirroring)). All commands in this guide are run from inside the extracted `nvcf-self-managed-stack/` directory unless otherwise noted. The directory contains the helmfile definitions, environment templates, and sample configurations referenced throughout.
+This guide assumes you have already downloaded and extracted the `nvcf-self-managed-stack` helmfile bundle (see [download-nvcf-self-managed-stack](./image-mirroring.md)). All commands in this guide are run from inside the extracted `nvcf-self-managed-stack/` directory unless otherwise noted. The directory contains the helmfile definitions, environment templates, and sample configurations referenced throughout.
 
 ```bash
 cd path/to/nvcf-self-managed-stack
@@ -60,11 +60,11 @@ Helmfile `1.3.0+` re-introduced sequential execution via the `--sequential-helmf
 
 - A kubernetes cluster (CSP agnostic or on-prem).
 - Kubernetes Gateway CRDs installed (optional, required for Gateway API Ingress)
-- Artifacts must be available in a registry that your Kubernetes cluster can access. This can be the `nvcf-onprem` registry for NVCF control plane service artifacts, but function containers and helm charts must be configured to a user-managed registry. See [self-hosted-artifact-manifest](./manifest) and [self-hosted-image-mirroring](./image-mirroring).
-- The `nvcf-self-managed-stack` repository must be downloaded to your local machine (see [download-nvcf-self-managed-stack](./image-mirroring)).
+- Artifacts must be available in a registry that your Kubernetes cluster can access. This can be the `nvcf-onprem` registry for NVCF control plane service artifacts, but function containers and helm charts must be configured to a user-managed registry. See [self-hosted-artifact-manifest](./manifest.md) and [self-hosted-image-mirroring](./image-mirroring.md).
+- The `nvcf-self-managed-stack` repository must be downloaded to your local machine (see [download-nvcf-self-managed-stack](./image-mirroring.md)).
 
 <Note>
-See [terraform-installation](./terraform-installation) for instructions on how to deploy a Kubernetes cluster on EKS or other CSPs if you don't have one already.
+See [terraform-installation](./terraform-installation.md) for instructions on how to deploy a Kubernetes cluster on EKS or other CSPs if you don't have one already.
 
 </Note>
 
@@ -106,7 +106,7 @@ If your client is too new, install a matching version directly from the [Kuberne
 
 - Personal **NGC API Key** from [ngc.nvidia.com](https://ngc.nvidia.com) authenticated with `nvcf-onprem` organization **only if** you pull artifacts directly from NGC or use NGC as your registry
 
-- **Registry credentials** for your container registry (ECR, NGC, etc.) - see [third-party-registries-self-hosted](./third-party-registries) for setup instructions
+- **Registry credentials** for your container registry (ECR, NGC, etc.) - see [third-party-registries-self-hosted](./third-party-registries.md) for setup instructions
 
 - **Local Helm/Docker authentication** to your container registry where NVCF charts are stored. Helmfile pulls OCI charts during deployment, so your local environment must be authenticated. Examples:
 
@@ -251,7 +251,7 @@ If the address changes after deployment, you must update the `domain` in your en
 </Warning>
 
 <Note>
-The Gateway you created here will be used by the `nvcf-gateway-routes` chart to create HTTPRoutes and TCPRoutes for NVCF services. For details on how routing works, verification commands, and production DNS/HTTPS setup, see [gateway-routing](./gateway-routing).
+The Gateway you created here will be used by the `nvcf-gateway-routes` chart to create HTTPRoutes and TCPRoutes for NVCF services. For details on how routing works, verification commands, and production DNS/HTTPS setup, see [gateway-routing](./gateway-routing.md).
 
 </Note>
 
@@ -454,7 +454,7 @@ nodeSelectors:
 
 #### `cassandra` Resource Tuning
 
-The default Cassandra resource limits may be insufficient for clusters with large instance types (e.g., `p5.48xlarge`), causing Cassandra pods to be OOM-killed during initialization. If you observe Cassandra pods restarting with `OOMKilled` status, increase the Cassandra resource requests and limits using a Helmfile release values override (see [overriding-helm-chart-values](./helmfile-installation)).
+The default Cassandra resource limits may be insufficient for clusters with large instance types (e.g., `p5.48xlarge`), causing Cassandra pods to be OOM-killed during initialization. If you observe Cassandra pods restarting with `OOMKilled` status, increase the Cassandra resource requests and limits using a Helmfile release values override (see [overriding-helm-chart-values](./helmfile-installation.md)).
 
 Add a `values` block to the cassandra release in `helmfile.d/01-dependencies.yaml.gotmpl`:
 
@@ -521,9 +521,9 @@ image:
 ```
 
 <Warning>
-If you have mirrored NVCF artifacts to your own registry (e.g., ECR), update both `helm.sources` and `image` to point to your mirror. See [self-hosted-image-mirroring](./image-mirroring) for details on mirroring artifacts.
+If you have mirrored NVCF artifacts to your own registry (e.g., ECR), update both `helm.sources` and `image` to point to your mirror. See [self-hosted-image-mirroring](./image-mirroring.md) for details on mirroring artifacts.
 
-**When upgrading to a new** `nvcf-self-managed-stack` **version**, you must re-mirror all artifacts before running `helmfile sync`. Each stack release may introduce new or updated container images and Helm charts. If these are not present in your private registry, pods will fail with `ImagePullBackOff`. Check the [self-hosted-artifact-manifest](./manifest) for the complete list of required artifacts and versions.
+**When upgrading to a new** `nvcf-self-managed-stack` **version**, you must re-mirror all artifacts before running `helmfile sync`. Each stack release may introduce new or updated container images and Helm charts. If these are not present in your private registry, pods will fail with `ImagePullBackOff`. Check the [self-hosted-artifact-manifest](./manifest.md) for the complete list of required artifacts and versions.
 
 </Warning>
 
@@ -533,7 +533,7 @@ If you have mirrored NVCF artifacts to your own registry (e.g., ECR), update bot
 </Note>
 
 <Note>
-These settings control *where* images are pulled from, not *how* Kubernetes authenticates to pull them. If your `image` registry is private, you may also need to configure image pull secrets -- see [Step 4](./helmfile-installation).
+These settings control *where* images are pulled from, not *how* Kubernetes authenticates to pull them. If your `image` registry is private, you may also need to configure image pull secrets -- see [Step 4](./helmfile-installation.md).
 
 </Note>
 
@@ -604,7 +604,7 @@ HELMFILE_ENV=<environment-name> helmfile --selector name=cassandra sync
 
 Secrets configuration contains any sensitive data required for NVCF operation. The image pull secret credentials you insert here will be used to bootstrap the NVCF API with registry credentials for all worker components (function sidecars), function containers and helm charts.
 
-These credentials will then be used for function deployments. Note that if the registry credentials are not correct you can always update them using the steps in [third-party-registries-self-hosted](./third-party-registries).
+These credentials will then be used for function deployments. Note that if the registry credentials are not correct you can always update them using the steps in [third-party-registries-self-hosted](./third-party-registries.md).
 
 Create your secrets file from the template below ([example-secrets.yaml](samples/configs/cp-example-secrets.yaml)). You must replace all instances of `REPLACE_WITH_BASE64_DOCKER_CREDENTIAL` with your actual base64-encoded registry credentials.
 
@@ -672,7 +672,7 @@ NVCF supports these registries for function containers (set in api.accountBootst
 
 #### Generating Base64-encoded Registry Credentials
 
-Registry credentials must be base64-encoded in the format `username:password`. For detailed instructions on setting up credentials for specific registries (including IAM user creation for ECR), see [third-party-registries-self-hosted](./third-party-registries).
+Registry credentials must be base64-encoded in the format `username:password`. For detailed instructions on setting up credentials for specific registries (including IAM user creation for ECR), see [third-party-registries-self-hosted](./third-party-registries.md).
 
 <Tabs>
 <Tab title="NGC Registry">
@@ -686,7 +686,7 @@ echo -n '$oauthtoken:YOUR_NGC_API_KEY' | base64 -w 0
 
 <Tab title="Amazon ECR">
 
-For AWS ECR, NVCF requires **permanent IAM credentials**. You must first create a dedicated IAM user with ECR permissions. See [ecr-registry-setup](./third-party-registries) for complete setup instructions.
+For AWS ECR, NVCF requires **permanent IAM credentials**. You must first create a dedicated IAM user with ECR permissions. See [ecr-registry-setup](./third-party-registries.md) for complete setup instructions.
 
 Once you have created the IAM user and obtained the access keys:
 
@@ -702,7 +702,7 @@ echo -n "${ACCESS_KEY_ID}:${SECRET_ACCESS_KEY}" | base64 -w 0
 
 <Tab title="VolcEngine CR">
 
-Once you have your VolcEngine Access Key ID and Secret Access Key (see [vcr-registry-setup](./third-party-registries) for full details):
+Once you have your VolcEngine Access Key ID and Secret Access Key (see [vcr-registry-setup](./third-party-registries.md) for full details):
 
 ```bash
 # Replace with your VolcEngine Access Key ID and Secret Access Key
@@ -878,7 +878,7 @@ reaches `Completed` and the `cassandra-migrations` job completes successfully.
 </Note>
 
 <Tip>
-If any pod remains in `Pending`, `ContainerCreating`, or `ImagePullBackOff` state for more than 5 minutes, see [self-hosted-troubleshooting](./troubleshooting) for issue identification commands and solutions.
+If any pod remains in `Pending`, `ContainerCreating`, or `ImagePullBackOff` state for more than 5 minutes, see [self-hosted-troubleshooting](./troubleshooting.md) for issue identification commands and solutions.
 
 </Tip>
 
@@ -1020,7 +1020,7 @@ kubectl get tcproutes -A
 ```
 
 <Tip>
-If you encounter issues during deployment, consult the [self-hosted-troubleshooting](./troubleshooting) guide for common problems and solutions.
+If you encounter issues during deployment, consult the [self-hosted-troubleshooting](./troubleshooting.md) guide for common problems and solutions.
 
 </Tip>
 
@@ -1070,7 +1070,7 @@ curl -s -X GET "http://${GATEWAY_ADDR}/v2/nvcf/functions" \
 
 ## Next Steps
 
-After the control plane installation is successfully complete, proceed to [self-managed-clusters](./self-managed-clusters) to set up GPU cluster operations.
+After the control plane installation is successfully complete, proceed to [self-managed-clusters](./cluster-management/self-managed.md) to set up GPU cluster operations.
 
 ## Uninstalling
 

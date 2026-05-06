@@ -20,7 +20,7 @@ The observability solution currently provides:
 
 <Note>
 **Looking for a quick start?** If you want to quickly deploy example observability components
-to explore metrics, logs, and dashboards, see [self-hosted-example-dashboards](./example-dashboards).
+to explore metrics, logs, and dashboards, see [self-hosted-example-dashboards](./example-dashboards.md).
 
 The example deployments are designed for development and testing only, and are not suitable
 for production use. For production deployments, follow the guidance on this page to integrate

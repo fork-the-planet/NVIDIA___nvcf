@@ -166,9 +166,9 @@ HTTPS.
 
 | Install path | Gateway values to use |
 | --- | --- |
-| [Quickstart](./quickstart) | Complete [Configure the CLI for one-click](./gateway-routing#configure-the-cli-for-one-click), then run `nvcf-cli self-hosted up`. |
-| [Helmfile Installation](./helmfile-installation) | Use `GATEWAY_ADDR` as `global.domain`, and set `ingress.gatewayApi.gateways` to the Gateway names, namespaces, and listener names from Gateway quickstart. |
-| [Standalone Gateway](./standalone-gateway) | Use `GATEWAY_ADDR` as `nvcfGatewayRoutes.domain`, and set `nvcfGatewayRoutes.gateways` to the Gateway names and namespaces from Gateway quickstart. |
+| [Quickstart](./quickstart.md) | Complete [Configure the CLI for one-click](./gateway-routing.md#configure-the-cli-for-one-click), then run `nvcf-cli self-hosted up`. |
+| [Helmfile Installation](./helmfile-installation.md) | Use `GATEWAY_ADDR` as `global.domain`, and set `ingress.gatewayApi.gateways` to the Gateway names, namespaces, and listener names from Gateway quickstart. |
+| [Standalone Gateway](./standalone-gateway.md) | Use `GATEWAY_ADDR` as `nvcfGatewayRoutes.domain`, and set `nvcfGatewayRoutes.gateways` to the Gateway names and namespaces from Gateway quickstart. |
 
 ## Configure the CLI for one-click
 
@@ -235,7 +235,7 @@ To use a different Gateway API implementation instead of Envoy Gateway:
 
 1. **Install your chosen controller** following its documentation
 
-2. **Create namespaces** with `nvcf/platform=true` labels as shown in [Gateway quickstart](./gateway-routing#gateway-quickstart)
+2. **Create namespaces** with `nvcf/platform=true` labels as shown in [Gateway quickstart](./gateway-routing.md#gateway-quickstart)
 
 3. **Create a GatewayClass** for your controller
 
@@ -299,7 +299,7 @@ When you deploy the control plane via helmfile, the `nvcf-gateway-routes` chart 
 - **TCPRoute** for gRPC
 - **ReferenceGrants** for cross-namespace routing permissions
 
-These routes attach to the Gateway you prepared in [Gateway quickstart](./gateway-routing#gateway-quickstart).
+These routes attach to the Gateway you prepared in [Gateway quickstart](./gateway-routing.md#gateway-quickstart).
 
 ### Route Configuration
 
@@ -391,7 +391,7 @@ The Envoy Gateway uses hostname-based routing to direct traffic to different bac
 Without the correct `Host` header, the gateway cannot match the request to an HTTPRoute and returns 404.
 
 <Warning>
-**Host header routing only works with plaintext HTTP traffic.** Without TLS/SNI spoofing support in your client, you cannot use HTTPS with this method. The TLS handshake occurs before the Host header is sent, so the server cannot route based on a custom Host header when using HTTPS. For encrypted traffic, use proper DNS records as described in [production-dns-https](./gateway-routing).
+**Host header routing only works with plaintext HTTP traffic.** Without TLS/SNI spoofing support in your client, you cannot use HTTPS with this method. The TLS handshake occurs before the Host header is sent, so the server cannot route based on a custom Host header when using HTTPS. For encrypted traffic, use proper DNS records as described in [production-dns-https](./gateway-routing.md).
 
 </Warning>
 
@@ -420,7 +420,7 @@ api_host: "api.a1b2c3d4.us-west-2.elb.amazonaws.com"
 invoke_host: "invocation.a1b2c3d4.us-west-2.elb.amazonaws.com"
 ```
 
-See [cli-configuration](./cli) for complete CLI configuration documentation.
+See [cli-configuration](./cli.md) for complete CLI configuration documentation.
 
 ## Production: DNS and HTTPS
 
@@ -666,7 +666,7 @@ For gRPC connection problems:
 
 ## Related Documentation
 
-- [helmfile-installation](./helmfile-installation) - Helmfile values that consume Gateway quickstart outputs
-- [cli-configuration](./cli) - CLI configuration including Host header settings
+- [helmfile-installation](./helmfile-installation.md) - Helmfile values that consume Gateway quickstart outputs
+- [cli-configuration](./cli.md) - CLI configuration including Host header settings
 - [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/)
 - [Envoy Gateway](https://gateway.envoyproxy.io/)

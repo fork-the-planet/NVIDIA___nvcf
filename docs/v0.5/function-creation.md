@@ -7,15 +7,15 @@ Functions can be created in one of two ways:
 1. Custom Container
    - Enables any container-based workload as long as the container exposes an inference endpoint and a health check.
    - Option to leverage any server, ex. [PyTriton](https://triton-inference-server.github.io/pytriton/), [FastAPI](https://fastapi.tiangolo.com/), [Triton](https://developer.nvidia.com/triton-inference-server).
-   - See [Container-Based Function Creation](./container-functions).
+   - See [Container-Based Function Creation](./container-functions.md).
 
 2. Helm Chart
    - Enables orchestration across multiple containers. For complex use cases where a single container isn't flexible enough.
    - Requires one "mini-service" container defined as the inference entry point for the function.
    - Does not support partial response reporting, gRPC or HTTP streaming-based invocation.
-   - See [Helm-Based Function Creation](./helm-functions).
+   - See [Helm-Based Function Creation](./helm-functions.md).
 
-Additionally, Cloud Functions supports [Low Latency Streaming (LLS) functions](./streaming-functions) for video, audio, and data streaming via WebRTC.
+Additionally, Cloud Functions supports [Low Latency Streaming (LLS) functions](./streaming-functions.md) for video, audio, and data streaming via WebRTC.
 
 ## Best Practices
 

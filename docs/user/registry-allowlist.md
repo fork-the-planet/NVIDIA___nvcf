@@ -17,7 +17,7 @@ Use this only if all of the following are true:
 - Your cluster (kubelet or the worker init container) can already pull from that registry.
 - You accept that the NVCF API will not pre-validate that the image exists at function-create time. Any pull failure surfaces later as `ErrImagePull` on the workload pod.
 
-If the registry you need is in the supported list (ECR, NGC, ACR, VolcEngine, Artifactory, Harbor), follow the standard registry guidance instead. See [Working with Third-Party Registries](./third-party-registries).
+If the registry you need is in the supported list (ECR, NGC, ACR, VolcEngine, Artifactory, Harbor), follow the standard registry guidance instead. See [Working with Third-Party Registries](./third-party-registries.md).
 
 ## Step 1: Apply the Helm env vars
 

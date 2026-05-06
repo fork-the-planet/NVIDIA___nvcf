@@ -11,7 +11,7 @@ In NVCF, **third-party registries** refer to container registries used for hosti
 
 When a function is created or deployed, these credentials are used by different components:
 
-1. **NVCF API** - Stores and manages registry credentials, validates that images exist during function creation. See [self-hosted-api](./api) for the full API specification.
+1. **NVCF API** - Stores and manages registry credentials, validates that images exist during function creation. See [self-hosted-api](./api.md) for the full API specification.
 2. **NVCA (Cluster Agent)** - Renders Helm charts or pod specs for container functions and handles deployment lifecycle. Generates image pull credentials based on the registry type.
 3. **Worker init container** - Responsible for pulling the function container images during deployment.
 
@@ -456,7 +456,7 @@ The `registryHostname` in your credentials must **exactly match** the hostname p
 
 1. Verify you are using permanent IAM user credentials (Access Key ID + Secret Access Key), not temporary credentials
 2. Re-generate the base64-encoded credential ensuring the format is exactly `ACCESS_KEY_ID:SECRET_ACCESS_KEY` with no trailing newlines etc.
-3. If using SSO/assumed roles, create a dedicated IAM user instead. See [ecr-registry-setup](./third-party-registries)
+3. If using SSO/assumed roles, create a dedicated IAM user instead. See [ecr-registry-setup](./third-party-registries.md)
 
 ### Registry Not Found
 

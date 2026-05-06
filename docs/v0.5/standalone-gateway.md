@@ -5,7 +5,7 @@ two parts: the Envoy Gateway infrastructure and the NVCF Gateway Routes chart th
 HTTPRoutes and TCPRoutes for each service.
 
 <Info>
-All core services from [standalone-core-services](./standalone-core-services) must be running before proceeding.
+All core services from [standalone-core-services](./standalone-core-services.md) must be running before proceeding.
 The Gateway Routes chart depends on the Notary Service and API Keys being available.
 
 </Info>
@@ -194,13 +194,13 @@ kubectl get tcproutes -A
 
 <Note>
 For details on how routing works, verification commands, and production DNS/HTTPS setup,
-see [gateway-routing](./gateway-routing).
+see [gateway-routing](./gateway-routing.md).
 
 </Note>
 
 ## Enable Admin Issuer Proxy Route
 
-The Admin Token Issuer Proxy was installed in [standalone-core-services](./standalone-core-services) with
+The Admin Token Issuer Proxy was installed in [standalone-core-services](./standalone-core-services.md) with
 `gateway.enabled: false` because the Gateway CRDs did not yet exist. Now that the Gateway
 is running, upgrade it to enable the admin endpoint HTTPRoute:
 
@@ -362,5 +362,5 @@ kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/downlo
 ## Next Steps
 
 Your NVCF control plane is now fully installed and accessible. Proceed to
-[self-managed-clusters](./self-managed-clusters) to install the NVCA Operator and connect your GPU nodes
+[self-managed-clusters](./cluster-management/self-managed.md) to install the NVCA Operator and connect your GPU nodes
 to the control plane.

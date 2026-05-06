@@ -2,11 +2,11 @@
 
 This guide provides information for deploying and operating NVCF in self-managed environments.
 
-- [Deployment](./installation-overview)
+- [Deployment](./installation.md)
   : Install the NVCF control plane and connect GPU clusters.
-- [Configuration](./optional-enhancements)
+- [Configuration](./optional-enhancements.md)
   : Configure gateway routing, registries, and optional enhancements.
-- [Using Cloud Functions](./api)
+- [Using Cloud Functions](./api.md)
   : Create and invoke functions using the NVCF API and CLI.
 
 <Warning>

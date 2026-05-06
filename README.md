@@ -69,7 +69,7 @@ Kubernetes resources.
 | Compute plane | [`src/compute-plane-services/`](src/compute-plane-services/) | GPU cluster integration, cache services, image credentials, ESS Agent, and telemetry collection. |
 | CLI and libraries | [`src/clis/`](src/clis/), [`src/libraries/`](src/libraries/) | User and developer clients plus shared Go and Python code. |
 | Deployment | [`deploy/`](deploy/), [`migrations/`](migrations/) | Helm charts, stack installation, infrastructure services, and datastore migrations. |
-| Documentation | [`docs/user/`](docs/user/), [`docs/dev/`](docs/dev/), [`fern/`](fern/) | Self-managed user docs, developer docs, and published docs navigation. |
+| Documentation | [`docs/user/`](docs/user/index.md), [`docs/dev/`](docs/dev/), [`fern/`](fern/) | Self-managed user docs, developer docs, and published docs navigation. |
 | Examples | [`examples/`](examples/) | Local development guides, function samples, and load-test assets. |
 | Tools | [`tools/`](tools/) | Build, docs, dependency, license, and validation utilities. |
 | AI tooling | [`ai-tooling/`](ai-tooling/) | Public agent skills and workflow helpers for NVCF users and developers. |

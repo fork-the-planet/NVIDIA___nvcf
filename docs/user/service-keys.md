@@ -96,7 +96,7 @@ cover the most common causes.
 
 > Each API operation requires a specific scope. If your key was not configured with that scope,
 > the request will be rejected with a 403. Verify the scope your key has against the
-> [Scope Requirements Matrix](./service-keys) and regenerate the key with the
+> [Scope Requirements Matrix](./service-keys.md) and regenerate the key with the
 > correct scope if needed.
 >
 > *Example:* Calling the deploy API with a key that only has the **Register Function** scope
@@ -109,7 +109,7 @@ cover the most common causes.
 >
 > *Example:* A key with **Manage Registry Credentials** and resource type **All Functions** will
 > be rejected — this scope requires the **All Entity** resource type. See the important note in
-> the [Resource Types](./service-keys) section for the full list of scopes that
+> the [Resource Types](./service-keys.md) section for the full list of scopes that
 > require **All Entity**.
 
 **Key is scoped to a specific Function but the request targets a different function**

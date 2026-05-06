@@ -1,6 +1,6 @@
 # Helm Chart Installation
 
-For a fresh install, start with the [Quickstart](./quickstart). Use standalone chart installation when you want to install each Helm chart individually using `helm install` or `helm upgrade`. This is useful when:
+For a fresh install, start with the [Quickstart](./quickstart.md). Use standalone chart installation when you want to install each Helm chart individually using `helm install` or `helm upgrade`. This is useful when:
 
 - You want fine-grained control over each component's deployment
 - Your environment doesn't support Helmfile
@@ -21,11 +21,11 @@ wrong namespace will cause authentication failures such as
 The standalone installation follows five phases. Each phase must complete successfully
 before proceeding to the next.
 
-1. [Prerequisites](./standalone-prerequisites): Shared setup: tools, namespaces, pull secrets, configuration variables
-2. [Infrastructure Dependencies](./standalone-infrastructure): NATS, OpenBao, Cassandra
-3. [Core Services](./standalone-core-services): API Keys, SIS, ESS API, NVCF API, Invocation Service, gRPC Proxy, Notary Service, Admin Issuer Proxy
-4. [Gateway & Ingress](./standalone-gateway): Envoy Gateway, Gateway Routes, end-to-end verification
-5. [NVCA Operator](./cluster-management/self-managed): Cluster agent for GPU workload scheduling (in Cluster Management section)
+1. [Prerequisites](./standalone-prerequisites.md): Shared setup: tools, namespaces, pull secrets, configuration variables
+2. [Infrastructure Dependencies](./standalone-infrastructure.md): NATS, OpenBao, Cassandra
+3. [Core Services](./standalone-core-services.md): API Keys, SIS, ESS API, NVCF API, Invocation Service, gRPC Proxy, Notary Service, Admin Issuer Proxy
+4. [Gateway & Ingress](./standalone-gateway.md): Envoy Gateway, Gateway Routes, end-to-end verification
+5. [NVCA Operator](./cluster-management/self-managed.md): Cluster agent for GPU workload scheduling (in Cluster Management section)
 
 ## Chart Inventory
 
@@ -72,7 +72,7 @@ The NVCA Operator is installed last, after the control plane is running.
 
 | Chart | Description | Namespace |
 | --- | --- | --- |
-| `helm-nvca-operator` | NVIDIA Cluster Agent Operator (see [Self-Managed Clusters](./cluster-management/self-managed)) | `nvca-operator` |
+| `helm-nvca-operator` | NVIDIA Cluster Agent Operator (see [Self-Managed Clusters](./cluster-management/self-managed.md)) | `nvca-operator` |
 
 ## Chart Sources
 
@@ -88,4 +88,4 @@ helm upgrade --install api -n nvcf \
   -f values.yaml
 ```
 
-For the full list of NVCF artifacts to mirror, see [self-hosted-artifact-manifest](./manifest).
+For the full list of NVCF artifacts to mirror, see [self-hosted-artifact-manifest](./manifest.md).

@@ -2,12 +2,12 @@
 
 Self-hosted NVCF installation includes the core components required for NVCF inference. Additional optional components such as caching and low latency streaming support are also available.
 
-For a full list of required artifacts, see [self-hosted-artifact-manifest](./manifest).
+For a full list of required artifacts, see [self-hosted-artifact-manifest](./manifest.md).
 
 ![Self-hosted component overview](images/self-hosted-component-overview.png)
 
 <Tip>
-Want to try NVCF locally first? See [local-development](./local-development) for a guide to running
+Want to try NVCF locally first? See [local-development](./local-development.md) for a guide to running
 the full stack on your laptop using k3d.
 
 </Tip>
@@ -18,21 +18,21 @@ Installation steps are as follows:
 
 1. **Mirror NVCF artifacts to your registry** — Choose your mirroring approach based on your deployment method:
 
-   - **Terraform with EKS/ECR (Recommended):** Use [Automated ECR Mirroring](./image-mirroring) by setting `create_sm_ecr_repos = true` in your Terraform configuration. This handles all image and Helm chart mirroring automatically.
-   - **All other deployments:** Follow the [manual mirroring instructions](./image-mirroring) to pull artifacts from NGC and push to your registry.
+   - **Terraform with EKS/ECR (Recommended):** Use [Automated ECR Mirroring](./image-mirroring.md) by setting `create_sm_ecr_repos = true` in your Terraform configuration. This handles all image and Helm chart mirroring automatically.
+   - **All other deployments:** Follow the [manual mirroring instructions](./image-mirroring.md) to pull artifacts from NGC and push to your registry.
 
-2. **Create a Kubernetes cluster** (Optional, can bring any existing Kubernetes cluster or create an EKS cluster from example Terraform, see [terraform-installation](./terraform-installation))
+2. **Create a Kubernetes cluster** (Optional, can bring any existing Kubernetes cluster or create an EKS cluster from example Terraform, see [terraform-installation](./terraform-installation.md))
 
 3. **Install NVCF Self-hosted Control Plane** (Required) — Choose your installation method:
 
-   - [helmfile-installation](./helmfile-installation) *(recommended)* — automated deployment using `helmfile`. **Use Helmfile < 1.2.0** (see [helmfile-installation](./helmfile-installation) prerequisites for details).
-   - [self-hosted-standalone-deployment](./standalone-deployment) — individual `helm install` commands, for fine-grained control or GitOps pipelines.
+   - [helmfile-installation](./helmfile-installation.md) *(recommended)* — automated deployment using `helmfile`. **Use Helmfile < 1.2.0** (see [helmfile-installation](./helmfile-installation.md) prerequisites for details).
+   - [self-hosted-standalone-deployment](./standalone-deployment.md) — individual `helm install` commands, for fine-grained control or GitOps pipelines.
 
-4. **Install Low Latency Streaming** (Optional, for streaming workloads, see [self-hosted-lls-installation](./lls-installation))
+4. **Install Low Latency Streaming** (Optional, for streaming workloads, see [self-hosted-lls-installation](./lls-installation.md))
 
-5. **Install Optional GPU Cluster Enhancements** (Optional, such as caching components, see [self-hosted-optional-enhancements](./optional-enhancements))
+5. **Install Optional GPU Cluster Enhancements** (Optional, such as caching components, see [self-hosted-optional-enhancements](./optional-enhancements.md))
 
-6. **Configure the NVIDIA Cluster Agent** (Optional, for GPU clusters that run functions; see [self-managed-clusters](./self-managed-clusters))
+6. **Configure the NVIDIA Cluster Agent** (Optional, for GPU clusters that run functions; see [self-managed-clusters](./cluster-management/self-managed.md))
 
 ## Kubernetes Cluster Requirements
 
@@ -59,7 +59,7 @@ See [NVIDIA GPU Operator documentation](https://docs.nvidia.com/datacenter/cloud
 **Fake GPU Operator for Development/Testing:**
 
 For environments without actual GPU hardware, install the fake GPU operator to simulate
-GPU resources. See [fake-gpu-operator](./fake-gpu-operator) for full instructions.
+GPU resources. See [fake-gpu-operator](./fake-gpu-operator.md) for full instructions.
 </Note>
 
 **Network Policies**
@@ -81,7 +81,7 @@ Some cloud providers have minimum PVC size requirements. For example, AWS EBS gp
 
 ### Cluster Sizing and Storage
 
-See [infrastructure-sizing](./infrastructure-sizing) for node pool specifications, storage
+See [infrastructure-sizing](./infrastructure-sizing.md) for node pool specifications, storage
 recommendations, and three recommended sizing tiers (Development, Minimal HA,
 and Production).
 

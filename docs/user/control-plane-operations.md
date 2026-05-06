@@ -15,7 +15,7 @@ When a user stores a secret through the NVCF API, ESS encrypts it with the activ
 
 ### Key Rotation Runbooks
 
-- [control-plane-runbook-mek-rotation](runbooks/control-plane-key-rotation-mek) — Rotate the master encryption key stored in OpenBAO.
+- [control-plane-runbook-mek-rotation](runbooks/control-plane-key-rotation-mek.md) — Rotate the master encryption key stored in OpenBAO.
 
 ## Basic Operations
 
@@ -290,4 +290,4 @@ rollback.
 
 ## Observability
 
-For observability configuration and reference architecture, see [self-hosted-observability](./observability).
+For observability configuration and reference architecture, see [self-hosted-observability](./observability.md).

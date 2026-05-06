@@ -132,7 +132,7 @@ The recommended sequence is:
 1. Install KWOK
 2. Install fake-gpu-operator and label target nodes
 3. Verify `nvidia.com/gpu` appears in node allocatable resources
-4. Proceed with the [control-plane installation](./helmfile-installation)
+4. Proceed with the [control-plane installation](./helmfile-installation.md)
 
 ### If Installed After the Control Plane
 
@@ -154,7 +154,7 @@ kubectl rollout status deployment nvca-operator -n nvca-operator --timeout=120s
 The operator restart will re-run the bootstrap init container, recreate the NVCFBackend
 resource, and spawn a fresh NVCA agent pod that discovers the simulated GPUs.
 
-For details on the bootstrap process, see [self-managed-clusters](cluster-management/self-managed) (Manual Cluster
+For details on the bootstrap process, see [self-managed-clusters](cluster-management/self-managed.md) (Manual Cluster
 Registration).
 
 ## Customization

@@ -16,7 +16,7 @@ inspiration for creating custom dashboards tailored to their observability needs
 - Not supported by NVIDIA for uses beyond example and reference purposes
 
 For production deployments, users should integrate with their own observability infrastructure
-following the guidance in [self-hosted-observability](./observability).
+following the guidance in [self-hosted-observability](./observability.md).
 
 </Warning>
 
@@ -44,7 +44,7 @@ Before deploying the example dashboards, you need:
 <Note>
 To view traces in the example stack, the control-plane must be deployed
 with tracing enabled and configured to send OTLP traces to the
-observability collector. See [Tracing Configuration](./observability)
+observability collector. See [Tracing Configuration](./observability.md)
 for the required Helm overrides under `global.observability.tracing` (e.g.,
 `enabled`, `collectorEndpoint`, `collectorPort`,
 `collectorProtocol`).
@@ -311,11 +311,11 @@ After exploring the example dashboards:
 4. Integrate with your existing enterprise observability platforms
 5. Configure alerting based on your operational requirements
 
-For production deployments, see [self-hosted-observability](./observability) for guidance on integrating
+For production deployments, see [self-hosted-observability](./observability.md) for guidance on integrating
 with your own observability infrastructure.
 
 ## Related Documentation
 
-- [self-hosted-observability](./observability): Production observability configuration
+- [self-hosted-observability](./observability.md): Production observability configuration
 - [nvcf-observability-reference-stack on NGC](https://catalog.ngc.nvidia.com/orgs/0833294136851237/teams/nvcf-ncp-staging/helm-charts/nvcf-observability-reference-stack)
 - [nvcf-example-dashboards on NGC](https://catalog.ngc.nvidia.com/orgs/0833294136851237/teams/nvcf-ncp-staging/helm-charts/nvcf-example-dashboards)

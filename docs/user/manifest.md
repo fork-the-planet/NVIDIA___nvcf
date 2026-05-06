@@ -99,8 +99,8 @@ Services that manage the NVCF platform including API gateway, deployment orchest
 | Chart (OCI) | helm-nvcf-notary-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-notary-service:1.3.1` |
 | Image | reval-server | `nvcr.io/0833294136851237/nvcf-ncp-staging/reval-server:0.15.0` |
 | Chart (OCI) | helm-reval | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-reval:1.3.0` |
-| Image | nv-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/nv-api-keys:0.0.6` |
-| Chart (OCI) | helm-nvcf-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-api-keys:1.3.1` |
+| Image | nv-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/nv-api-keys:0.0.7` |
+| Chart (OCI) | helm-nvcf-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-api-keys:1.4.0` |
 | Image | llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.3.0` |
 | Image | llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.2.0` |
 | Chart (OCI) | helm-nvcf-llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-llm-api-gateway:1.1.0` |
@@ -147,7 +147,7 @@ Optional components for the reference deployment architecture.
 
 #### Observability Components
 
-Optional example components for monitoring and observability. These are provided as reference implementations only and are not intended for production use. See [self-hosted-example-dashboards](./example-dashboards) for deployment instructions.
+Optional example components for monitoring and observability. These are provided as reference implementations only and are not intended for production use. See [self-hosted-example-dashboards](./example-dashboards.md) for deployment instructions.
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
@@ -216,7 +216,7 @@ Helmfile and CLI resources for deployment.
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
-| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.15` |
+| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.16` |
 | Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |
 
 {/* docs-version-sync:END manifest-artifact-registry-paths */}
@@ -246,7 +246,7 @@ Helmfile and CLI resources for deployment.
 | Component Name | Description |
 | --- | --- |
 | spot | Spot Instance Service (SIS) - Manages deployments, cluster and instance state |
-| strap | NVCF API service, refer to [self-hosted-api](./api) for full API specification |
+| strap | NVCF API service, refer to [self-hosted-api](./api.md) for full API specification |
 | helm-nvcf-api | Helm chart for NVCF API service |
 | helm-nvcf-sis | Helm chart for Spot Instance Service |
 | nvcf-grpc-proxy | Used for bi-directional communication and state management |

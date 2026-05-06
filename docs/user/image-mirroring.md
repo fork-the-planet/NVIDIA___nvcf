@@ -1,9 +1,9 @@
 # Image Mirroring
 
-All required self-hosted NVCF artifacts (see [self-hosted-artifact-manifest](./manifest)) must be available to be pulled by pods in your Kubernetes cluster for a successful installation using the helmfile (`nvcf-self-managed-stack`) automation. This page provides examples on how to pull artifacts from NGC and push them to your desired registry.
+All required self-hosted NVCF artifacts (see [self-hosted-artifact-manifest](./manifest.md)) must be available to be pulled by pods in your Kubernetes cluster for a successful installation using the helmfile (`nvcf-self-managed-stack`) automation. This page provides examples on how to pull artifacts from NGC and push them to your desired registry.
 
 <Note>
-**Mirroring images is not the same as configuring image pull secrets.** This page covers how to copy NVCF artifacts into your registry. If your registry is private, Kubernetes also needs credentials to pull those images at runtime. For instructions on configuring image pull secrets for the NVCF control plane pods, see [control-plane-image-pull-secrets](./helmfile-installation) in the installation guide.
+**Mirroring images is not the same as configuring image pull secrets.** This page covers how to copy NVCF artifacts into your registry. If your registry is private, Kubernetes also needs credentials to pull those images at runtime. For instructions on configuring image pull secrets for the NVCF control plane pods, see [control-plane-image-pull-secrets](./helmfile-installation.md) in the installation guide.
 
 </Note>
 
@@ -49,12 +49,12 @@ If you plan to deploy **Low Latency Streaming (LLS)**, you must mirror the follo
 
 - Streaming application images (e.g., `usd-composer`)
 
-See [self-hosted-lls-installation](./lls-installation) for LLS deployment instructions.
+See [self-hosted-lls-installation](./lls-installation.md) for LLS deployment instructions.
 
 ## Pulling Artifacts from NGC
 
 <Warning>
-**Important:** The examples below show how to pull individual artifacts. You must pull **each image, chart, and resource** listed in the [self-hosted-artifact-manifest](./manifest) individually. These examples demonstrate the process for one artifact of each type - you will need to repeat these steps for every artifact required for your deployment.
+**Important:** The examples below show how to pull individual artifacts. You must pull **each image, chart, and resource** listed in the [self-hosted-artifact-manifest](./manifest.md) individually. These examples demonstrate the process for one artifact of each type - you will need to repeat these steps for every artifact required for your deployment.
 
 **Complete the following for each artifact:**
 
@@ -63,7 +63,7 @@ See [self-hosted-lls-installation](./lls-installation) for LLS deployment instru
 - Pull each required resource bundle from NGC
 - Push each artifact to your target registry (ECR, Harbor, etc.)
 
-See the [self-hosted-artifact-manifest](./manifest) for the complete list of all required artifacts.
+See the [self-hosted-artifact-manifest](./manifest.md) for the complete list of all required artifacts.
 
 </Warning>
 
@@ -82,7 +82,7 @@ docker pull --platform linux/amd64 <image>
 docker pull --platform linux/arm64 <image>
 ```
 
-Failing to specify the correct platform will result in `exec format error` when pods attempt to start. See [image-mirroring-troubleshooting](./image-mirroring) for more details.
+Failing to specify the correct platform will result in `exec format error` when pods attempt to start. See [image-mirroring-troubleshooting](./image-mirroring.md) for more details.
 
 </Warning>
 
@@ -182,7 +182,7 @@ First, ensure you have the [NGC CLI installed and configured](https://org.ngc.nv
 
 ```bash
 # Set the stack version
-export STACK_VERSION="0.6.0-rc.15"
+export STACK_VERSION="0.6.0-rc.16"
 
 # Download a specific stack version
 ngc registry resource download-version \
@@ -219,7 +219,7 @@ ngc registry resource list "0833294136851237/nvcf-ncp-staging/nvcf-self-managed-
 
 ```bash
 # Set the version
-export VERSION="0.6.0-rc.15"
+export VERSION="0.6.0-rc.16"
 
 ngc registry resource download-version "0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:${VERSION}" && \
    mkdir -p nvcf-self-managed-stack && \
@@ -275,7 +275,7 @@ The extracted directory contains:
 - `examples/` - Sample configuration files for different environments
 - `USAGE-GUIDE.md` - Detailed usage documentation
 
-See [self-hosted-cli](./cli) for detailed configuration instructions
+See [self-hosted-cli](./cli.md) for detailed configuration instructions
 
 <Note>
 If you don't have access to this repository, contact your NVIDIA representative.
@@ -285,7 +285,7 @@ If you don't have access to this repository, contact your NVIDIA representative.
 ## Pushing to Your Registry
 
 <Info>
-Ensure all artifacts listed in the [self-hosted-artifact-manifest](./manifest) are mirrored to your registry before beginning the installation process.
+Ensure all artifacts listed in the [self-hosted-artifact-manifest](./manifest.md) are mirrored to your registry before beginning the installation process.
 
 </Info>
 

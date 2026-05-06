@@ -2,13 +2,13 @@
 
 This guide provides information for deploying and operating NVCF in self-managed environments.
 
-- [Quickstart](./quickstart)
+- [Quickstart](./quickstart.md)
   : Install the control plane, register a GPU cluster, and validate the deployment with the one-click CLI flow.
-- [Deployment](./installation)
+- [Deployment](./installation.md)
   : Compare the one-click, Helmfile, and standalone chart installation paths.
-- [GPU Cluster Setup](./cluster-management)
+- [GPU Cluster Setup](./cluster-management/index.md)
   : Connect GPU clusters to the NVCF control plane.
-- [Configuration](./optional-enhancements)
+- [Configuration](./optional-enhancements.md)
   : Configure gateway routing, registries, and optional enhancements.
-- [Using Cloud Functions](./api)
+- [Using Cloud Functions](./api.md)
   : Create and invoke functions using the NVCF API and CLI.

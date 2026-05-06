@@ -6,7 +6,7 @@ local OpenBao (Vault) instance.
 
 <Info>
 A running NVCF control plane (SIS, OpenBao, NATS, Cassandra, and all core services) is
-required. The [Quickstart](../quickstart) can install the control plane and register a GPU
+required. The [Quickstart](../quickstart.md) can install the control plane and register a GPU
 cluster in one flow. Use this page when you need to install or operate the NVCA Operator
 manually after using the standalone chart or Helmfile installation path.
 
@@ -16,13 +16,13 @@ manually after using the standalone chart or Helmfile installation path.
 
 Before installing the NVCA Operator, ensure the following prerequisites are met:
 
-- The [control plane](../helmfile-installation) is installed and all core services are running.
+- The [control plane](../helmfile-installation.md) is installed and all core services are running.
 
-- The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) is installed on the GPU cluster. The GPU Operator manages the NVIDIA drivers, device plugin, and GPU feature discovery required for workload scheduling. For development or testing environments without physical GPUs, see [fake-gpu-operator](./fake-gpu-operator).
+- The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) is installed on the GPU cluster. The GPU Operator manages the NVIDIA drivers, device plugin, and GPU feature discovery required for workload scheduling. For development or testing environments without physical GPUs, see [fake-gpu-operator](../fake-gpu-operator.md).
 
-- The [KAI Scheduler](#kaischeduler) is installed on the GPU cluster. KAI Scheduler is required for optimized AI workload scheduling and bin-packing of GPU resources.
+- The [KAI Scheduler](./kai-scheduler.md) is installed on the GPU cluster. KAI Scheduler is required for optimized AI workload scheduling and bin-packing of GPU resources.
 
-- `GPU Workload Components` must be available in a user-managed registry that your Kubernetes cluster can access. See `GPU Workload Components` under [self-hosted-artifact-manifest](../manifest) for necessary artifacts and [self-hosted-image-mirroring](../image-mirroring) for mirroring instructions.
+- `GPU Workload Components` must be available in a user-managed registry that your Kubernetes cluster can access. See `GPU Workload Components` under [self-hosted-artifact-manifest](../manifest.md) for necessary artifacts and [self-hosted-image-mirroring](../image-mirroring.md) for mirroring instructions.
 
 - The [SMB CSI driver](https://github.com/kubernetes-csi/csi-driver-smb) (`smb.csi.k8s.io`) must be installed on the GPU cluster. It is required for NVCA shared model cache storage (samba sidecar). Install it with:
 
@@ -123,7 +123,7 @@ If you are using node selectors, uncomment the `nodeSelector` section.
 
 <Note>
 For the full list of available feature flags and how to set or modify them, see
-[managing-feature-flags](./configuration).
+[managing-feature-flags](./configuration.md).
 
 </Note>
 
@@ -445,7 +445,7 @@ You can also use the **NVCF CLI** for easier function management:
 - **Create, deploy, and invoke functions** with simple commands
 - **Create or update registry credentials** without manual API calls
 
-See [self-hosted-cli](../cli) for installation and usage instructions.
+See [self-hosted-cli](../cli.md) for installation and usage instructions.
 
 ## Manual Cluster Registration
 
@@ -555,7 +555,7 @@ deletion. If you encounter stuck resources, see [Handling Stuck Resources] below
 ### Handling Stuck Resources
 
 If step 1 times out and namespaces remain stuck in `Terminating` state, or function pods in
-`nvcf-backend` prevent cleanup, use the [force-cleanup-script](../troubleshooting). This script removes
+`nvcf-backend` prevent cleanup, use the [force-cleanup-script](../troubleshooting.md). This script removes
 finalizers on stuck NVCA resources, force-deletes function pods, and cleans up all NVCA
 namespaces.
 

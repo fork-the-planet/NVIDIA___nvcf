@@ -27,7 +27,7 @@ or the helm-diff plugin.
 
 - Personal **NGC API Key** from [ngc.nvidia.com](https://ngc.nvidia.com) authenticated with `nvcf-onprem` organization **only if** you pull artifacts directly from NGC or use NGC as your registry
 
-- **Registry credentials** for your container registry (ECR, NGC, etc.) — see [third-party-registries-self-hosted](./third-party-registries) for setup instructions
+- **Registry credentials** for your container registry (ECR, NGC, etc.) — see [third-party-registries-self-hosted](./third-party-registries.md) for setup instructions
 
 - **Local Helm authentication** to your container registry where NVCF charts are stored. `helm upgrade --install` pulls OCI charts during deployment, so your local environment must be authenticated:
 
@@ -35,7 +35,7 @@ or the helm-diff plugin.
   - **NGC**: `docker login nvcr.io -u '$oauthtoken' -p <NGC_API_KEY>`
   - **Other registries**: Use `docker login` or `helm registry login` as appropriate for your registry
 
-- Artifacts must be available in a registry that your Kubernetes cluster can access. See [self-hosted-artifact-manifest](./manifest) and [self-hosted-image-mirroring](./image-mirroring).
+- Artifacts must be available in a registry that your Kubernetes cluster can access. See [self-hosted-artifact-manifest](./manifest.md) and [self-hosted-image-mirroring](./image-mirroring.md).
 
 ## Namespace Requirements
 
@@ -78,7 +78,7 @@ kubectl create namespace sis
 
 Gateway quickstart creates the Gateway namespaces and applies the
 `nvcf/platform=true` labels used by Gateway API routes. Do not duplicate those
-ingress setup steps here. Complete [Gateway quickstart](./gateway-routing#gateway-quickstart)
+ingress setup steps here. Complete [Gateway quickstart](./gateway-routing.md#gateway-quickstart)
 in Phase 3 before installing `nvcf-gateway-routes`.
 
 ## Shared Configuration Variables
@@ -165,7 +165,7 @@ are mirrored to ECR, NGC credentials are still needed here as the default source
 function artifacts.
 
 Additional registries (ECR, VolcEngine, Harbor, etc.) can be added after installation
-using the NVCF CLI or API. See [third-party-registries-self-hosted](./third-party-registries) for details.
+using the NVCF CLI or API. See [third-party-registries-self-hosted](./third-party-registries.md) for details.
 
 </Note>
 
@@ -174,5 +174,5 @@ installation phases.
 
 ## Next Steps
 
-Once you have completed the prerequisites, proceed to [standalone-infrastructure](./standalone-infrastructure) to
+Once you have completed the prerequisites, proceed to [standalone-infrastructure](./standalone-infrastructure.md) to
 install the infrastructure dependencies (NATS, OpenBao, Cassandra).

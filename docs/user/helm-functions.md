@@ -25,7 +25,7 @@ All Pod specs in your helm chart will be updated with pull secrets at runtime, s
 
 ## Create a Helm-based Function
 
-1. Ensure your helm chart is uploaded to your registry and adheres to the [helm-prereq](./helm-functions) listed above.
+1. Ensure your helm chart is uploaded to your registry and adheres to the [helm-prereq](./helm-functions.md) listed above.
 
 2. Create the function:
 

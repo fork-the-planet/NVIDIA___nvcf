@@ -67,7 +67,7 @@ Key components and data flows:
 
 Before installing LLS, ensure:
 
-- **Self-hosted NVCF control plane** installed and running on an AWS EKS cluster (see [helmfile-installation](./helmfile-installation))
+- **Self-hosted NVCF control plane** installed and running on an AWS EKS cluster (see [helmfile-installation](./helmfile-installation.md))
 - **kubectl** configured with access to your cluster
 - **Helm v3.x** installed
 - **NGC API Key** with access to the `nvcf-onprem` organization
@@ -95,7 +95,7 @@ export NGC_API_KEY="nvapi-xxxxxxxxxxxxx"  # Replace with your NGC API key
 **Configurable UDP Streaming Port**
 
 The UDP port for WebRTC streaming traffic defaults to 5004 and is exported as
-`LLS_UDP_PORT` in [Step 2.1](./lls-installation). This variable is used throughout
+`LLS_UDP_PORT` in [Step 2.1](./lls-installation.md). This variable is used throughout
 the guide for the NLB security group rule, NLB listener, and Helm values configuration.
 
 To use a different port, change the `export LLS_UDP_PORT=` value in Step 2.1 and set
@@ -123,7 +123,7 @@ The following artifacts must be mirrored for LLS deployment:
 
 - Streaming application images (e.g., `usd-composer`)
 
-For detailed instructions on pulling these artifacts from NGC and pushing to your registry, see [self-hosted-image-mirroring](./image-mirroring). The [LLS-specific artifacts](./image-mirroring) section lists exactly what you need.
+For detailed instructions on pulling these artifacts from NGC and pushing to your registry, see [self-hosted-image-mirroring](./image-mirroring.md). The [LLS-specific artifacts](./image-mirroring.md) section lists exactly what you need.
 
 <Info>
 When mirroring to ECR, the repository path must match your Helm values configuration. Ensure your `registryName` in Step 4 includes the same repository path you used when mirroring the chart.
@@ -395,7 +395,7 @@ echo "  $TG_ARN"
 ```
 
 <Info>
-**Save the Target Group ARN** — you will need it for the adding streaming proxy container nodes as targets to the target group [lls-step3-helm-values](./lls-installation).
+**Save the Target Group ARN** — you will need it for the adding streaming proxy container nodes as targets to the target group [lls-step3-helm-values](./lls-installation.md).
 
 </Info>
 
@@ -555,11 +555,9 @@ kubectl delete ns gdn-streaming
 
 ### Step 2: Delete Manual NLB Resources
 
-The NLB and its associated resources created in [lls-step2-nlb](./lls-installation) must be manually deleted.
+The NLB and its associated resources created in [lls-step2-nlb](./lls-installation.md) must be manually deleted.
 
-Download and use the NLB cleanup script:
-
-[lls-nlb-cleanup.sh](samples/scripts/lls-nlb-cleanup.sh)
+Save your NLB cleanup script as `lls-nlb-cleanup.sh`, then run:
 
 ```bash
 chmod +x lls-nlb-cleanup.sh
@@ -579,7 +577,7 @@ The script performs the following steps in dependency order:
 6. Lists any Elastic IPs that may need manual release
 
 <Note>
-**Safety:** The script identifies resources using the tags that were set during [lls-step2-nlb](./lls-installation). It will only delete resources with both `lls:cluster=<your-cluster-name>` and `lls:managed-by=customer` tags, ensuring it won't accidentally delete other NLBs in your account.
+**Safety:** The script identifies resources using the tags that were set during [lls-step2-nlb](./lls-installation.md). It will only delete resources with both `lls:cluster=<your-cluster-name>` and `lls:managed-by=customer` tags, ensuring it won't accidentally delete other NLBs in your account.
 
 If the NLB security group deletion still fails with `DependencyViolation` after the script removes the node SG rule, the NLB may not have fully deleted yet. The script will automatically retry. If it still fails after several attempts, wait a few more minutes and run the script again.
 

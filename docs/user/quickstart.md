@@ -2,7 +2,7 @@
 
 Use the one-click CLI flow for a fresh self-hosted NVCF install. The command installs the control plane, registers a GPU cluster, installs the NVIDIA Cluster Agent, and performs basic health checks.
 
-Use this path when you want the fastest route to a working deployment. Use the [Helmfile installation](./helmfile-installation) path when you need manual release control, partial recovery, or upgrade operations.
+Use this path when you want the fastest route to a working deployment. Use the [Helmfile installation](./helmfile-installation.md) path when you need manual release control, partial recovery, or upgrade operations.
 
 ## What the CLI installs
 
@@ -34,7 +34,7 @@ Before you run the quickstart, prepare:
 - For remote clusters, Gateway API ingress prepared before install
 - For remote clusters, a CLI config that points to the Gateway load balancer
 
-For artifact mirroring, refer to [Image Mirroring](./image-mirroring). For local k3d setup, refer to [Local Development](./local-development).
+For artifact mirroring, refer to [Image Mirroring](./image-mirroring.md). For local k3d setup, refer to [Local Development](./local-development.md).
 
 ## Choose a cluster layout
 
@@ -48,8 +48,8 @@ The two context flags must be set together. Do not set them to the same value. F
 ## Prepare remote Gateway and CLI config
 
 Skip this section for local k3d. For remote clusters such as Amazon EKS,
-complete [Gateway quickstart](./gateway-routing#gateway-quickstart) and
-[Configure the CLI for one-click](./gateway-routing#configure-the-cli-for-one-click)
+complete [Gateway quickstart](./gateway-routing.md#gateway-quickstart) and
+[Configure the CLI for one-click](./gateway-routing.md#configure-the-cli-for-one-click)
 before running `self-hosted up`.
 
 Run the install commands from the directory that contains `.nvcf-cli.yaml`, or
@@ -90,7 +90,7 @@ Use `--stack=/path/to/nvcf-self-managed-stack` when testing from a local source-
 
 ## Local k3d quickstart
 
-After you create the k3d cluster, install the fake GPU operator, and install the CSI SMB driver as described in [Local Development](./local-development), use the local route hostnames:
+After you create the k3d cluster, install the fake GPU operator, and install the CSI SMB driver as described in [Local Development](./local-development.md), use the local route hostnames:
 
 ```text
 127.0.0.1 api.localhost
@@ -153,7 +153,7 @@ kubectl get httproute -A
 kubectl get nvcfbackends -A
 ```
 
-Then create, deploy, and invoke a function using the [CLI](./cli). For local fake GPU clusters, choose a GPU and instance type that match the discovered node labels and GPU count. For the validated k3d H100 fake GPU setup, use:
+Then create, deploy, and invoke a function using the [CLI](./cli.md). For local fake GPU clusters, choose a GPU and instance type that match the discovered node labels and GPU count. For the validated k3d H100 fake GPU setup, use:
 
 ```text
 gpu: H100
@@ -176,11 +176,11 @@ To remove the control plane:
 nvcf-cli self-hosted uninstall --control-plane
 ```
 
-For manual Helmfile recovery and teardown, refer to [Helmfile Installation](./helmfile-installation).
+For manual Helmfile recovery and teardown, refer to [Helmfile Installation](./helmfile-installation.md).
 
 ## Troubleshooting
 
-If the quickstart fails, start with [Troubleshooting](./troubleshooting).
+If the quickstart fails, start with [Troubleshooting](./troubleshooting.md).
 
 Common local k3d issues:
 

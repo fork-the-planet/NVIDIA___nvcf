@@ -1,6 +1,6 @@
 # API
 
-This page provides a brief overview of the NVCF API. All API endpoints are served through your gateway. See [gateway-routing](./gateway-routing) for details on configuring your gateway domain and DNS.
+This page provides a brief overview of the NVCF API. All API endpoints are served through your gateway. See [gateway-routing](./gateway-routing.md) for details on configuring your gateway domain and DNS.
 
 ## OpenAPI Specification
 
@@ -9,7 +9,7 @@ This page does not cover all endpoints.
 Please refer to the [OpenAPI Spec](https://api.nvcf.nvidia.com/v3/openapi) for the latest API information.
 
 <Note>
-The OpenAPI spec linked above documents the full NVCF API surface. Replace the hosted domain with your own gateway domain when making requests. See [gateway-routing](./gateway-routing) for your deployment's base URL.
+The OpenAPI spec linked above documents the full NVCF API surface. Replace the hosted domain with your own gateway domain when making requests. See [gateway-routing](./gateway-routing.md) for your deployment's base URL.
 
 </Note>
 
@@ -32,21 +32,21 @@ All API endpoints include versioning in the path prefix.
 
 ## Authorization
 
-The NVCF API supports API key-based authorization. API keys can be generated using the [CLI](./cli) or directly via the API Keys service endpoint.
+The NVCF API supports API key-based authorization. API keys can be generated using the [CLI](./cli.md) or directly via the API Keys service endpoint.
 
 ### Generate an API Key
 
-API keys can be generated using the [CLI](./cli) or directly via the API Keys service. There are two types of API keys:
+API keys can be generated using the [CLI](./cli.md) or directly via the API Keys service. There are two types of API keys:
 
 **Using the CLI**
 
-The simplest way to generate an API key is via the [CLI](./cli):
+The simplest way to generate an API key is via the [CLI](./cli.md):
 
 ```bash
 nvcf-cli api-key create
 ```
 
-Refer to the [CLI documentation](./cli) for full usage and additional token generation options.
+Refer to the [CLI documentation](./cli.md) for full usage and additional token generation options.
 
 **Admin Token**
 
@@ -98,7 +98,7 @@ echo "API Key: ${API_KEY:0:20}..."
 ```
 
 <Note>
-The `scopes` array controls which API operations the key can perform. See [self-hosted-scopes](./api) for the full list. The `expires_at` field is required for scoped API keys.
+The `scopes` array controls which API operations the key can perform. See [self-hosted-scopes](./api.md) for the full list. The `expires_at` field is required for scoped API keys.
 
 </Note>
 

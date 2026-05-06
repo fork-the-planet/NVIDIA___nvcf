@@ -1,7 +1,7 @@
 # NVCA Configuration
 
 This page documents NVCA configuration options. For cluster registration and lifecycle
-operations, see [Self-Managed Clusters](./self-managed).
+operations, see [Self-Managed Clusters](./self-managed.md).
 
 ## Advanced Settings
 
@@ -29,12 +29,12 @@ See below for descriptions of all cluster features.
 
 | Capability                       | Description                                                                                                                                                                                                                                                                    |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Dynamic GPU Discovery            | Enables automatic detection and management of allocatable GPU capacity within the cluster via the NVIDIA GPU Operator. This capability is **strongly recommended** and would only be disabled in cases where [Manual Instance Configuration](./configuration) is required. |
-| Caching Support                  | Enhances application performance by storing frequently accessed data (models, resources and containers) in a cache. See [cluster-caching](./configuration).                                                                                                                                |
-| Optimized AI Workload Scheduling | Enable support for optimized AI workload scheduling using [KAI Scheduler](https://github.com/kai-scheduler/KAI-Scheduler). Additional setup details: [KAI Scheduler](./kai-scheduler)                                                                                        |
+| Dynamic GPU Discovery            | Enables automatic detection and management of allocatable GPU capacity within the cluster via the NVIDIA GPU Operator. This capability is **strongly recommended** and would only be disabled in cases where [Manual Instance Configuration](./configuration.md) is required. |
+| Caching Support                  | Enhances application performance by storing frequently accessed data (models, resources and containers) in a cache. See [cluster-caching](./configuration.md).                                                                                                                                |
+| Optimized AI Workload Scheduling | Enable support for optimized AI workload scheduling using [KAI Scheduler](https://github.com/kai-scheduler/KAI-Scheduler). Additional setup details: [KAI Scheduler](./kai-scheduler.md)                                                                                        |
 
 <Note>
-Removing the Dynamic GPU Discovery will require manual instance configuration. See [Manual Instance Configuration](./configuration).
+Removing the Dynamic GPU Discovery will require manual instance configuration. See [Manual Instance Configuration](./configuration.md).
 
 </Note>
 
@@ -209,7 +209,7 @@ Clusters with the `AccountIsolation` attribute have enhanced isolation between w
 
 <Warning>
 In Account Isolated mode, the cluster might be inefficient in GPU utilization if workloads are not designed to utilize the full capacity of the isolated nodes.
-While toggling this attribute, the cluster workloads also have to be drained using [CordonAndDrainMaintenance](./configuration) mode to effectively re-balance the workloads as the attribute will not be applied retroactively.
+While toggling this attribute, the cluster workloads also have to be drained using [CordonAndDrainMaintenance](./configuration.md) mode to effectively re-balance the workloads as the attribute will not be applied retroactively.
 
 </Warning>
 
@@ -284,7 +284,7 @@ The NVCA operator requires outbound network connectivity to pull images, charts,
 2. **Container Registry and NVCF Control Plane Access**
 
    - NVCA requires access to your container registry to pull images and Helm charts.
-   - NVCA requires network access to NVCF control plane services (SIS, NATS, ESS) running in your cluster. The specific endpoints depend on your gateway configuration. See [gateway-routing](../gateway-routing) for details.
+   - NVCA requires network access to NVCF control plane services (SIS, NATS, ESS) running in your cluster. The specific endpoints depend on your gateway configuration. See [gateway-routing](../gateway-routing.md) for details.
 
 3. **Monitoring and Logging**
 
@@ -466,11 +466,11 @@ The NVIDIA Cluster Agent supports various feature flags that can be enabled or d
 | Feature Flag        | Description                                                                                                                                                                                                                                                                                       |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | DynamicGPUDiscovery | Dynamically discover GPUs and instance types on this cluster. This is enabled by default for customer-managed clusters.                                                                                                                                                                           |
-| HelmSharedStorage   | Configure Helm functions and tasks with shared read-only storage for ESS secrets. This is required for enabling Helm-based tasks in your cluster. Please note turning on this feature flag requires additional configuration, see [Helm Shared Storage section below](./configuration). |
+| HelmSharedStorage   | Configure Helm functions and tasks with shared read-only storage for ESS secrets. This is required for enabling Helm-based tasks in your cluster. Please note turning on this feature flag requires additional configuration, see [Helm Shared Storage section below](./configuration.md). |
 | LogPosting          | Post instance logs to SIS directly. This is enabled by default for NVIDIA managed clusters.                                                                                                                                                                                                       |
 | MultiNodeWorkloads  | Instruct NVCA to report multi-node instance types to SIS during registration.                                                                                                                                                                                                                     |
 | SelfHosted          | Enables local vault-based authentication for self-hosted deployments. Required when `ngcConfig.clusterSource` is `self-managed`.                                                                                                                                                                  |
-| HelmAllowCPUNodes   | Allow CPU-only pods (e.g. etcd, redis, envoy) from Helm-based functions to be scheduled on non-GPU nodes; GPU pods keep required instance-type affinity. Reduces cost and improves GPU utilization. Mutually exclusive with HelmResourceConstraints. See [helm-allow-cpu-nodes](./configuration).             |
+| HelmAllowCPUNodes   | Allow CPU-only pods (e.g. etcd, redis, envoy) from Helm-based functions to be scheduled on non-GPU nodes; GPU pods keep required instance-type affinity. Reduces cost and improves GPU utilization. Mutually exclusive with HelmResourceConstraints. See [helm-allow-cpu-nodes](./configuration.md).             |
 
 ### Setting Feature Flags at Install Time
 
@@ -638,7 +638,7 @@ This reduces infrastructure cost and improves GPU utilization.
 
 **How to enable**
 
-1. Follow the steps in [Modifying Feature Flags at Runtime](./configuration).
+1. Follow the steps in [Modifying Feature Flags at Runtime](./configuration.md).
 
 2. In `spec.overrides.featureGate.values`, include all existing flags you want to keep, add
    `-HelmResourceConstraints`, then add `HelmAllowCPUNodes`.

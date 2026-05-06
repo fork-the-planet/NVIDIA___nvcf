@@ -3,7 +3,7 @@
 This section provides a comprehensive list of all components required for NVIDIA Cloud Functions (NVCF) Self-Hosted deployment for basic inference. Additional components are needed for Low Latency Streaming (Simulation).
 
 <Tip>
-**Deploying to AWS with ECR?** If you're using the [Terraform Installation](./terraform-installation) to deploy to Amazon EKS, you can skip manual artifact mirroring entirely. Set `create_sm_ecr_repos = true` in your `terraform.tfvars` and Terraform will automatically mirror all required images and Helm charts to ECR. See [ecr-automated-mirroring](./image-mirroring) for details.
+**Deploying to AWS with ECR?** If you're using the [Terraform Installation](./terraform-installation.md) to deploy to Amazon EKS, you can skip manual artifact mirroring entirely. Set `create_sm_ecr_repos = true` in your `terraform.tfvars` and Terraform will automatically mirror all required images and Helm charts to ECR. See [ecr-automated-mirroring](./image-mirroring.md) for details.
 
 </Tip>
 
@@ -144,7 +144,7 @@ Optional components for the reference deployment architecture.
 
 #### Observability Components
 
-Optional example components for monitoring and observability. These are provided as reference implementations only and are not intended for production use. See [self-hosted-example-dashboards](./example-dashboards) for deployment instructions.
+Optional example components for monitoring and observability. These are provided as reference implementations only and are not intended for production use. See [self-hosted-example-dashboards](./example-dashboards.md) for deployment instructions.
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
@@ -230,7 +230,7 @@ Terraform and Helmfile resources for automated deployment.
 | Component Name | Description |
 | --- | --- |
 | spot | Spot Instance Service (SIS) - Manages deployments, cluster and instance state |
-| strap | NVCF API service, refer to [self-hosted-api](./api) for full API specification |
+| strap | NVCF API service, refer to [self-hosted-api](./api.md) for full API specification |
 | helm-nvcf-api | Helm chart for NVCF API service |
 | helm-nvcf-sis | Helm chart for Spot Instance Service |
 | nvcf-grpc-proxy | Used for bi-directional communication and state management |

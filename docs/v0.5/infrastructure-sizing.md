@@ -4,7 +4,7 @@
 The recommendations on this page are **approximate starting points** based on
 AWS instance types. Actual requirements depend on workload characteristics,
 function count, and request concurrency. Use the
-[self-managed-grpc-load-test](./grpc-load-testing) guide to validate throughput and tune your
+[self-managed-grpc-load-test](./grpc-load-testing.md) guide to validate throughput and tune your
 control plane accordingly.
 
 </Info>
@@ -52,7 +52,7 @@ For local development of the stack or functions, CI pipelines, or quick demos yo
 stack on a single machine using k3d. This setup uses a single Cassandra replica,
 fake GPUs, and ephemeral `local-path` storage.
 
-See [local-development](./local-development) for full step-by-step instructions.
+See [local-development](./local-development.md) for full step-by-step instructions.
 
 ### Staging / Demo
 
@@ -75,7 +75,7 @@ dedicated node selectors.
 
 <Tip>
 You can also run the full stack on your laptop using Kind or k3d. See
-[local-development](./local-development) for instructions.
+[local-development](./local-development.md) for instructions.
 
 </Tip>
 
@@ -146,7 +146,7 @@ Self-hosted NVCF supports any GPU instance type compatible with the
 - Physical GPU hardware on worker nodes
 
 For development and testing environments without GPUs, install the fake GPU
-operator to simulate GPU resources. See [fake-gpu-operator](./fake-gpu-operator) for
+operator to simulate GPU resources. See [fake-gpu-operator](./fake-gpu-operator.md) for
 instructions.
 
 ## Storage Recommendations
@@ -159,7 +159,7 @@ instructions.
 | Control Plane Services | 1--10 Gi each | Defaults are typically sufficient |
 
 Storage sizes are configurable via the `storageSize` value in your environment
-file. See [helmfile-installation](./helmfile-installation) for details.
+file. See [helmfile-installation](./helmfile-installation.md) for details.
 
 <Note>
 Some cloud providers have minimum PVC size requirements. For example, AWS EBS
@@ -173,18 +173,18 @@ The default control-plane resource sizing shipped with the helmfile stack is
 designed to handle approximately **100 concurrent users**. If you need higher
 throughput:
 
-1. **Benchmark your deployment** using the [self-managed-grpc-load-test](./grpc-load-testing)
+1. **Benchmark your deployment** using the [self-managed-grpc-load-test](./grpc-load-testing.md)
    guide. Start with `--vus 100` and increase gradually.
 2. **Scale node pools independently.** Cassandra, OpenBao, and control-plane
    pools can each be scaled without affecting the others.
 3. **Increase pod resources** for specific services by adding `values:` blocks
-   in the helmfile release definitions. See [helmfile-installation](./helmfile-installation)
+   in the helmfile release definitions. See [helmfile-installation](./helmfile-installation.md)
    for override examples.
 
 <Note>
-- [self-hosted-installation](./installation-overview) -- Full installation walkthrough
-- [terraform-installation](./terraform-installation) -- Terraform-based cluster provisioning with
+- [self-hosted-installation](./installation.md) -- Full installation walkthrough
+- [terraform-installation](./terraform-installation.md) -- Terraform-based cluster provisioning with
   example `tfvars` files
-- [self-managed-grpc-load-test](./grpc-load-testing) -- Validate control-plane throughput
+- [self-managed-grpc-load-test](./grpc-load-testing.md) -- Validate control-plane throughput
 
 </Note>

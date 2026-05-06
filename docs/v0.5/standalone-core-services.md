@@ -1,7 +1,7 @@
 # Phase 2: Core Services
 
 This phase installs the NVCF control plane services. These services depend on the
-infrastructure components installed in [standalone-infrastructure](./standalone-infrastructure).
+infrastructure components installed in [standalone-infrastructure](./standalone-infrastructure.md).
 
 <Info>
 All three infrastructure dependencies (NATS, OpenBao, Cassandra) must be running and healthy
@@ -245,7 +245,7 @@ Replace the following placeholders:
 | `<REGISTRY>` | Your container image registry |
 | --- | --- |
 | `<REPOSITORY>` | Your image repository path |
-| `<REGISTRY_CREDENTIAL_B64>` | Base64-encoded registry credential (see [standalone-prerequisites](./standalone-prerequisites)) |
+| `<REGISTRY_CREDENTIAL_B64>` | Base64-encoded registry credential (see [standalone-prerequisites](./standalone-prerequisites.md)) |
 | `<HELM_REGISTRY>` | Hostname for your Helm chart registry (e.g., `helm.ngc.nvidia.com` or your ECR hostname) |
 
 ### Install
@@ -556,7 +556,7 @@ adminIssuerProxy:
 <Note>
 The `gateway` setting is `false` during this phase because the Gateway API CRDs and
 Gateway resource are not yet installed. The admin endpoint HTTPRoute will be created in
-[standalone-gateway](./standalone-gateway) when the Gateway Routes chart is deployed.
+[standalone-gateway](./standalone-gateway.md) when the Gateway Routes chart is deployed.
 
 </Note>
 
@@ -614,5 +614,5 @@ misconfigured secrets or unreachable infrastructure services.
 
 ## Next Steps
 
-Once all core services are running, proceed to [standalone-gateway](./standalone-gateway) to configure
+Once all core services are running, proceed to [standalone-gateway](./standalone-gateway.md) to configure
 ingress and verify end-to-end API connectivity.

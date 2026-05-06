@@ -86,6 +86,7 @@ func TestRenderManifestDeploymentResources(t *testing.T) {
 		"| Type | Component Name | Full Path |",
 		"| Image | llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.3.0` |",
 		"| Image | llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.2.0` |",
+		"See [self-hosted-example-dashboards](./example-dashboards.md) for deployment instructions.",
 		"| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.5.0` |",
 		"| Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |",
 	}

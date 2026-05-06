@@ -4,7 +4,7 @@ This phase installs the three infrastructure services that all NVCF core service
 NATS (messaging), OpenBao (secrets management), and Cassandra (persistence).
 
 <Info>
-Complete all steps in [standalone-prerequisites](./standalone-prerequisites) before proceeding. You should have
+Complete all steps in [standalone-prerequisites](./standalone-prerequisites.md) before proceeding. You should have
 your shell variables (`REGISTRY`, `REPOSITORY`, `STORAGE_CLASS`, `STORAGE_SIZE`,
 `CASSANDRA_PASSWORD`, `REGISTRY_CREDENTIAL_B64`) exported and namespaces created.
 
@@ -220,7 +220,7 @@ Replace the following placeholders:
 | `<REGISTRY>` | Your container image registry |
 | --- | --- |
 | `<REPOSITORY>` | Your image repository path |
-| `<REGISTRY_CREDENTIAL_B64>` | Base64-encoded registry credential (see [standalone-prerequisites](./standalone-prerequisites)) |
+| `<REGISTRY_CREDENTIAL_B64>` | Base64-encoded registry credential (see [standalone-prerequisites](./standalone-prerequisites.md)) |
 
 If you are using a custom storage class, uncomment `dataStorage.storageClass` and set it
 appropriately.
@@ -505,4 +505,4 @@ the issues before continuing.
 ## Next Steps
 
 Once all infrastructure dependencies are running, proceed to
-[standalone-core-services](./standalone-core-services) to install the NVCF control plane services.
+[standalone-core-services](./standalone-core-services.md) to install the NVCF control plane services.

@@ -5,8 +5,8 @@
 
 This section covers the installation of the NVCF control plane components, which are required for all self-hosted NVCF deployments.
 
-By default, the NVCF self-hosted stack is deployed using the provided Helmfile (see [helmfile-installation](./helmfile-installation)). However, you can also install each Helm chart
-individually using `helm install` or `helm upgrade` (see [self-hosted-standalone-deployment](./standalone-deployment)).
+By default, the NVCF self-hosted stack is deployed using the provided Helmfile (see [helmfile-installation](./helmfile-installation.md)). However, you can also install each Helm chart
+individually using `helm install` or `helm upgrade` (see [self-hosted-standalone-deployment](./standalone-deployment.md)).
 
 Using `helm` is useful when:
 
@@ -17,12 +17,12 @@ Using `helm` is useful when:
 
 ## Installation guides
 
-- [helmfile-installation](./helmfile-installation) - use `helmfile` for automated control-plane deployment.
-- [self-hosted-standalone-deployment](./standalone-deployment) - `helm` based control-plane deployment.
+- [helmfile-installation](./helmfile-installation.md) - use `helmfile` for automated control-plane deployment.
+- [self-hosted-standalone-deployment](./standalone-deployment.md) - `helm` based control-plane deployment.
 
 <Note>
 This page is superseded. Installation methods are now documented directly
-in [self-hosted-installation](./installation). See [helmfile-installation](./helmfile-installation) or
-[self-hosted-standalone-deployment](./standalone-deployment).
+in [self-hosted-installation](./installation.md). See [helmfile-installation](./helmfile-installation.md) or
+[self-hosted-standalone-deployment](./standalone-deployment.md).
 
 </Note>

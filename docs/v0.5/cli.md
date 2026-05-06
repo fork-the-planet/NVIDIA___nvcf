@@ -13,7 +13,7 @@ The NVCF Self-hosted CLI provides:
 - **Shell Completion**: Autocompletion for bash, zsh, fish, and PowerShell
 
 <Note>
-The CLI is available as a container image from NGC. See [self-hosted-artifact-manifest](./manifest) for the full artifact path.
+The CLI is available as a container image from NGC. See [self-hosted-artifact-manifest](./manifest.md) for the full artifact path.
 
 </Note>
 
@@ -26,7 +26,7 @@ The CLI is available as a container image from NGC. See [self-hosted-artifact-ma
 
 ### Download from NGC
 
-The CLI is available as a resource from NGC. See [download-nvcf-cli](./image-mirroring) for detailed download and extraction instructions.
+The CLI is available as a resource from NGC. See [download-nvcf-cli](./image-mirroring.md) for detailed download and extraction instructions.
 
 The downloaded package includes:
 
@@ -59,13 +59,13 @@ Place your `.nvcf-cli.yaml` in the directory where you run the CLI for project-s
 For self-hosted deployments, the CLI must be configured to communicate with your gateway. The gateway uses **hostname-based routing** for HTTP services, which requires proper configuration.
 
 <Note>
-For a complete understanding of how the gateway routes traffic, including architecture diagrams, verification commands, and production DNS/HTTPS setup, see [gateway-routing](./gateway-routing).
+For a complete understanding of how the gateway routes traffic, including architecture diagrams, verification commands, and production DNS/HTTPS setup, see [gateway-routing](./gateway-routing.md).
 
 </Note>
 
 #### Get Your Gateway Address
 
-After deploying the control plane, get your gateway's external address (this assumes you followed Step 1 of [helmfile-installation](./helmfile-installation)):
+After deploying the control plane, get your gateway's external address (this assumes you followed Step 1 of [helmfile-installation](./helmfile-installation.md)):
 
 ```bash
 export GATEWAY_ADDR=$(kubectl get gateway nvcf-gateway -n envoy-gateway \
@@ -220,7 +220,7 @@ api_keys_service_url: "https://api-keys.nvcf.example.com"
 ```
 
 <Note>
-For complete instructions on setting up DNS records and TLS certificates, see [production-dns-https](./gateway-routing) in the Gateway Routing guide.
+For complete instructions on setting up DNS records and TLS certificates, see [production-dns-https](./gateway-routing.md) in the Gateway Routing guide.
 
 </Note>
 
@@ -274,7 +274,7 @@ Or use the `--debug` flag or `NVCF_DEBUG=true` environment variable per-command.
 ```
 
 <Note>
-For immediate testing, you can use `load_tester_supreme` from `nvcf-onprem` (see [self-hosted-artifact-manifest](./manifest)), which supports the `{"message": "hello world"}` request body above. For more function samples, see the [nv-cloud-function-helpers](https://github.com/NVIDIA/nv-cloud-function-helpers) repository and [function-creation](./function-creation) for function creation documentation.
+For immediate testing, you can use `load_tester_supreme` from `nvcf-onprem` (see [self-hosted-artifact-manifest](./manifest.md)), which supports the `{"message": "hello world"}` request body above. For more function samples, see the [nv-cloud-function-helpers](https://github.com/NVIDIA/nv-cloud-function-helpers) repository and [function-creation](./function-creation.md) for function creation documentation.
 
 </Note>
 
@@ -627,7 +627,7 @@ Additional `function invoke` flags:
 
 ### Registry Commands
 
-Manage container registry credentials for function images and Helm charts. For comprehensive setup instructions including IAM configuration for AWS ECR, see [third-party-registries-self-hosted](./third-party-registries).
+Manage container registry credentials for function images and Helm charts. For comprehensive setup instructions including IAM configuration for AWS ECR, see [third-party-registries-self-hosted](./third-party-registries.md).
 
 | Command | Description |
 | --- | --- |
@@ -733,4 +733,4 @@ Manage container registry credentials for function images and Helm charts. For c
 | `function invoke` | `NVCF_API_KEY` | Falls back to admin token |
 | `function list` | `NVCF_API_KEY` | Falls back to admin token |
 
-For additional troubleshooting, see [self-hosted-troubleshooting](./troubleshooting).
+For additional troubleshooting, see [self-hosted-troubleshooting](./troubleshooting.md).

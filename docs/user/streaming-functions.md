@@ -145,7 +145,7 @@ This example focuses on NVCF integration. In production, you should also impleme
 
 For certain applications, TLS/SSL support is required. The proxy can be configured to use self-signed certificates for development and testing purposes by setting `PROXY_SSL_INSECURE=true`.
 
-Update `NVCF_SERVER` to point to your gateway address. See [gateway-routing](./gateway-routing) for details.
+Update `NVCF_SERVER` to point to your gateway address. See [gateway-routing](./gateway-routing.md) for details.
 
 </Note>
 

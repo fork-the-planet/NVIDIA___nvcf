@@ -1,9 +1,9 @@
 # Image Mirroring
 
-All required self-hosted NVCF artifacts (see [self-hosted-artifact-manifest](./manifest)) must be available to be pulled by pods in your Kubernetes cluster for a successful installation using the helmfile (`nvcf-self-managed-stack`) automation. This page provides examples on how to pull artifacts from NGC and push them to your desired registry.
+All required self-hosted NVCF artifacts (see [self-hosted-artifact-manifest](./manifest.md)) must be available to be pulled by pods in your Kubernetes cluster for a successful installation using the helmfile (`nvcf-self-managed-stack`) automation. This page provides examples on how to pull artifacts from NGC and push them to your desired registry.
 
 <Note>
-**Mirroring images is not the same as configuring image pull secrets.** This page covers how to copy NVCF artifacts into your registry. If your registry is private, Kubernetes also needs credentials to pull those images at runtime. For instructions on configuring image pull secrets for the NVCF control plane pods, see [control-plane-image-pull-secrets](./helmfile-installation) in the installation guide.
+**Mirroring images is not the same as configuring image pull secrets.** This page covers how to copy NVCF artifacts into your registry. If your registry is private, Kubernetes also needs credentials to pull those images at runtime. For instructions on configuring image pull secrets for the NVCF control plane pods, see [control-plane-image-pull-secrets](./helmfile-installation.md) in the installation guide.
 
 </Note>
 
@@ -41,13 +41,13 @@ When `create_sm_ecr_repos = true`, Terraform will:
 <Info>
 Automated mirroring requires:
 
-- **AWS credentials** configured with ECR push permissions. Verify with `aws sts get-caller-identity`. See [aws-authentication](./terraform-installation) for configuration options.
+- **AWS credentials** configured with ECR push permissions. Verify with `aws sts get-caller-identity`. See [aws-authentication](./terraform-installation.md) for configuration options.
 - **NGC_API_KEY** environment variable set with an API key from the `nvcf-onprem` organization before running `terraform apply`.
 - **skopeo** installed on your machine. Skopeo is used to copy container images directly between registries without requiring a local Docker daemon. See the [skopeo installation guide](https://github.com/containers/skopeo/blob/main/install.md) for installation instructions.
 
 </Info>
 
-For detailed Terraform configuration, see [terraform-installation](./terraform-installation).
+For detailed Terraform configuration, see [terraform-installation](./terraform-installation.md).
 
 If you cannot use the Terraform automation (e.g., non-ECR registry, air-gapped environment), continue with the manual mirroring instructions below.
 
@@ -85,16 +85,16 @@ If you plan to deploy **Low Latency Streaming (LLS)**, you must mirror the follo
 - Streaming application images (e.g., `usd-composer`)
 
 <Note>
-These artifacts (aside from the streaming application sample) are automatically included when using [Terraform automated mirroring](./image-mirroring) (`create_sm_ecr_repos = true`). LLS artifacts are always mirrored regardless of whether `lls_enabled` is set.
+These artifacts (aside from the streaming application sample) are automatically included when using [Terraform automated mirroring](./image-mirroring.md) (`create_sm_ecr_repos = true`). LLS artifacts are always mirrored regardless of whether `lls_enabled` is set.
 
 </Note>
 
-See [self-hosted-lls-installation](./lls-installation) for LLS deployment instructions.
+See [self-hosted-lls-installation](./lls-installation.md) for LLS deployment instructions.
 
 ## Pulling Artifacts from NGC
 
 <Warning>
-**Important:** The examples below show how to pull individual artifacts. You must pull **each image, chart, and resource** listed in the [self-hosted-artifact-manifest](./manifest) individually. These examples demonstrate the process for one artifact of each type - you will need to repeat these steps for every artifact required for your deployment.
+**Important:** The examples below show how to pull individual artifacts. You must pull **each image, chart, and resource** listed in the [self-hosted-artifact-manifest](./manifest.md) individually. These examples demonstrate the process for one artifact of each type - you will need to repeat these steps for every artifact required for your deployment.
 
 **Complete the following for each artifact:**
 
@@ -103,7 +103,7 @@ See [self-hosted-lls-installation](./lls-installation) for LLS deployment instru
 - Pull each resource (like `nvcf-base`, `nvcf-self-managed-stack`) from NGC
 - Push each artifact to your target registry (ECR, Harbor, etc.)
 
-See the [self-hosted-artifact-manifest](./manifest) for the complete list of all required artifacts.
+See the [self-hosted-artifact-manifest](./manifest.md) for the complete list of all required artifacts.
 
 </Warning>
 
@@ -122,7 +122,7 @@ docker pull --platform linux/amd64 <image>
 docker pull --platform linux/arm64 <image>
 ```
 
-Failing to specify the correct platform will result in `exec format error` when pods attempt to start. See [image-mirroring-troubleshooting](./image-mirroring) for more details.
+Failing to specify the correct platform will result in `exec format error` when pods attempt to start. See [image-mirroring-troubleshooting](./image-mirroring.md) for more details.
 
 </Warning>
 
@@ -345,7 +345,7 @@ The extracted directory contains:
 - `examples/` - Sample configuration files for different environments
 - `USAGE-GUIDE.md` - Detailed usage documentation
 
-See [self-hosted-cli](./cli) for detailed configuration instructions
+See [self-hosted-cli](./cli.md) for detailed configuration instructions
 
 <Note>
 If you don't have access to this repository, contact your NVIDIA representative.
@@ -355,7 +355,7 @@ If you don't have access to this repository, contact your NVIDIA representative.
 ## Pushing to Your Registry
 
 <Info>
-Ensure all artifacts listed in the [self-hosted-artifact-manifest](./manifest) are mirrored to your registry before beginning the installation process.
+Ensure all artifacts listed in the [self-hosted-artifact-manifest](./manifest.md) are mirrored to your registry before beginning the installation process.
 
 </Info>
 

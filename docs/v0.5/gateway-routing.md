@@ -11,7 +11,7 @@ The NVCF self-hosted deployment uses the [Kubernetes Gateway API](https://gatewa
 - **Single load balancer** for all NVCF services
 - **Cross-namespace routing** via ReferenceGrants
 
-The Gateway API is a **Kubernetes standard** with multiple implementations. While the [helmfile-installation](./helmfile-installation) guide uses Envoy Gateway as the example, you can use any Gateway API-compliant controller.
+The Gateway API is a **Kubernetes standard** with multiple implementations. While the [helmfile-installation](./helmfile-installation.md) guide uses Envoy Gateway as the example, you can use any Gateway API-compliant controller.
 
 ## Gateway API Implementations
 
@@ -107,7 +107,7 @@ When you deploy the control plane via helmfile, the `nvcf-gateway-routes` chart 
 - **TCPRoute** for gRPC
 - **ReferenceGrants** for cross-namespace routing permissions
 
-These routes attach to the Gateway you created in [helmfile-installation](./helmfile-installation) Step 1.
+These routes attach to the Gateway you created in [helmfile-installation](./helmfile-installation.md) Step 1.
 
 ### Route Configuration
 
@@ -199,7 +199,7 @@ The Envoy Gateway uses hostname-based routing to direct traffic to different bac
 Without the correct `Host` header, the gateway cannot match the request to an HTTPRoute and returns 404.
 
 <Warning>
-**Host header routing only works with plaintext HTTP traffic.** Without TLS/SNI spoofing support in your client, you cannot use HTTPS with this method. The TLS handshake occurs before the Host header is sent, so the server cannot route based on a custom Host header when using HTTPS. For encrypted traffic, use proper DNS records as described in [production-dns-https](./gateway-routing).
+**Host header routing only works with plaintext HTTP traffic.** Without TLS/SNI spoofing support in your client, you cannot use HTTPS with this method. The TLS handshake occurs before the Host header is sent, so the server cannot route based on a custom Host header when using HTTPS. For encrypted traffic, use proper DNS records as described in [production-dns-https](./gateway-routing.md).
 
 </Warning>
 
@@ -228,7 +228,7 @@ api_host: "api.a1b2c3d4.us-west-2.elb.amazonaws.com"
 invoke_host: "invocation.a1b2c3d4.us-west-2.elb.amazonaws.com"
 ```
 
-See [cli-configuration](./cli) for complete CLI configuration documentation.
+See [cli-configuration](./cli.md) for complete CLI configuration documentation.
 
 ## Production: DNS and HTTPS
 
@@ -474,7 +474,7 @@ For gRPC connection problems:
 
 ## Related Documentation
 
-- [helmfile-installation](./helmfile-installation) - Gateway setup in Step 1
-- [cli-configuration](./cli) - CLI configuration including Host header settings
+- [helmfile-installation](./helmfile-installation.md) - Gateway setup in Step 1
+- [cli-configuration](./cli.md) - CLI configuration including Host header settings
 - [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/)
 - [Envoy Gateway](https://gateway.envoyproxy.io/)

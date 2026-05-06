@@ -49,7 +49,7 @@ echo -n '$oauthtoken:nvapi-1234567890abcdef' | base64
    # Add 'set -x' at the top of the script
    ```
 
-3. Fix your secrets.yaml with correct base64 credential, then follow the [clean-install-procedure](./troubleshooting).
+3. Fix your secrets.yaml with correct base64 credential, then follow the [clean-install-procedure](./troubleshooting.md).
 
 **How to Prevent:**
 
@@ -73,7 +73,7 @@ echo -n '$oauthtoken:nvapi-1234567890abcdef' | base64
 
 ## Identifying Deployment Issues
 
-Use these commands to diagnose deployment problems. For phase-by-phase monitoring during installation, see the Deployment Progression section in [helmfile-installation](./helmfile-installation).
+Use these commands to diagnose deployment problems. For phase-by-phase monitoring during installation, see the Deployment Progression section in [helmfile-installation](./helmfile-installation.md).
 
 **Find Stuck Deployments:**
 
@@ -146,7 +146,7 @@ kubectl patch secret nvcf-api-account-bootstrap-secret -n nvcf \
   -p '{"stringData":{"DEBUG":"true"}}'
 ```
 
-Then follow the "Recovering from Services Failures" steps in [helmfile-installation](./helmfile-installation)
+Then follow the "Recovering from Services Failures" steps in [helmfile-installation](./helmfile-installation.md)
 to redeploy. The next bootstrap job run will include detailed debug logs visible via
 `kubectl logs job/nvcf-api-account-bootstrap -n nvcf`.
 
@@ -167,7 +167,7 @@ kubectl patch secret nvcf-api-account-bootstrap-secret -n nvcf \
 
 **Solution:**
 
-Fix your `secrets/<environment-name>-secrets.yaml` file, then follow the "Recovering from Services Failures" steps in [helmfile-installation](./helmfile-installation) to preserve your dependencies.
+Fix your `secrets/<environment-name>-secrets.yaml` file, then follow the "Recovering from Services Failures" steps in [helmfile-installation](./helmfile-installation.md) to preserve your dependencies.
 
 ### Pods Stuck in ImagePullBackOff
 
@@ -239,10 +239,10 @@ When a Helm installation fails, the release remains in a failed state. Subsequen
 
 **Solution:**
 
-Fix the underlying issue (credentials, config, etc.), then follow the appropriate recovery procedure in [helmfile-installation](./helmfile-installation):
+Fix the underlying issue (credentials, config, etc.), then follow the appropriate recovery procedure in [helmfile-installation](./helmfile-installation.md):
 
 - **If only services failed** (dependencies are healthy): Use the "Recovering from Services Failures" steps to preserve your dependencies
-- **If dependencies are also broken**: Follow the "Uninstalling" section in [helmfile-installation](./helmfile-installation)
+- **If dependencies are also broken**: Follow the "Uninstalling" section in [helmfile-installation](./helmfile-installation.md)
 
 ### NVCA Operator Fails: nvcfbackends CRD Not Found
 
@@ -460,15 +460,15 @@ kubectl get events -n nvcf --watch
 
 ## Recovery Procedures
 
-For detailed recovery steps, see the **Recovering from Partial Deployments** section in [helmfile-installation](./helmfile-installation). This section provides quick reference for common scenarios.
+For detailed recovery steps, see the **Recovering from Partial Deployments** section in [helmfile-installation](./helmfile-installation.md). This section provides quick reference for common scenarios.
 
 ### Choosing a Recovery Strategy
 
 | Failure Scenario | Recovery Strategy | Reference |
 | --- | --- | --- |
 | **Dependencies failed** (Cassandra, NATS, OpenBao) | Redeploy individual dependency | See `Redeploy Stuck Dependencies`_ below |
-| **Services failed** (API, api-keys, etc.) but dependencies OK | Partial recovery (preserve dependencies) | See "Recovering from Services Failures" in [helmfile-installation](./helmfile-installation) |
-| **Everything broken** or uncertain state | Full uninstall and reinstall | See "Uninstalling" in [helmfile-installation](./helmfile-installation) |
+| **Services failed** (API, api-keys, etc.) but dependencies OK | Partial recovery (preserve dependencies) | See "Recovering from Services Failures" in [helmfile-installation](./helmfile-installation.md) |
+| **Everything broken** or uncertain state | Full uninstall and reinstall | See "Uninstalling" in [helmfile-installation](./helmfile-installation.md) |
 
 <Warning>
 **Do not attempt to fix failed services by re-running** `helmfile sync` **or** `helmfile apply`. Helm will skip initialization hooks (migrations, account bootstrap) on upgrade, resulting in a deployment that appears successful but doesn't function correctly.
@@ -496,11 +496,11 @@ If only NVCA needs reinstalling (and NVCF services are working):
 HELMFILE_ENV=<environment-name> helmfile --selector release-group=workers sync
 ```
 
-If NVCF services are also broken, follow the "Recovering from Services Failures" steps in [helmfile-installation](./helmfile-installation).
+If NVCF services are also broken, follow the "Recovering from Services Failures" steps in [helmfile-installation](./helmfile-installation.md).
 
 ### NVCA Force Cleanup Script
 
-If `helmfile destroy` hangs on NVCA cleanup (typically when functions are still deployed in `nvcf-backend`), use the force cleanup script in a new terminal. See [force-cleanup-script](./troubleshooting) for the full script and usage instructions.
+If `helmfile destroy` hangs on NVCA cleanup (typically when functions are still deployed in `nvcf-backend`), use the force cleanup script in a new terminal. See [force-cleanup-script](./troubleshooting.md) for the full script and usage instructions.
 
 ```bash
 ./force-cleanup-nvcf.sh --dry-run  # Preview
