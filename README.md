@@ -3,7 +3,7 @@
 
 ![NVCF banner](docs/user/images/nvcf-banner.svg)
 
-**[Documentation](docs/user/index.md) | [Installation](docs/user/installation.md) | [API Reference](docs/user/api.md) | [Contributing](CONTRIBUTING.md) | [build.nvidia.com Powered By NVCF](https://build.nvidia.com/)**
+[Documentation](docs/user/index.md) | [Installation](docs/user/installation.md) | [API Reference](docs/user/api.md) | [Contributing](CONTRIBUTING.md) | [build.nvidia.com Powered By NVCF](https://build.nvidia.com/)
 
 # NVIDIA Cloud Functions
 
@@ -88,7 +88,7 @@ Before changing a service, read [`AGENTS.md`](AGENTS.md) and the nearest nested
 `AGENTS.md`. The nested file is the best source for service-specific build,
 test, style, and review expectations.
 
-Use Conventional Commits. Include a JIRA or NVBug reference when one exists.
+Use Conventional Commits. Include a JIRA reference when one exists.
 For documentation-only changes, run `git diff --check` and any targeted
 validation that applies to the changed files.
 

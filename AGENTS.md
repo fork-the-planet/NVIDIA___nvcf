@@ -96,7 +96,7 @@ Private skill inventory lives in `nvidia-internal/AGENTS.md`.
 
 ## Commit Messages
 
-Use Conventional Commits v1.0.0. Include a JIRA or NVBug reference in the footer when one exists; use `NO-REF` only when acceptable for the change type.
+Use Conventional Commits v1.0.0. Include a JIRA reference in the footer when one exists; use `NO-REF` only when acceptable for the change type.
 
 Format:
 
@@ -106,7 +106,6 @@ Format:
 [optional body]
 
 JIRA: NVCF-XXXX
-NVBug: none
 ```
 
 Types with customer impact (appear in release notes): `feat`, `fix`, `perf` (scope required).
@@ -130,7 +129,6 @@ Use a structured MR description. Subtree repos may define their own MR template;
 
 ## Related Issues
 JIRA: <id or none>
-NVBug: <id or none>
 
 ## Related MRs
 <links or "None">
@@ -242,4 +240,4 @@ When a change modifies runtime behavior, data flow, or component interactions, a
 
 ## Issue Tracking
 
-Reference JIRA or NVBug tickets in commits and MR descriptions. When creating follow-up work, file a ticket rather than leaving a TODO in code.
+Reference JIRA tickets in commits and MR descriptions. When creating follow-up work, file a ticket rather than leaving a TODO in code.

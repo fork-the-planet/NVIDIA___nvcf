@@ -319,7 +319,7 @@ func TestIsAdminOperation(t *testing.T) {
 }
 
 // TestUpdateGpuSpecificationHappyPath verifies the CLI sends PATCH to the
-// per-GPU-spec endpoint with the narrowed body (nvbug 6107664).
+// per-GPU-spec endpoint with the narrowed body.
 func TestUpdateGpuSpecificationHappyPath(t *testing.T) {
 	var gotMethod, gotPath string
 	var gotBody map[string]any

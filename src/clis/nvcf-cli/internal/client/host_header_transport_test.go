@@ -41,8 +41,6 @@ func (m *hostCapturingRoundTripper) RoundTrip(req *http.Request) (*http.Response
 // bug where http.NewRequestWithContext pre-populates req.Host with URL.Host,
 // causing the host header transport's "preserve" check to always trigger and
 // silently drop the configured api_host override.
-//
-// See: nvbugs (self-hosted NVCF 0.0.27 uses the wrong HOST HEADER address)
 func TestHostHeaderTransport_NewRequestWithContext(t *testing.T) {
 	const (
 		// Self-hosted setup: a single ELB hostname fronting Envoy

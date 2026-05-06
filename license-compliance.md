@@ -245,7 +245,7 @@ Read [`tools/collect-dependencies/README.md`](tools/collect-dependencies/README.
 
 Use it to enumerate the repo's third-party dependencies and verify that the reported license labels stay within the repo's compliance expectations.
 
-Run it when you add a third-party dependency to see whether it is new to the monorepo. Report new third-party dependencies in the OSRB NVBUG linked from [`tools/collect-dependencies/README.md`](tools/collect-dependencies/README.md).
+Run it when you add a third-party dependency to see whether it is new to the monorepo. Report new third-party dependencies through the review process described in [`tools/collect-dependencies/README.md`](tools/collect-dependencies/README.md).
 
 These inventories are indicative. They do not replace legal review or per-component `NOTICE` and `LICENSE` bundles if your process requires them.
 
