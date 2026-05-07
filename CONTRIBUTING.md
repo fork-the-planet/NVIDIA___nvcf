@@ -39,6 +39,14 @@ Before starting work, comment on the issue to signal your intent. This prevents 
 
 For all development, push your changes to a branch in your own fork of nvcf and then open a pull request when the code is ready. The steps below walk you through the full process.
 
+### Current GitHub workflow
+
+This repository is being actively improved to support a more GitHub-native contribution flow. During this transition, commits are still pushed from our GitLab-based internal workflow, and GitHub pull requests cannot be merged directly.
+
+We do accept external contributions through GitHub pull requests. When a contribution is ready to land, the NVCF team will carry it through the current internal workflow and preserve attribution by co-authoring the resulting commit with the original contributor and the bot that pushes the commit.
+
+Thank you for working with us during this transition while we make the project easier to contribute to directly on GitHub.
+
 ### Step 1: Set Up Your Environment
 
 See the [Local Dev Env Setup](README.md#local-dev-env-setup) guide for setting up a development environment before you attempt to submit your first pull request.

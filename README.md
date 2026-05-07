@@ -84,6 +84,11 @@ Kubernetes resources.
 We welcome contributions of all sizes, from typo fixes to new features. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guide.
 
+NVCF is a new open source project, and we are actively smoothing the
+contribution workflow. We accept external contributions through GitHub pull
+requests today, with a few temporary wrinkles while the repository becomes more
+GitHub-native.
+
 Before changing a service, read [`AGENTS.md`](AGENTS.md) and the nearest nested
 `AGENTS.md`. The nested file is the best source for service-specific build,
 test, style, and review expectations.
