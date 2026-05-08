@@ -1,6 +1,3 @@
-> [!NOTE]
-> The NVCF CLI is now maintained natively in this monorepo under [`src/clis/nvcf-cli`](src/clis/nvcf-cli/). The former `ncp/nvcf/cli` repository is retained as historical import context; new CLI changes should land here.
-
 ![NVCF banner](docs/user/images/nvcf-banner.svg)
 
 [Documentation](docs/user/index.md) | [Installation](docs/user/installation.md) | [API Reference](docs/user/api.md) | [Contributing](CONTRIBUTING.md) | [build.nvidia.com Powered By NVCF](https://build.nvidia.com/)

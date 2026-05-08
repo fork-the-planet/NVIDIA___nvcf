@@ -102,6 +102,8 @@ func renderManifestArtifactRegistryPaths(catalog *Catalog) (string, error) {
 				"helm-reval",
 				"nv-api-keys",
 				"helm-nvcf-api-keys",
+				"nvct-service-oss",
+				"helm-nvct-api",
 				"llm-api-gateway",
 				"llm-request-router",
 				"helm-nvcf-llm-api-gateway",

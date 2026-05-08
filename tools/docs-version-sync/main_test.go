@@ -100,6 +100,47 @@ func TestRenderManifestDeploymentResources(t *testing.T) {
 	}
 }
 
+func TestRenderManifestHandlesNewNVCAAndNVCTImageAndHelmArtifacts(t *testing.T) {
+	catalog := testCatalog()
+	catalog.Artifacts = append(catalog.Artifacts,
+		Artifact{Name: "nvca", Type: ArtifactTypeImage, Registry: "staging", Version: "3.0.0-rc.13"},
+		Artifact{Name: "nvca-operator", Type: ArtifactTypeImage, Registry: "staging", Version: "3.0.0-rc.13"},
+		Artifact{Name: "helm-nvca-operator", Type: ArtifactTypeChart, Registry: "staging", Version: "1.11.1"},
+		Artifact{Name: "nvct-service-oss", Type: ArtifactTypeImage, Registry: "staging", Version: "1.2.11"},
+		Artifact{Name: "helm-nvct-api", Type: ArtifactTypeChart, Registry: "staging", Version: "1.0.2"},
+	)
+
+	got, err := Render("manifest-artifact-registry-paths", catalog)
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	gpuWorkload := sectionBetween(t, got, "#### GPU Workload Components", "#### Supporting Components")
+	for _, want := range []string{
+		"| Image | nvca | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvca:3.0.0-rc.13` |",
+		"| Image | nvca-operator | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvca-operator:3.0.0-rc.13` |",
+		"| Chart (OCI) | helm-nvca-operator | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator:1.11.1` |",
+	} {
+		if !strings.Contains(gpuWorkload, want) {
+			t.Fatalf("GPU workload section missing %q:\n%s", want, gpuWorkload)
+		}
+	}
+
+	controlPlane := sectionBetween(t, got, "#### Control Plane Components", "#### GPU Workload Components")
+	for _, want := range []string{
+		"| Image | nvct-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvct-service-oss:1.2.11` |",
+		"| Chart (OCI) | helm-nvct-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvct-api:1.0.2` |",
+	} {
+		if !strings.Contains(controlPlane, want) {
+			t.Fatalf("control plane section missing %q:\n%s", want, controlPlane)
+		}
+	}
+
+	if other, ok := optionalSectionBetween(got, "#### Other Published Components", "#### Deployment Resources"); ok && strings.Contains(other, "nvct") {
+		t.Fatalf("NVCT artifacts should not render in the fallback section:\n%s", other)
+	}
+}
+
 func TestRenderImageMirroringResourceExamples(t *testing.T) {
 	catalog := testCatalog()
 	got, err := Render("image-mirroring-resource-examples", catalog)
@@ -542,4 +583,29 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func sectionBetween(t *testing.T, content, startMarker, endMarker string) string {
+	t.Helper()
+	start := strings.Index(content, startMarker)
+	if start == -1 {
+		t.Fatalf("content missing start marker %q:\n%s", startMarker, content)
+	}
+	end := strings.Index(content[start:], endMarker)
+	if end == -1 {
+		t.Fatalf("content missing end marker %q after %q:\n%s", endMarker, startMarker, content[start:])
+	}
+	return content[start : start+end]
+}
+
+func optionalSectionBetween(content, startMarker, endMarker string) (string, bool) {
+	start := strings.Index(content, startMarker)
+	if start == -1 {
+		return "", false
+	}
+	end := strings.Index(content[start:], endMarker)
+	if end == -1 {
+		return content[start:], true
+	}
+	return content[start : start+end], true
 }

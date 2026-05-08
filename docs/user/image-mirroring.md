@@ -115,7 +115,7 @@ echo "${NGC_API_KEY}" | helm registry login nvcr.io/0833294136851237/nvcf-ncp-st
   --username '$oauthtoken' --password-stdin
 
 # Pull the chart
-helm pull oci://nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator --version 1.9.0
+helm pull oci://nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator --version 1.11.1
 ```
 
 **Repository-based Helm Charts (Non-OCI)**
@@ -182,7 +182,7 @@ First, ensure you have the [NGC CLI installed and configured](https://org.ngc.nv
 
 ```bash
 # Set the stack version
-export STACK_VERSION="0.6.0-rc.17"
+export STACK_VERSION="0.6.0-rc.19"
 
 # Download a specific stack version
 ngc registry resource download-version \
@@ -219,7 +219,7 @@ ngc registry resource list "0833294136851237/nvcf-ncp-staging/nvcf-self-managed-
 
 ```bash
 # Set the version
-export VERSION="0.6.0-rc.17"
+export VERSION="0.6.0-rc.19"
 
 ngc registry resource download-version "0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:${VERSION}" && \
    mkdir -p nvcf-self-managed-stack && \
@@ -358,8 +358,8 @@ echo "${NGC_API_KEY}" | helm registry login nvcr.io/0833294136851237/nvcf-ncp-st
   --username '$oauthtoken' --password-stdin
 
 # 2. Pull the Helm chart from NGC
-helm pull oci://nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator --version 1.9.0
-# This creates: helm-nvca-operator-1.9.0.tgz
+helm pull oci://nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator --version 1.11.1
+# This creates: helm-nvca-operator-1.11.1.tgz
 
 # 3. Login to AWS ECR with Helm
 aws ecr get-login-password --region us-east-1 | \
@@ -369,7 +369,7 @@ aws ecr get-login-password --region us-east-1 | \
 aws ecr create-repository --repository-name ${REPO_PREFIX}/helm-nvca-operator --region us-east-1
 
 # 5. Push to ECR as OCI artifact (include repository prefix)
-helm push helm-nvca-operator-1.9.0.tgz oci://<aws-account-id>.dkr.ecr.us-east-1.amazonaws.com/${REPO_PREFIX}
+helm push helm-nvca-operator-1.11.1.tgz oci://<aws-account-id>.dkr.ecr.us-east-1.amazonaws.com/${REPO_PREFIX}
 ```
 
 <Note>
@@ -448,8 +448,8 @@ echo "${NGC_API_KEY}" | helm registry login nvcr.io/0833294136851237/nvcf-ncp-st
   --username '$oauthtoken' --password-stdin
 
 # 2. Pull the Helm chart from NGC
-helm pull oci://nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator --version 1.9.0
-# This creates: helm-nvca-operator-1.9.0.tgz
+helm pull oci://nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator --version 1.11.1
+# This creates: helm-nvca-operator-1.11.1.tgz
 
 # 3. Login to Volcano Engine CR with Helm
 helm registry login ${CR_ENDPOINT} \
@@ -457,7 +457,7 @@ helm registry login ${CR_ENDPOINT} \
   --password "${CR_PASSWORD}"
 
 # 4. Push to Volcano Engine CR as OCI artifact
-helm push helm-nvca-operator-1.9.0.tgz oci://${CR_ENDPOINT}/${NAMESPACE}
+helm push helm-nvca-operator-1.11.1.tgz oci://${CR_ENDPOINT}/${NAMESPACE}
 ```
 
 ## Troubleshooting
