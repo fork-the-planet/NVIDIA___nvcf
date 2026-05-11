@@ -20,6 +20,20 @@ Useful pointers:
 
 If a referenced skill is outdated, update it before finishing.
 
+## Local QA and Testing Environment Safety
+
+For new local QA and testing, including one-click or self-hosted install
+validation, treat stale local state as a test hazard. Start from a fresh
+worktree at the target ref, inventory existing `k3d`, `kubectl`, Helm, and
+local artifact state, then ask the user whether cleanup or a net-new isolated
+environment is appropriate. Never delete clusters, Helm releases, worktrees,
+secrets, or artifact directories without explicit user confirmation.
+
+Use `.cursor/skills/nvcf-self-hosted-local-dev/SKILL.md` for the detailed local
+k3d workflow. If creating a net-new environment, use unique cluster names,
+ports, Helmfile environments, secrets files, CLI configs, and artifact
+directories.
+
 ## Writing AGENTS.md Files
 
 Every subtree that an agent may work in should have its own `AGENTS.md` with build commands, test commands, code style, and any subtree-specific conventions. Keep each file under 400 lines; split into separate docs or skills when it grows past that.
