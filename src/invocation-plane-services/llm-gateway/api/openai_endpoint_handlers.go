@@ -522,6 +522,7 @@ func (h *OpenAIProxyHandlers) validateAndSetInvocationModel(
 		return "", err
 	}
 	reqCtx.Model = routedModel
+	setRoutingMethodForModel(reqCtx, routedModel)
 	return requestModel, nil
 }
 

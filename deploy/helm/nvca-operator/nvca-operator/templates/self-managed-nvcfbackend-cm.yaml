@@ -33,6 +33,10 @@ kind: ConfigMap
 metadata:
   name: nvcfbackend-self-managed
   namespace: {{ .Release.Namespace }}
+  {{- if .Values.nvcaImage.repositoryOverride }}
+  annotations:
+    release-artifact-nvca-image: {{ printf "%s:%s" .Values.nvcaImage.repositoryOverride .Values.selfManaged.nvcaVersion | quote }}
+  {{- end }}
   labels:
     {{- include "nvcaop.labels" . | nindent 4 }}
 data:
@@ -101,6 +105,10 @@ kind: ConfigMap
 metadata:
   name: nvcfbackend-self-managed
   namespace: {{ .Release.Namespace }}
+  {{- if .Values.nvcaImage.repositoryOverride }}
+  annotations:
+    release-artifact-nvca-image: {{ printf "%s:%s" .Values.nvcaImage.repositoryOverride .Values.selfManaged.nvcaVersion | quote }}
+  {{- end }}
   labels:
     {{- include "nvcaop.labels" . | nindent 4 }}
 data: {}

@@ -293,7 +293,8 @@ func (r *Reconciler) doStatus(
 				Message: writeObjectStatuses(ctx, r.Client.Scheme(), statuses, filterTerminal),
 			})
 			rerr = reconcile.TerminalError(fmt.Errorf("at least one object is degraded"))
-			log.Error(rerr, "Function is degraded")
+			log.Error(rerr, "Function is degraded",
+				"errorObjects", collectObjectIDs(ctx, r.Client.Scheme(), statuses, filterTerminal))
 		} else {
 			// Check if there is an existing MiniServiceConditionObjectsHealthy to
 			// and set to a backoff timeout
@@ -320,10 +321,13 @@ func (r *Reconciler) doStatus(
 			if reason == v1alpha1.MiniServiceStatusReasonObjectsFailedWithinBackoffTimeout {
 				res.RequeueAfter = r.K8sTimeConfig.FailingObjectsBackoffRequeueInterval
 				rerr = nil
-				log.Info("Objects are failing with backoff, requeuing", "after", r.K8sTimeConfig.FailingObjectsBackoffRequeueInterval)
+				log.Info("Objects are failing with backoff, requeuing",
+					"after", r.K8sTimeConfig.FailingObjectsBackoffRequeueInterval,
+					"terminalObjects", collectObjectIDs(ctx, r.Client.Scheme(), statuses, filterTerminal))
 			} else {
 				rerr = reconcile.TerminalError(fmt.Errorf("some objects failed"))
-				log.Error(rerr, "At least one object has a bad terminal status", "objectStatuses", statuses)
+				log.Error(rerr, "At least one object has a bad terminal status",
+					"terminalObjects", collectObjectIDs(ctx, r.Client.Scheme(), statuses, filterTerminal))
 			}
 		}
 
@@ -341,7 +345,8 @@ func (r *Reconciler) doStatus(
 				Message: writeObjectStatuses(ctx, r.Client.Scheme(), statuses, filterPending),
 			})
 			rerr = reconcile.TerminalError(fmt.Errorf("some resources timed out pending"))
-			log.Error(rerr, "Pending object timeout reached")
+			log.Error(rerr, "Pending object timeout reached",
+				"pendingObjects", collectObjectIDs(ctx, r.Client.Scheme(), statuses, filterPending))
 		} else {
 			var message string
 			if !slices.ContainsFunc(statuses, func(os ObjectStatus) bool {
@@ -351,18 +356,18 @@ func (r *Reconciler) doStatus(
 				if ms.Status.Phase != v1alpha1.MiniServiceRunning {
 					ms.Status.Phase = v1alpha1.MiniServiceStarting
 				}
-				message = "All Pods are scheduled, waiting on readiness"
+				message = "All objects are scheduled, waiting on readiness"
 			} else {
-				log.V(1).Info("Waiting on more Pods to schedule before transitioning to Starting")
-				message = "Some Pods are not scheduled"
+				log.V(1).Info("Waiting on more objects to schedule before transitioning to Starting")
+				message = "Some objects are not scheduled"
 			}
 			meta.SetStatusCondition(&ms.Status.Conditions, metav1.Condition{
 				Type:    v1alpha1.MiniServiceConditionObjectsHealthy,
 				Status:  metav1.ConditionFalse,
 				Reason:  v1alpha1.MiniServiceStatusReasonWaitingObjectReadiness,
-				Message: message,
+				Message: fmt.Sprintf("%s\n%s", message, writeObjectStatuses(ctx, r.Client.Scheme(), statuses, filterPending)),
 			})
-			log.Info("Waiting on object readiness")
+			log.Info(message, "pendingObjects", collectObjectIDs(ctx, r.Client.Scheme(), statuses, filterPending))
 
 			// Requeue at least once after the scheduling timeout has passed in case no progress is made.
 			res.RequeueAfter = getPodSchedulingTimeout(ctx, icmsReq, r.K8sTimeConfig)
@@ -480,11 +485,12 @@ func (r *Reconciler) doTerminalTaskStatus(
 	if reason == v1alpha1.MiniServiceStatusReasonObjectsFailedWithinBackoffTimeout {
 		res.RequeueAfter = r.K8sTimeConfig.FailingObjectsBackoffRequeueInterval
 		rerr = nil
-		log.Info("Objects are failing with backoff, requeuing", "after", r.K8sTimeConfig.FailingObjectsBackoffRequeueInterval)
-	}
-
-	if rerr != nil {
-		log.Error(rerr, "Task has failed")
+		log.Info("Objects are failing with backoff, requeuing",
+			"after", r.K8sTimeConfig.FailingObjectsBackoffRequeueInterval,
+			"terminalObjects", collectObjectIDs(ctx, r.Client.Scheme(), statuses, filterTerminal))
+	} else if rerr != nil {
+		log.Error(rerr, "Task has failed",
+			"terminalObjects", collectObjectIDs(ctx, r.Client.Scheme(), statuses, filterTerminal))
 	}
 
 	return res, rerr
@@ -540,7 +546,7 @@ func (s ObjectStatus) toTerminalEventStatus() (cs ObjectStatus) {
 	return cs
 }
 
-// Visit traverses the object status tree s in preorder, calling f on each node.
+// Visit traverses the object status tree s in DFS pre-order, calling f on each node.
 func (s *ObjectStatus) Visit(f func(*ObjectStatus)) {
 	f(s)
 	for i := range s.ChildObjects {
@@ -1194,6 +1200,22 @@ func writeObjectStatus(ctx context.Context, sch *runtime.Scheme, sb *strings.Bui
 			sb.WriteByte('\n')
 		}
 	}
+}
+
+// collectObjectIDs collects IDs of the objects in objStatuses that match the filter, including children.
+func collectObjectIDs(ctx context.Context, sch *runtime.Scheme, objStatuses ObjectStatuses, filter func(ObjectStatus) bool) (ids []string) {
+	for _, objStatus := range objStatuses {
+		// Let top-level object determine whether children may be in filtered state.
+		if !filter(objStatus) {
+			continue
+		}
+		objStatus.Visit(func(os *ObjectStatus) {
+			if filter(*os) {
+				ids = append(ids, makeObjectIdentifierString(ctx, sch, os.Object))
+			}
+		})
+	}
+	return ids
 }
 
 func (r *Reconciler) isOwner(ctx context.Context, owner, target client.Object) bool {

@@ -131,11 +131,6 @@ agent:
   functionDeploymentStagesStageOAuthPublicKeysetEndpoint: https://stage-fnds-oauth.example.test/.well-known/jwks.json
   functionDeploymentStagesProdOAuthTokenURL: https://prod-fnds-oauth.example.test/token
   functionDeploymentStagesProdOAuthPublicKeysetEndpoint: https://prod-fnds-oauth.example.test/.well-known/jwks.json
-  rolloverServiceURL: https://stg.api.ros.nvidia.com
-  rolloverServiceStageOAuthTokenURL: https://stage-ros-oauth.example.test/token
-  rolloverServiceStageOAuthPublicKeysetEndpoint: https://stage-ros-oauth.example.test/.well-known/jwks.json
-  rolloverServiceProdOAuthTokenURL: https://prod-ros-oauth.example.test/token
-  rolloverServiceProdOAuthPublicKeysetEndpoint: https://prod-ros-oauth.example.test/.well-known/jwks.json
   NATSURL: nats://nats.localhost:14222
 `), 0600)
 		require.NoError(t, err)
@@ -167,11 +162,6 @@ agent:
 		assert.Equal(t, "https://stage-fnds-oauth.example.test/.well-known/jwks.json", gotOpts.FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint)
 		assert.Equal(t, "https://prod-fnds-oauth.example.test/token", gotOpts.FunctionDeploymentStagesProdOAuthTokenURL)
 		assert.Equal(t, "https://prod-fnds-oauth.example.test/.well-known/jwks.json", gotOpts.FunctionDeploymentStagesProdOAuthPublicKeysetEndpoint)
-		assert.Equal(t, "https://stg.api.ros.nvidia.com", gotOpts.RolloverServiceURL)
-		assert.Equal(t, "https://stage-ros-oauth.example.test/token", gotOpts.RolloverServiceStageOAuthTokenURL)
-		assert.Equal(t, "https://stage-ros-oauth.example.test/.well-known/jwks.json", gotOpts.RolloverServiceStageOAuthPublicKeysetEndpoint)
-		assert.Equal(t, "https://prod-ros-oauth.example.test/token", gotOpts.RolloverServiceProdOAuthTokenURL)
-		assert.Equal(t, "https://prod-ros-oauth.example.test/.well-known/jwks.json", gotOpts.RolloverServiceProdOAuthPublicKeysetEndpoint)
 		assert.Equal(t, "nats://nats.localhost:14222", gotOpts.NATSURL)
 	})
 

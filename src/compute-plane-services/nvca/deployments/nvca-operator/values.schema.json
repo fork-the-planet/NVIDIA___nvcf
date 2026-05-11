@@ -397,37 +397,6 @@
                                     }
                                 }
                             }
-                        },
-                        "rolloverService": {
-                            "type": "object",
-                            "properties": {
-                                "stage": {
-                                    "type": "object",
-                                    "properties": {
-                                        "tokenURL": {
-                                            "type": "string",
-                                            "default": ""
-                                        },
-                                        "publicKeysetEndpoint": {
-                                            "type": "string",
-                                            "default": ""
-                                        }
-                                    }
-                                },
-                                "prod": {
-                                    "type": "object",
-                                    "properties": {
-                                        "tokenURL": {
-                                            "type": "string",
-                                            "default": ""
-                                        },
-                                        "publicKeysetEndpoint": {
-                                            "type": "string",
-                                            "default": ""
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 }

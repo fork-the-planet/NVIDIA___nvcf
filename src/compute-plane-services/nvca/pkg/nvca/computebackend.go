@@ -58,9 +58,6 @@ type ICMSRequestHelper interface {
 
 	// PurgeInstanceID purges a specific instance ID and updates the terminated instances map
 	PurgeInstanceID(ctx context.Context, req *nvcav2beta1.ICMSRequest, terminatedInstances map[string]nvcav2beta1.InstanceStatus, instanceID string) bool
-
-	// GetROSUpdatesForRequest returns the consolidate payload of List<RolloverServiceUpdateInfo> to be posted to ROS
-	GetROSUpdatesForRequest(ctx context.Context, req *nvcav2beta1.ICMSRequest) ([]types.ROSUpdateInfo, error)
 }
 
 type K8sArtifactHelper interface {

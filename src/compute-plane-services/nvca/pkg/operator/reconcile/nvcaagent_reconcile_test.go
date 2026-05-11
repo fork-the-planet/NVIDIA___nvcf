@@ -4893,10 +4893,6 @@ func TestNewAgentConfigIncludesServiceOAuthEndpoints(t *testing.T) {
 					FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint: "https://stage-fnds-oauth.example.test/.well-known/jwks.json",
 					FunctionDeploymentStagesProdOAuthTokenURL:              "https://prod-fnds-oauth.example.test/token",
 					FunctionDeploymentStagesProdOAuthPublicKeysetEndpoint:  "https://prod-fnds-oauth.example.test/.well-known/jwks.json",
-					RolloverServiceStageOAuthTokenURL:                      "https://stage-ros-oauth.example.test/token",
-					RolloverServiceStageOAuthPublicKeysetEndpoint:          "https://stage-ros-oauth.example.test/.well-known/jwks.json",
-					RolloverServiceProdOAuthTokenURL:                       "https://prod-ros-oauth.example.test/token",
-					RolloverServiceProdOAuthPublicKeysetEndpoint:           "https://prod-ros-oauth.example.test/.well-known/jwks.json",
 				},
 			},
 		},
@@ -4913,10 +4909,6 @@ func TestNewAgentConfigIncludesServiceOAuthEndpoints(t *testing.T) {
 	assert.Equal(t, "https://stage-fnds-oauth.example.test/.well-known/jwks.json", cfg.Agent.FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint)
 	assert.Equal(t, "https://prod-fnds-oauth.example.test/token", cfg.Agent.FunctionDeploymentStagesProdOAuthTokenURL)
 	assert.Equal(t, "https://prod-fnds-oauth.example.test/.well-known/jwks.json", cfg.Agent.FunctionDeploymentStagesProdOAuthPublicKeysetEndpoint)
-	assert.Equal(t, "https://stage-ros-oauth.example.test/token", cfg.Agent.RolloverServiceStageOAuthTokenURL)
-	assert.Equal(t, "https://stage-ros-oauth.example.test/.well-known/jwks.json", cfg.Agent.RolloverServiceStageOAuthPublicKeysetEndpoint)
-	assert.Equal(t, "https://prod-ros-oauth.example.test/token", cfg.Agent.RolloverServiceProdOAuthTokenURL)
-	assert.Equal(t, "https://prod-ros-oauth.example.test/.well-known/jwks.json", cfg.Agent.RolloverServiceProdOAuthPublicKeysetEndpoint)
 }
 
 func TestGetEffectiveOTelCollectorConfig(t *testing.T) {

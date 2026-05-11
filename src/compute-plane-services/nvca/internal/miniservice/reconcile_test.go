@@ -879,10 +879,13 @@ rules:
 				Status: metav1.ConditionTrue,
 			},
 			{
-				Reason:  v1alpha1.MiniServiceStatusReasonWaitingObjectReadiness,
-				Type:    v1alpha1.MiniServiceConditionObjectsHealthy,
-				Status:  metav1.ConditionFalse,
-				Message: "Some Pods are not scheduled",
+				Reason: v1alpha1.MiniServiceStatusReasonWaitingObjectReadiness,
+				Type:   v1alpha1.MiniServiceConditionObjectsHealthy,
+				Status: metav1.ConditionFalse,
+				Message: `Some objects are not scheduled
+apps/v1.Deployment foo
+v1.Pod utils
+`,
 			},
 		}, sms.Status.Conditions)
 	}
@@ -941,10 +944,15 @@ rules:
 				Status: metav1.ConditionTrue,
 			},
 			{
-				Reason:  v1alpha1.MiniServiceStatusReasonWaitingObjectReadiness,
-				Type:    v1alpha1.MiniServiceConditionObjectsHealthy,
-				Status:  metav1.ConditionFalse,
-				Message: "All Pods are scheduled, waiting on readiness",
+				Reason: v1alpha1.MiniServiceStatusReasonWaitingObjectReadiness,
+				Type:   v1alpha1.MiniServiceConditionObjectsHealthy,
+				Status: metav1.ConditionFalse,
+				Message: `All objects are scheduled, waiting on readiness
+apps/v1.Deployment foo
+apps/v1.ReplicaSet dep-rs
+v1.Pod dep-pod
+v1.Pod utils
+`,
 			},
 		}, sms.Status.Conditions)
 	}
@@ -3221,7 +3229,7 @@ rules:
 				Reason:  v1alpha1.MiniServiceStatusReasonWaitingObjectReadiness,
 				Type:    v1alpha1.MiniServiceConditionObjectsHealthy,
 				Status:  metav1.ConditionFalse,
-				Message: "Some Pods are not scheduled",
+				Message: "Some objects are not scheduled\nbatch/v1.Job foo\nv1.Pod job-pod\n",
 			},
 		}, ms.Status.Conditions)
 	}

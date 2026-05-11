@@ -51,6 +51,7 @@ const (
 	headerRequestID     = "X-Request-Id"
 	headerTargetRegion  = "X-Groq-Region"
 	headerRoutingKey    = "X-Routing-Key"
+	headerRoutingMethod = "X-Routing-Method"
 	headerModel         = "X-Model"
 	headerInputTokens   = "X-Input-Tokens"
 	headerTokenEstimate = "X-Token-Estimate"
@@ -206,6 +207,9 @@ func (p *StargateProvider) newOutboundRequest(
 	if reqCtx.RoutingKey != "" {
 		req.Header.Set(headerRoutingKey, reqCtx.RoutingKey)
 	}
+	if reqCtx.RoutingMethod != "" {
+		req.Header.Set(headerRoutingMethod, reqCtx.RoutingMethod)
+	}
 	if bearerToken := reqCtx.BearerToken; bearerToken != "" {
 		req.Header.Set(headerAuthorization, "Bearer "+bearerToken)
 	}
@@ -263,6 +267,9 @@ func (p *StargateProvider) Proxy(
 		}
 		if reqCtx.RoutingKey != "" {
 			outbound.Header.Set(headerRoutingKey, reqCtx.RoutingKey)
+		}
+		if reqCtx.RoutingMethod != "" {
+			outbound.Header.Set(headerRoutingMethod, reqCtx.RoutingMethod)
 		}
 		if reqCtx.Model != "" {
 			outbound.Header.Set(headerModel, reqCtx.Model)

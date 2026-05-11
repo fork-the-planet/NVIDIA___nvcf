@@ -61,11 +61,12 @@ func TestStargateProviderCompleteForwardsRenderedPromptAndRoutingHeaders(t *test
 		InputTokens:    3,
 	}
 	reqCtx := &requestctx.RequestContext{
-		RequestID:    "req-123",
-		BearerToken:  "secret-token",
-		RoutingKey:   "fn-abc",
-		Model:        "upstream-model",
-		TargetRegion: "us-west1",
+		RequestID:     "req-123",
+		BearerToken:   "secret-token",
+		RoutingKey:    "fn-abc",
+		Model:         "upstream-model",
+		RoutingMethod: "experimental_method",
+		TargetRegion:  "us-west1",
 	}
 
 	wantEstimate := routingTokenEstimate(request)
@@ -84,6 +85,7 @@ func TestStargateProviderCompleteForwardsRenderedPromptAndRoutingHeaders(t *test
 		require.Equal(t, "us-west1", r.Header.Get(headerTargetRegion))
 		require.Equal(t, "fn-abc", r.Header.Get(headerRoutingKey))
 		require.Equal(t, "upstream-model", r.Header.Get(headerModel))
+		require.Equal(t, "experimental_method", r.Header.Get(headerRoutingMethod))
 		require.Equal(t, fmt.Sprintf("%d", wantEstimate), r.Header.Get(headerInputTokens))
 		require.Equal(t, fmt.Sprintf("%d", wantEstimate), r.Header.Get(headerTokenEstimate))
 
@@ -243,6 +245,50 @@ func TestStargateProviderStreamParsesSSE(t *testing.T) {
 	require.Equal(t, "hello ", ptr.Deref(chunks[0].Choices[0].Delta.Content))
 	require.Equal(t, "world", ptr.Deref(chunks[1].Choices[0].Delta.Content))
 	require.Equal(t, models.FinishReasonStop, ptr.Deref(chunks[1].Choices[0].FinishReason))
+}
+
+func TestStargateProviderProxyForwardsRoutingMethod(t *testing.T) {
+	t.Parallel()
+
+	reqCtx := &requestctx.RequestContext{
+		RequestID:     "req-proxy",
+		RoutingKey:    "fn-proxy",
+		Model:         "proxy-model",
+		RoutingMethod: "least_loaded",
+	}
+	request := &ProxyRequest{
+		Method: http.MethodPost,
+		Path:   "/v1/embeddings",
+		Body:   io.NopCloser(strings.NewReader(`{"model":"proxy-model","input":"hello"}`)),
+	}
+
+	provider, err := NewStargateProvider(config.StargateConfig{URL: "http://stargate.example"})
+	require.NoError(t, err)
+	provider.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Helper()
+
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/v1/embeddings", r.URL.Path)
+		require.Equal(t, "req-proxy", r.Header.Get(headerRequestID))
+		require.Equal(t, "fn-proxy", r.Header.Get(headerRoutingKey))
+		require.Equal(t, "proxy-model", r.Header.Get(headerModel))
+		require.Equal(t, "least_loaded", r.Header.Get(headerRoutingMethod))
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				headerContentType: []string{contentTypeJSON},
+			},
+			Body:    io.NopCloser(strings.NewReader(`{"object":"list","data":[]}`)),
+			Request: r,
+		}, nil
+	})}
+
+	response, err := provider.Proxy(context.Background(), reqCtx, request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+
+	require.Equal(t, http.StatusOK, response.StatusCode)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

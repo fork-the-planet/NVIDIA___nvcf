@@ -294,6 +294,7 @@ func (h *OpenAIProxyHandlers) SpeechToSpeech(ec echo.Context) error {
 		return err
 	}
 	reqCtx.Model = routedModel
+	setRoutingMethodForModel(reqCtx, routedModel)
 	params.LLM.Model = routedModel
 	if !h.modelCapabilities(reqCtx.Model).SupportsSpeechToSpeech() {
 		return echo.NewHTTPError(

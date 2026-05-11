@@ -126,8 +126,7 @@ stg.grpc.nvcf.nvidia.com:443 Echo/EchoMessage
 ### HTTP Rate Limiting in Staging
 
 ```bash
-curl --location 'https://stg.api.nvcf.nvidia.com/v2/nvcf/pexec/functions/1f7c8647-c8c5-4792-9339-108d831dadb5' \
---header 'NVCF-POLL-SECONDS: 1' \
+curl --location 'https://1f7c8647-c8c5-4792-9339-108d831dadb5.invocation.stg.api.nvcf.nvidia.com/echo' \
 --header 'Accept: application/json' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer <token>' \

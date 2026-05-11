@@ -74,7 +74,7 @@ nats:
       image:
         registry: docker.io
         repository: natsio/nats-box
-        tag: 0.19.2-nonroot
+        tag: 0.19.5-nonroot
         pullPolicy: IfNotPresent
     # Add contexts configuration to mount the nkeys secret
     contexts:

@@ -40,7 +40,7 @@ cargo run --package nvcf-invocation-service --bin server -- -c crates/server/res
 The ngrok URL will be displayed in the ngrok terminal and can be used to access your service externally.
 
 ```shell
-curl --location 'http://localhost:8080/v2/nvcf/pexec/functions/6c15cde0-d06a-4bbf-a4e1-e587c4ca9a11' \
+curl --location 'http://localhost:8080/echo' \
 --header 'Accept: application/json' \
 --header 'NVCF-POLL-SECONDS: 10' \
 --header 'Content-Type: application/json' \

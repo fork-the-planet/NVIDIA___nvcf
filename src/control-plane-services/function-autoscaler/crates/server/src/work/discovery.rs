@@ -457,9 +457,14 @@ pub async fn get_functions_with_workers(
     env: &str,
     timeseries_db_ignore_env: bool,
 ) -> Result<Vec<ActiveFunctionDetails>> {
-    let end_time = Utc::now();
+    // Align end to the previous fully-settled step boundary so the trailing point is not the
+    // bleeding edge — partial scrape cycles there can collapse count by(...) for healthy pods.
+    const STEP_SECS: i64 = 60;
+    let now_secs = Utc::now().timestamp();
+    let end_secs = (now_secs / STEP_SECS) * STEP_SECS - STEP_SECS;
+    let end_time = chrono::DateTime::from_timestamp(end_secs, 0).unwrap_or_else(Utc::now);
     let start_time = end_time - Duration::minutes(5); // 5 minute window
-    let step = StdDuration::from_secs(60); // 1 minute step
+    let step = StdDuration::from_secs(STEP_SECS as u64);
 
     // Query for functions with workers OR functions with active instances (for BYOC)
     // This ensures both normal functions and BYOC functions are discovered
@@ -581,9 +586,14 @@ pub async fn get_functions_with_active_instances(
     env: &str,
     timeseries_db_ignore_env: bool,
 ) -> Result<Vec<ActiveFunctionDetails>> {
-    let end_time = Utc::now();
+    // Align end to the previous fully-settled step boundary so the trailing point is not the
+    // bleeding edge — partial scrape cycles there can collapse aggregations for healthy pods.
+    const STEP_SECS: i64 = 60;
+    let now_secs = Utc::now().timestamp();
+    let end_secs = (now_secs / STEP_SECS) * STEP_SECS - STEP_SECS;
+    let end_time = chrono::DateTime::from_timestamp(end_secs, 0).unwrap_or_else(Utc::now);
     let start_time = end_time - Duration::minutes(5); // 5 minute window
-    let step = StdDuration::from_secs(60); // 1 minute step
+    let step = StdDuration::from_secs(STEP_SECS as u64);
 
     let query = if timeseries_db_ignore_env {
         r#"nvcf_function_instances_current{state="active"} > 0"#.to_string()

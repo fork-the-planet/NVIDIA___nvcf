@@ -379,21 +379,3 @@ type ICMSTerminationMessage struct {
 	//nolint:revive
 	InstanceIds []string `json:"instanceIds,omitempty"`
 }
-
-type InstanceUpdateStatusDTO struct {
-	InstanceID                    string            `json:"instanceId,omitempty"`
-	NCAID                         string            `json:"ncaId,omitempty"`
-	FunctionID                    string            `json:"functionId,omitempty"`
-	FunctionVersionID             string            `json:"functionVersionId,omitempty"`
-	ClusterID                     string            `json:"zoneId,omitempty"`
-	ContainerVersion              map[string]string `json:"containerVersion,omitempty"`
-	IsZoneGFN                     bool              `json:"isZoneGFN"`
-	ICMSRequestID                 string            `json:"icmsRequestId,omitempty"`
-	IsNvcaInplaceUpgradeSupported bool              `json:"isNvcaInplaceUpgradeSupported,omitempty"`
-}
-
-type ROSUpdateInfo struct {
-	RequestID  string                    `json:"requestID,omitempty"`
-	InstanceID string                    `json:"instanceID,string"`
-	Payload    []InstanceUpdateStatusDTO `json:"payload,omitempty"`
-}

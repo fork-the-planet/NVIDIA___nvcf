@@ -103,10 +103,10 @@ func NewHandlers(
 	opts ...HandlerOption,
 ) *Handlers {
 	h := &Handlers{
-		config:      cfg,
-		provider:    p,
-		rateLimiter: limiter,
-		templater:   templater,
+		config:        cfg,
+		provider:      p,
+		rateLimiter:   limiter,
+		templater:     templater,
 		limitResolver: CallerLimitResolver{},
 	}
 	if proxyProvider, ok := any(p).(provider.OpenAIProxyProvider); ok {
@@ -154,6 +154,7 @@ func (h *Handlers) normalizeChatRequest(
 	}
 	request.Model = routedModel
 	reqCtx.Model = routedModel
+	setRoutingMethodForModel(reqCtx, routedModel)
 
 	if !request.ServiceTier.IsValid() {
 		request.ServiceTier = h.config.DefaultServiceTier

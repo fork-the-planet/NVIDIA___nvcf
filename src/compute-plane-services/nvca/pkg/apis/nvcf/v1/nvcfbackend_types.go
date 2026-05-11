@@ -98,19 +98,6 @@ type ClusterConfig struct {
 	K8sClusterNetworkCIDRs []string `json:"k8sClusterNetworkCIDRs,omitempty"`
 }
 
-const (
-	RolloverServiceURLStaging = "https://stg.api.ros.nvidia.com"
-	RolloverServiceURLProd    = "https://api.ros.nvidia.com"
-)
-
-// RolloverServiceURL returns the Rollover Service URL for the given environment type.
-func (cfg *ClusterConfig) RolloverServiceURL(envType EnvType) string {
-	if envType == EnvTypeStage {
-		return RolloverServiceURLStaging
-	}
-	return RolloverServiceURLProd
-}
-
 // +k8s:openapi-gen=true
 type ICMSConfig struct {
 	ICMSServiceURL string `json:"icmsServiceURL"`
@@ -451,10 +438,6 @@ type AgentConfig struct {
 	HelmReValStageOAuthPublicKeysetEndpoint                string                       `json:"helmReValStageOAuthPublicKeysetEndpoint,omitempty"`
 	HelmReValProdOAuthTokenURL                             string                       `json:"helmReValProdOAuthTokenURL,omitempty"`
 	HelmReValProdOAuthPublicKeysetEndpoint                 string                       `json:"helmReValProdOAuthPublicKeysetEndpoint,omitempty"`
-	RolloverServiceStageOAuthTokenURL                      string                       `json:"rolloverServiceStageOAuthTokenURL,omitempty"`
-	RolloverServiceStageOAuthPublicKeysetEndpoint          string                       `json:"rolloverServiceStageOAuthPublicKeysetEndpoint,omitempty"`
-	RolloverServiceProdOAuthTokenURL                       string                       `json:"rolloverServiceProdOAuthTokenURL,omitempty"`
-	RolloverServiceProdOAuthPublicKeysetEndpoint           string                       `json:"rolloverServiceProdOAuthPublicKeysetEndpoint,omitempty"`
 	FunctionDeploymentStagesStageOAuthTokenURL             string                       `json:"functionDeploymentStagesStageOAuthTokenURL,omitempty"`
 	FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint string                       `json:"functionDeploymentStagesStageOAuthPublicKeysetEndpoint,omitempty"` //nolint:lll
 	FunctionDeploymentStagesProdOAuthTokenURL              string                       `json:"functionDeploymentStagesProdOAuthTokenURL,omitempty"`

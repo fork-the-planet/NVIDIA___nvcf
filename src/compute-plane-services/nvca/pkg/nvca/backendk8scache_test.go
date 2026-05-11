@@ -4931,9 +4931,6 @@ func (noopICMSRequestHelper) HandleInstanceStatusPreconditionFailure(context.Con
 func (noopICMSRequestHelper) PurgeInstanceID(context.Context, *nvcav2beta1.ICMSRequest, map[string]nvcav2beta1.InstanceStatus, string) bool {
 	return false
 }
-func (noopICMSRequestHelper) GetROSUpdatesForRequest(context.Context, *nvcav2beta1.ICMSRequest) ([]types.ROSUpdateInfo, error) {
-	return nil, nil
-}
 
 // terminatedSet is a minimal ICMSRequestHelper for scheduler workload metric tests.
 // It reports requests whose IDs are in the set as fully terminated.

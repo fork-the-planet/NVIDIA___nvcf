@@ -112,7 +112,6 @@ func TestAgentApis(t *testing.T) {
 		SyncQueueInterval:              defaultSyncQueueInterval,
 		SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 		PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-		RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 		SyncAcknowledgeRequestInterval: ackReqInterval,
 		GPUCapacity:                    2,
 		FeatureFlagFetcher:             featureflag.DefaultFetcher,
@@ -217,7 +216,6 @@ func TestAgent_getTelemetryAttributes(t *testing.T) {
 		SyncQueueInterval:              defaultSyncQueueInterval,
 		SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 		PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-		RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 		SyncAcknowledgeRequestInterval: ackReqInterval,
 		FeatureFlagFetcher:             featureflag.DefaultFetcher,
 		NVCAAgentVersion:               "v1.0.1",
@@ -259,7 +257,6 @@ func TestAgentOptions_WithNVCAOperatorVersion(t *testing.T) {
 		SyncQueueInterval:              defaultSyncQueueInterval,
 		SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 		PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-		RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 		SyncAcknowledgeRequestInterval: ackReqInterval,
 		FeatureFlagFetcher:             featureflag.DefaultFetcher,
 		NVCAOperatorVersion:            "v1.2.3",
@@ -299,7 +296,6 @@ func TestAgentOptions_WithoutNVCAOperatorVersion(t *testing.T) {
 		SyncQueueInterval:              defaultSyncQueueInterval,
 		SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 		PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-		RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 		SyncAcknowledgeRequestInterval: ackReqInterval,
 		FeatureFlagFetcher:             featureflag.DefaultFetcher,
 		// NVCAOperatorVersion not set - should default to empty string
@@ -546,7 +542,7 @@ var functionNode = &v1.Node{
 }
 
 func TestGetMetricsEvents(t *testing.T) {
-	assert.Equal(t, len(append(getAgentEvents(), getNVCAMetricEvents()...)), 17)
+	assert.Equal(t, len(append(getAgentEvents(), getNVCAMetricEvents()...)), 16)
 	metricEvents := getNVCAMetricEvents()
 	assert.Equal(t, metricEvents[0], EventModelCachingFailed)
 	assert.Equal(t, metricEvents[1], EventModelCachingSuccess)
@@ -618,7 +614,6 @@ func Test_getTickerEvents(t *testing.T) {
 		SyncQueueInterval:              defaultSyncQueueInterval,
 		SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 		PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-		RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 		FeatureFlagFetcher:             featureflag.DefaultFetcher,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -897,7 +892,6 @@ func TestEvictAllWorkloads(t *testing.T) {
 		SyncQueueInterval:              defaultSyncQueueInterval,
 		SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 		PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-		RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 		SyncAcknowledgeRequestInterval: ackReqInterval,
 		GPUCapacity:                    2,
 		FeatureFlagFetcher:             featureflag.DefaultFetcher,
@@ -1062,7 +1056,6 @@ func TestEvictAllWorkloads_EmptyList(t *testing.T) {
 		SyncQueueInterval:              defaultSyncQueueInterval,
 		SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 		PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-		RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 		SyncAcknowledgeRequestInterval: ackReqInterval,
 		GPUCapacity:                    2,
 		FeatureFlagFetcher:             featureflag.DefaultFetcher,
@@ -1660,12 +1653,6 @@ func TestAgentLivenessCheckers(t *testing.T) {
 				featureflag.UseFunctionDeploymentStages,
 			},
 		},
-		{
-			name: "ros enabled",
-			ffs: []*featureflag.FeatureFlag{
-				featureflag.RolloverServiceSupport,
-			},
-		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fff := &featureflagmock.Fetcher{EnabledFFs: tt.ffs}
@@ -1689,7 +1676,6 @@ func TestAgentLivenessCheckers(t *testing.T) {
 				SyncQueueInterval:              defaultSyncQueueInterval,
 				SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 				PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-				RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 				SyncAcknowledgeRequestInterval: ackReqInterval,
 				GPUCapacity:                    2,
 				FeatureFlagFetcher:             fff,
@@ -1778,7 +1764,6 @@ func TestNewAgent_NATSSecretsFetcherInitialization(t *testing.T) {
 				SyncQueueInterval:              defaultSyncQueueInterval,
 				SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 				PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-				RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 				SyncAcknowledgeRequestInterval: ackReqInterval,
 				FeatureFlagFetcher:             fff,
 				MetricsRegisterer:              prometheus.NewRegistry(),
@@ -2010,7 +1995,6 @@ func TestStartReadinessNotSetOnICMSRegistrationFailure(t *testing.T) {
 		SyncQueueInterval:              defaultSyncQueueInterval,
 		SyncRequestStatusInterval:      DefaultSyncRequestStatusInterval,
 		PeriodicInstanceStatusInterval: DefaultPeriodicInstanceStatusInterval,
-		RolloverServiceUpdateInterval:  DefaultRolloverServicesUpdateInterval,
 		SyncAcknowledgeRequestInterval: ackReqInterval,
 		GPUCapacity:                    2,
 		FeatureFlagFetcher:             featureflag.DefaultFetcher,

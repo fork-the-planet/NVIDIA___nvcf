@@ -81,3 +81,26 @@ func normalizeOpenAIRequestModel(
 
 	return routedModel, nil
 }
+
+func setRoutingMethodForModel(reqCtx *requestctx.RequestContext, model string) {
+	if reqCtx == nil {
+		return
+	}
+
+	reqCtx.RoutingMethod = ""
+	if reqCtx.ModelSpecs == nil {
+		return
+	}
+
+	spec, ok := reqCtx.ModelSpecs[model]
+	if !ok || spec.RoutingMethod == "" {
+		return
+	}
+
+	routingMethod := strings.TrimSpace(spec.RoutingMethod)
+	if routingMethod == "" {
+		return
+	}
+
+	reqCtx.RoutingMethod = routingMethod
+}

@@ -114,6 +114,11 @@ impl Drop for InflightRequestGuard {
             task::spawn(
                 async move {
                     tracing::trace!("InflightRequestGuard cancelling request.");
+                    // tear down workers already running this request
+                    if let Err(e) = nats_svc.publish_cancel(req_id, version_id).await {
+                        tracing::warn!("Failed to publish cancel for {:?}: {:?}", req_id, e);
+                    }
+                    // drop the message if it hasn't been picked up yet
                     match timeout(
                         Duration::from_secs(10),
                         nats_svc.cancel_request(req_id, version_id),
@@ -351,6 +356,14 @@ pub async fn pexec(
 
     // cancel requests if timed out on initial invocation since there will be nobody to listen for the response if it ever comes
     if response.status() == StatusCode::GATEWAY_TIMEOUT {
+        // tear down workers already running this request
+        if let Err(err) = nats_service
+            .publish_cancel(request_id, function_version_id)
+            .await
+        {
+            tracing::warn!("failed to publish cancel for timed out request {}", err)
+        }
+        // drop the message if it hasn't been picked up yet
         if let Err(err) = nats_service
             .cancel_request(request_id, function_version_id)
             .await
@@ -573,5 +586,101 @@ struct FnOnDrop {
 impl Drop for FnOnDrop {
     fn drop(&mut self) {
         (self.fn_on_drop)();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use std::time::Duration;
+    use testcontainers_modules::nats::Nats;
+    use testcontainers_modules::testcontainers::core::Mount;
+    use testcontainers_modules::testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+
+    async fn make_nats_service() -> (Arc<NatsService>, async_nats::Client, ContainerAsync<Nats>) {
+        let container = Nats::default()
+            .with_tag("2.10.25")
+            .with_mount(
+                Mount::bind_mount(
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/mocks/nats-server.conf"),
+                    "/nats-server.conf",
+                )
+                .with_access_mode(
+                    testcontainers_modules::testcontainers::core::AccessMode::ReadOnly,
+                ),
+            )
+            .start()
+            .await
+            .expect("start nats");
+        let host = container.get_host().await.unwrap().to_string();
+        let port = container.get_host_port_ipv4(4222).await.unwrap();
+        let address = format!("nats://{}:{}", host, port);
+
+        let nats_properties = crate::nats::NatsProperties {
+            nats_address: address.clone(),
+            ..Default::default()
+        };
+        let svc = NatsService::new(
+            &nats_properties,
+            "http://dummy.localhost",
+            None,
+            &crate::settings::GrpcClientConfig::default(),
+        )
+        .await
+        .expect("create NatsService");
+
+        let observer = async_nats::connect(&address).await.unwrap();
+        (Arc::new(svc), observer, container)
+    }
+
+    /// Drop on an unfinished guard broadcasts cancel with the request id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires docker; run with cargo test -- --ignored"]
+    async fn test_inflight_guard_drop_publishes_cancel() {
+        let (svc, observer, _container) = make_nats_service().await;
+        let request_id = RequestId::new();
+        let fvid = Uuid::new_v4();
+        let mut sub = observer
+            .subscribe(format!("nvcf.cancel.{}", fvid))
+            .await
+            .unwrap();
+        observer.flush().await.unwrap();
+
+        {
+            let _guard = InflightRequestGuard::new(svc.clone(), request_id, fvid);
+            // dropped at end of scope without mark_completed
+        }
+
+        let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
+            .await
+            .expect("should receive cancel within timeout")
+            .expect("subscription should not close");
+        assert_eq!(
+            std::str::from_utf8(&msg.payload).unwrap(),
+            request_id.to_string()
+        );
+    }
+
+    /// A completed guard stays silent on Drop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires docker; run with cargo test -- --ignored"]
+    async fn test_inflight_guard_drop_no_publish_when_completed() {
+        let (svc, observer, _container) = make_nats_service().await;
+        let request_id = RequestId::new();
+        let fvid = Uuid::new_v4();
+        let mut sub = observer
+            .subscribe(format!("nvcf.cancel.{}", fvid))
+            .await
+            .unwrap();
+        observer.flush().await.unwrap();
+
+        {
+            let mut guard = InflightRequestGuard::new(svc.clone(), request_id, fvid);
+            guard.mark_completed();
+        }
+
+        let result = tokio::time::timeout(Duration::from_millis(300), sub.next()).await;
+        assert!(result.is_err(), "completed guard must not publish a cancel");
     }
 }

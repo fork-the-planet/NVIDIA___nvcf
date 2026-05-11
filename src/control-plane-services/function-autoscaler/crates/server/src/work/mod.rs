@@ -178,10 +178,14 @@ async fn get_byoc_instance_count(
         env = env_suffix
     );
 
-    // Use query_range with a 1-minute window to get the latest value
-    let end_time = Utc::now();
-    let start_time = end_time - chrono::Duration::seconds(60);
-    let step = std::time::Duration::from_secs(60);
+    // Align end to the previous fully-settled step boundary (one step back from now).
+    // Reading the bleeding edge can pick up a partial scrape cycle and report a wrong count.
+    const STEP_SECS: i64 = 60;
+    let now_secs = Utc::now().timestamp();
+    let end_secs = (now_secs / STEP_SECS) * STEP_SECS - STEP_SECS;
+    let end_time = chrono::DateTime::from_timestamp(end_secs, 0).unwrap_or_else(Utc::now);
+    let start_time = end_time - chrono::Duration::seconds(STEP_SECS);
+    let step = std::time::Duration::from_secs(STEP_SECS as u64);
 
     tracing::info!(
         "BYOC instance count query for {}:{}: {}",
@@ -270,10 +274,12 @@ async fn get_current_worker_count_from_timeseries_db(
     );
 
     const STEP_SECS: i64 = 60;
-    // Align end to the last completed step so evaluation times are deterministic and the last
-    // point is at a step boundary (avoids clock skew / off-minute issues with Prometheus step).
+    // Roll the window back by one step so the trailing point is a fully-settled step boundary.
+    // Reading the bleeding edge collapses count() when scrape cycles for some pods haven't
+    // landed yet (Prometheus returns data for "now" or future timestamps via staleness lookback,
+    // but partial scrapes there make count by(...) drop to whatever subset is fresh).
     let now_secs = Utc::now().timestamp();
-    let end_secs = (now_secs / STEP_SECS) * STEP_SECS;
+    let end_secs = (now_secs / STEP_SECS) * STEP_SECS - STEP_SECS;
     let end_time = chrono::DateTime::from_timestamp(end_secs, 0).unwrap_or_else(Utc::now);
     let start_time = end_time - Duration::seconds(5 * STEP_SECS);
     let step = StdDuration::from_secs(STEP_SECS as u64);

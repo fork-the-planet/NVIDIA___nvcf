@@ -709,10 +709,6 @@ func TestWithAgentConfigMapper(t *testing.T) {
 				HelmReValStageOAuthPublicKeysetEndpoint:                "https://stage-reval-oauth.example.test/.well-known/jwks.json",
 				HelmReValProdOAuthTokenURL:                             "https://prod-reval-oauth.example.test/token",
 				HelmReValProdOAuthPublicKeysetEndpoint:                 "https://prod-reval-oauth.example.test/.well-known/jwks.json",
-				RolloverServiceStageOAuthTokenURL:                      "https://stage-ros-oauth.example.test/token",
-				RolloverServiceStageOAuthPublicKeysetEndpoint:          "https://stage-ros-oauth.example.test/.well-known/jwks.json",
-				RolloverServiceProdOAuthTokenURL:                       "https://prod-ros-oauth.example.test/token",
-				RolloverServiceProdOAuthPublicKeysetEndpoint:           "https://prod-ros-oauth.example.test/.well-known/jwks.json",
 				FunctionDeploymentStagesStageOAuthTokenURL:             "https://stage-fnds-oauth.example.test/token",
 				FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint: "https://stage-fnds-oauth.example.test/.well-known/jwks.json",
 				FunctionDeploymentStagesProdOAuthTokenURL:              "https://prod-fnds-oauth.example.test/token",
@@ -749,10 +745,6 @@ func TestWithAgentConfigMapper(t *testing.T) {
 		assert.Equal(t, "https://stage-reval-oauth.example.test/.well-known/jwks.json", dest.NVCFBackend.Spec.AgentConfig.HelmReValStageOAuthPublicKeysetEndpoint)
 		assert.Equal(t, "https://prod-reval-oauth.example.test/token", dest.NVCFBackend.Spec.AgentConfig.HelmReValProdOAuthTokenURL)
 		assert.Equal(t, "https://prod-reval-oauth.example.test/.well-known/jwks.json", dest.NVCFBackend.Spec.AgentConfig.HelmReValProdOAuthPublicKeysetEndpoint)
-		assert.Equal(t, "https://stage-ros-oauth.example.test/token", dest.NVCFBackend.Spec.AgentConfig.RolloverServiceStageOAuthTokenURL)
-		assert.Equal(t, "https://stage-ros-oauth.example.test/.well-known/jwks.json", dest.NVCFBackend.Spec.AgentConfig.RolloverServiceStageOAuthPublicKeysetEndpoint)
-		assert.Equal(t, "https://prod-ros-oauth.example.test/token", dest.NVCFBackend.Spec.AgentConfig.RolloverServiceProdOAuthTokenURL)
-		assert.Equal(t, "https://prod-ros-oauth.example.test/.well-known/jwks.json", dest.NVCFBackend.Spec.AgentConfig.RolloverServiceProdOAuthPublicKeysetEndpoint)
 		assert.Equal(t, "https://stage-fnds-oauth.example.test/token", dest.NVCFBackend.Spec.AgentConfig.FunctionDeploymentStagesStageOAuthTokenURL)
 		assert.Equal(t, "https://stage-fnds-oauth.example.test/.well-known/jwks.json", dest.NVCFBackend.Spec.AgentConfig.FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint)
 		assert.Equal(t, "https://prod-fnds-oauth.example.test/token", dest.NVCFBackend.Spec.AgentConfig.FunctionDeploymentStagesProdOAuthTokenURL)

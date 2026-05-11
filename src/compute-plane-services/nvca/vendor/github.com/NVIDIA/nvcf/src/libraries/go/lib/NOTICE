@@ -11,31 +11,9 @@ The following third-party licenses are included in the vendor directory:
 
     vendor/cloud.google.com/go/compute/metadata/LICENSE
     vendor/dario.cat/mergo/LICENSE
-    vendor/github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/config/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/credentials/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/feature/ec2/imds/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/internal/configsources/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/internal/endpoints/v2/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/internal/ini/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/internal/sync/singleflight/LICENSE
-    vendor/github.com/aws/aws-sdk-go-v2/internal/v4a/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/internal/checksum/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/internal/presigned-url/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/internal/s3shared/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/s3/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/signin/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/sso/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/ssooidc/LICENSE.txt
-    vendor/github.com/aws/aws-sdk-go-v2/service/sts/LICENSE.txt
-    vendor/github.com/aws/smithy-go/internal/sync/singleflight/LICENSE
-    vendor/github.com/aws/smithy-go/LICENSE
     vendor/github.com/beorn7/perks/LICENSE
     vendor/github.com/cenkalti/backoff/v5/LICENSE
     vendor/github.com/cespare/xxhash/v2/LICENSE.txt
-    vendor/github.com/cloudevents/sdk-go/v2/LICENSE
     vendor/github.com/cncf/xds/go/LICENSE
     vendor/github.com/cpuguy83/go-md2man/v2/LICENSE.md
     vendor/github.com/davecgh/go-spew/LICENSE
@@ -69,7 +47,6 @@ The following third-party licenses are included in the vendor directory:
     vendor/github.com/hashicorp/go-retryablehttp/LICENSE
     vendor/github.com/inconshreveable/mousetrap/LICENSE
     vendor/github.com/jarcoal/httpmock/LICENSE
-    vendor/github.com/jellydator/ttlcache/v3/LICENSE
     vendor/github.com/json-iterator/go/LICENSE
     vendor/github.com/KimMachineGun/automemlimit/LICENSE
     vendor/github.com/mailru/easyjson/LICENSE
@@ -110,7 +87,6 @@ The following third-party licenses are included in the vendor directory:
     vendor/github.com/xrash/smetrics/LICENSE
     vendor/golang.org/x/net/LICENSE
     vendor/golang.org/x/oauth2/LICENSE
-    vendor/golang.org/x/sync/LICENSE
     vendor/golang.org/x/sys/LICENSE
     vendor/golang.org/x/term/LICENSE
     vendor/golang.org/x/text/LICENSE

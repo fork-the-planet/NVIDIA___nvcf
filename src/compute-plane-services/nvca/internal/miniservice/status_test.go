@@ -1192,3 +1192,205 @@ func TestStatusContextDirectAccess(t *testing.T) {
 		assert.Nil(t, retrieved)
 	})
 }
+
+func Test_collectObjectIDs(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	ctx := context.Background()
+
+	alwaysTrue := func(ObjectStatus) bool { return true }
+	alwaysFalse := func(ObjectStatus) bool { return false }
+
+	tests := []struct {
+		name     string
+		statuses ObjectStatuses
+		filter   func(ObjectStatus) bool
+		expected []string
+	}{
+		{
+			name:     "nil statuses returns nil",
+			statuses: nil,
+			filter:   alwaysTrue,
+			expected: nil,
+		},
+		{
+			name:     "empty statuses returns nil",
+			statuses: ObjectStatuses{},
+			filter:   alwaysTrue,
+			expected: nil,
+		},
+		{
+			name: "all filtered out returns nil",
+			statuses: ObjectStatuses{
+				{
+					Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-1"}},
+					TerminalBad: true,
+				},
+			},
+			filter:   alwaysFalse,
+			expected: nil,
+		},
+		{
+			name: "single matching object",
+			statuses: ObjectStatuses{
+				{
+					Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-1"}},
+					TerminalBad: true,
+				},
+			},
+			filter:   filterTerminal,
+			expected: []string{"v1.Pod pod-1"},
+		},
+		{
+			name: "multiple objects only matching ones included",
+			statuses: ObjectStatuses{
+				{
+					Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "healthy-pod"}},
+					TerminalBad: false,
+				},
+				{
+					Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "bad-pod"}},
+					TerminalBad: true,
+				},
+			},
+			filter:   filterTerminal,
+			expected: []string{"v1.Pod bad-pod"},
+		},
+		{
+			name: "filterPending selects pending objects",
+			statuses: ObjectStatuses{
+				{
+					Object:  &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pending-pod"}},
+					Pending: true,
+				},
+				{
+					Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "failed-pod"}},
+					TerminalBad: true,
+				},
+			},
+			filter:   filterPending,
+			expected: []string{"v1.Pod pending-pod"},
+		},
+		{
+			name: "object with group included in ID",
+			statuses: ObjectStatuses{
+				{
+					Object:      &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "my-deploy"}},
+					TerminalBad: true,
+				},
+			},
+			filter:   filterTerminal,
+			expected: []string{"apps/v1.Deployment my-deploy"},
+		},
+		{
+			name: "child objects included when both parent and child match filter",
+			statuses: ObjectStatuses{
+				{
+					Object:      &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-1"}},
+					TerminalBad: true,
+					ChildObjects: ObjectStatuses{
+						{
+							Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "child-pod"}},
+							TerminalBad: true,
+						},
+					},
+				},
+			},
+			filter: filterTerminal,
+			expected: []string{
+				"apps/v1.Deployment deploy-1",
+				"v1.Pod child-pod",
+			},
+		},
+		{
+			name: "child not included when parent matches but child does not",
+			statuses: ObjectStatuses{
+				{
+					Object:      &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-1"}},
+					TerminalBad: true,
+					ChildObjects: ObjectStatuses{
+						{
+							Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "ok-child"}},
+							TerminalBad: false,
+						},
+					},
+				},
+			},
+			filter:   filterTerminal,
+			expected: []string{"apps/v1.Deployment deploy-1"},
+		},
+		{
+			name: "parent not matching skips entire subtree",
+			statuses: ObjectStatuses{
+				{
+					Object:      &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "ok-deploy"}},
+					TerminalBad: false,
+					ChildObjects: ObjectStatuses{
+						{
+							Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "bad-child"}},
+							TerminalBad: true,
+						},
+					},
+				},
+			},
+			filter:   filterTerminal,
+			expected: nil,
+		},
+		{
+			name: "multiple top-level objects with children",
+			statuses: ObjectStatuses{
+				{
+					Object:      &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-a"}},
+					TerminalBad: true,
+					ChildObjects: ObjectStatuses{
+						{
+							Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a1"}},
+							TerminalBad: true,
+						},
+					},
+				},
+				{
+					Object:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "standalone-pod"}},
+					TerminalBad: false,
+				},
+				{
+					Object:  &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pending-pod"}},
+					Pending: true,
+				},
+			},
+			filter: filterTerminal,
+			expected: []string{
+				"apps/v1.Deployment deploy-a",
+				"v1.Pod pod-a1",
+			},
+		},
+		{
+			name: "alwaysTrue filter collects all objects and children",
+			statuses: ObjectStatuses{
+				{
+					Object: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-1"}},
+				},
+				{
+					Object: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-2"}},
+					ChildObjects: ObjectStatuses{
+						{Object: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "child-1"}}},
+					},
+				},
+			},
+			filter: alwaysTrue,
+			expected: []string{
+				"v1.Pod pod-1",
+				"v1.Pod pod-2",
+				"v1.Pod child-1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := collectObjectIDs(ctx, scheme, tt.statuses, tt.filter)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

@@ -133,11 +133,6 @@ type agentDTO struct {
 	HelmReValProdOAuthTokenURL              string `json:"helmReValProdOAuthTokenURL,omitempty"`
 	HelmReValProdOAuthPublicKeysetEndpoint  string `json:"helmReValProdOAuthPublicKeysetEndpoint,omitempty"`
 
-	RolloverServiceStageOAuthTokenURL             string `json:"rolloverServiceStageOAuthTokenURL,omitempty"`
-	RolloverServiceStageOAuthPublicKeysetEndpoint string `json:"rolloverServiceStageOAuthPublicKeysetEndpoint,omitempty"`
-	RolloverServiceProdOAuthTokenURL              string `json:"rolloverServiceProdOAuthTokenURL,omitempty"`
-	RolloverServiceProdOAuthPublicKeysetEndpoint  string `json:"rolloverServiceProdOAuthPublicKeysetEndpoint,omitempty"`
-
 	FunctionDeploymentStagesStageOAuthTokenURL             string `json:"functionDeploymentStagesStageOAuthTokenURL,omitempty"`
 	FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint string `json:"functionDeploymentStagesStageOAuthPublicKeysetEndpoint,omitempty"`
 	FunctionDeploymentStagesProdOAuthTokenURL              string `json:"functionDeploymentStagesProdOAuthTokenURL,omitempty"`

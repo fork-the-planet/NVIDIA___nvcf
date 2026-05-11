@@ -497,10 +497,6 @@ func withAgentConfigMapper() clusterMapper {
 			dest.NVCFBackend.Spec.AgentConfig.HelmReValStageOAuthPublicKeysetEndpoint = src.Agent.HelmReValStageOAuthPublicKeysetEndpoint
 			dest.NVCFBackend.Spec.AgentConfig.HelmReValProdOAuthTokenURL = src.Agent.HelmReValProdOAuthTokenURL
 			dest.NVCFBackend.Spec.AgentConfig.HelmReValProdOAuthPublicKeysetEndpoint = src.Agent.HelmReValProdOAuthPublicKeysetEndpoint
-			dest.NVCFBackend.Spec.AgentConfig.RolloverServiceStageOAuthTokenURL = src.Agent.RolloverServiceStageOAuthTokenURL
-			dest.NVCFBackend.Spec.AgentConfig.RolloverServiceStageOAuthPublicKeysetEndpoint = src.Agent.RolloverServiceStageOAuthPublicKeysetEndpoint
-			dest.NVCFBackend.Spec.AgentConfig.RolloverServiceProdOAuthTokenURL = src.Agent.RolloverServiceProdOAuthTokenURL
-			dest.NVCFBackend.Spec.AgentConfig.RolloverServiceProdOAuthPublicKeysetEndpoint = src.Agent.RolloverServiceProdOAuthPublicKeysetEndpoint
 			dest.NVCFBackend.Spec.AgentConfig.FunctionDeploymentStagesStageOAuthTokenURL = src.Agent.FunctionDeploymentStagesStageOAuthTokenURL
 			dest.NVCFBackend.Spec.AgentConfig.FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint =
 				src.Agent.FunctionDeploymentStagesStageOAuthPublicKeysetEndpoint

@@ -79,8 +79,15 @@ Configured functions control the downstream `model`, prompt `template`,
 `tokenizer`, service tier, and per-function rate limits.
 
 When a request is forwarded to Stargate, the gateway emits routing headers for
-the selected function and rough prompt size, including `x-function-id`,
-`x-input-tokens`, and `x-token-estimate`.
+the selected function/model and rough prompt size, including `x-routing-key`,
+`x-model`, `x-input-tokens`, and `x-token-estimate`.
+
+When NVCF auth returns `modelSpecs[model].routingMethod`, the gateway forwards
+that load-balancer hint to Stargate as `X-Routing-Method` after trimming
+surrounding whitespace. Empty values are omitted, which lets Stargate use its
+configured/default load-balancer algorithm. Stargate owns routing method
+acceptance and algorithm preconfiguration; unknown or unconfigured methods are
+rejected by Stargate.
 
 When `NVCF_GRPC_ADDR` and `NVCF_GRPC_AUTH_TOKEN` are configured, the gateway
 authenticates each chat or responses request through the NVCF LLM gRPC auth

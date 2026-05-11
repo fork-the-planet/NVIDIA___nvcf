@@ -45,7 +45,6 @@ const (
 	DefaultCredRenewInterval              = 45 * time.Minute
 	DefaultSyncRequestStatusInterval      = 15 * time.Second
 	DefaultPeriodicInstanceStatusInterval = 5 * time.Minute
-	DefaultRolloverServicesUpdateInterval = 30 * time.Minute
 	DefaultACKFrequencyInterval           = 15 * time.Minute
 	V1BartOAuthScopes                     = "byoc_registration cluster_heartbeat instance_request_update"
 	V1NVCAOAuthScopes                     = "nvca-cluster instance_request_update"
@@ -134,12 +133,6 @@ func NewCommand() *cli.Command {
 				Usage:    "ICMS Service URL to use for registration and credential refreshes",
 				EnvVars:  []string{"ICMS_SERVICE_URL"},
 				Required: true,
-			},
-			&cli.StringFlag{
-				Name:    "nvca-rollover-service-url",
-				Usage:   "Worker Rollover Service URL to automate worker rollover",
-				EnvVars: []string{"NVCA_ROLLOVER_SERVICE_URL"},
-				Value:   "https://api.ros.nvidia.com",
 			},
 			&cli.StringFlag{
 				Name:  "system-namespace",
@@ -270,12 +263,6 @@ func NewCommand() *cli.Command {
 				EnvVars:     []string{"VOLUME_ATTACHMENT_TIMEOUT"},
 				Value:       defaultTimeConfig.ModelCacheVolumeDetachmentTimeout,
 				Destination: &timeConfig.ModelCacheVolumeDetachmentTimeout,
-			},
-			&cli.DurationFlag{
-				Name:    "nvca-rollover-service-update-interval",
-				Usage:   "Function Instance Status Update interval for Rollover Service time.Duration, 10m or 60m",
-				EnvVars: []string{"NVCA_ROLLOVER_SERVICE_UPDATE_INTERVAL"},
-				Value:   DefaultRolloverServicesUpdateInterval,
 			},
 			&cli.DurationFlag{
 				Name:    "icms-request-ack-interval",
@@ -550,7 +537,6 @@ func NewCommand() *cli.Command {
 				SyncQueueInterval:                   c.Duration("sync-queue-interval"),
 				SyncRequestStatusInterval:           c.Duration("sync-request-status-interval"),
 				PeriodicInstanceStatusInterval:      c.Duration("periodic-instance-status-interval"),
-				RolloverServiceUpdateInterval:       c.Duration("nvca-rollover-service-update-interval"),
 				EndpointURL:                         c.String("endpoint-url"),
 				GPUCapacity:                         c.Uint64("gpu-capacity"),
 				K8sVersion:                          c.String("k8s-version-override"),
@@ -578,7 +564,6 @@ func NewCommand() *cli.Command {
 				PVCRebindEnabled:                    featureflag.PVCRebind.Enabled(),
 				MultiNodeWorkloadsEnabled:           featureflag.MultiNodeWorkloads.Enabled(),
 				FeatureFlagFetcher:                  featureflag.DefaultFetcher,
-				RolloverServiceURL:                  c.String("nvca-rollover-service-url"),
 				ICMSRequestAckRetryTimeout:          c.Duration("icms-request-ack-retry-timeout"),
 				NVCAOperatorVersion:                 c.String("nvca-operator-version"),
 				NVCAAgentVersion:                    version.ReleaseString(),
