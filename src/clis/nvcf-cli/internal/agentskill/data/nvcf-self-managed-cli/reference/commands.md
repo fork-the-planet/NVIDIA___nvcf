@@ -37,7 +37,7 @@ Full subcommand list. Always pair with [flags.md](flags.md) for global flags and
 
 | Command | Purpose | Notes |
 |---|---|---|
-| `function create --input-file=FILE` | Create function metadata | Returns Function ID + Version ID |
+| `function create --input-file=FILE` | Create function metadata | Returns Function ID + Version ID; LLM functions use `functionType: "LLM"` and `models[].llmConfig` |
 | `function list` / `function list-ids` | List functions / IDs only | |
 | `function get --function-id=ID --version-id=VID` | Function metadata | |
 | `function deploy create --input-file=FILE` | Schedule a deployment | Blocks until ACTIVE (default 900s) |

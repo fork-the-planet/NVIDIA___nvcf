@@ -743,6 +743,15 @@ curl -X POST https://api.nvcf.nvidia.com/v2/nvcf/accounts/nvcf-default/registry-
 ./nvcf-cli function create \
   --file examples/create-function.json \
   --secrets DB_HOST=db.example.com,DB_USER=admin,DB_PASS=secret123
+
+# Create an LLM function model with routing metadata
+./nvcf-cli function create \
+  --name my-llm-function \
+  --image nvcr.io/example/openai-compatible:latest \
+  --inference-port 8000 \
+  --inference-url / \
+  --function-type LLM \
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M"
 ```
 
 **Secrets Format:**
@@ -780,6 +789,31 @@ curl -X POST https://api.nvcf.nvidia.com/v2/nvcf/accounts/nvcf-default/registry-
   }
 }
 ```
+
+#### LLM Function JSON
+```json
+{
+  "name": "sample-llm-function",
+  "containerImage": "nvcr.io/example/openai-compatible:latest",
+  "inferenceUrl": "/",
+  "inferencePort": 8000,
+  "functionType": "LLM",
+  "models": [
+    {
+      "name": "dummy-model",
+      "llmConfig": {
+        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-M"
+      }
+    }
+  ]
+}
+```
+
+For LLM models, `llmConfig.routingMethod` accepts the API/auth spellings
+`round_robin`, `power_of_two`, or `random`. The CLI validates these values
+before sending the create request.
 
 ### 5. List Functions
 
@@ -902,6 +936,17 @@ Error: invalid secret format 'invalid' - expected NAME=VALUE
 # gRPC invocation
 ./nvcf-cli invoke --grpc --file examples/invoke-function.json
 ```
+
+LLM functions use the OpenAI-compatible LLM invocation route:
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<function-id>/dummy-model","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Use the OpenAI `model` value `<function-id>/<model-name>` for LLM invocation requests.
 
 #### Sample Invocation JSON (`examples/invoke-function.json`)
 ```json

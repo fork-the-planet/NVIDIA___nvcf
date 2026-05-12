@@ -33,6 +33,44 @@ nvcf-cli function create --input-file=create-fn.json
 
 Save the IDs — they're needed for deploy + invoke.
 
+### LLM function variant
+
+For an OpenAI-compatible LLM function, set `functionType: "LLM"` and put route metadata under `models[].llmConfig`:
+
+```json
+{
+  "name": "llm-test",
+  "containerImage": "nvcr.io/example/openai-compatible:latest",
+  "inferenceUrl": "/",
+  "inferencePort": 8000,
+  "functionType": "LLM",
+  "models": [
+    {
+      "name": "dummy-model",
+      "llmConfig": {
+        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-M"
+      }
+    }
+  ]
+}
+```
+
+Equivalent CLI flag form:
+
+```sh
+nvcf-cli function create \
+  --name=llm-test \
+  --image=nvcr.io/example/openai-compatible:latest \
+  --inference-url=/ \
+  --inference-port=8000 \
+  --function-type=LLM \
+  --llm-model='name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M'
+```
+
+Use the same deploy step below after the LLM function is created.
+
 ## 2. Function DEPLOY
 
 ```json
@@ -84,6 +122,26 @@ nvcf-cli function invoke --input-file=invoke-fn.json
 # → Status: fulfilled
 # → Request ID: ...
 ```
+
+For an LLM function, invoke the OpenAI-compatible route after deployment:
+
+```sh
+curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<fn_id>/dummy-model",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+The OpenAI `model` value must be `<function-id>/<model-name>` so the gateway can select the function and model.
 
 If status is `errored`, query ICMS for the deployment's pod logs (kubectl on the compute-plane cluster) and surface to the user.
 

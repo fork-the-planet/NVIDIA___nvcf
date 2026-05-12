@@ -449,6 +449,15 @@ For a single cluster, omit both context flags.
   --secrets "API_KEY=secret123" \
   --tags "production,v2" \
   --rate-limit "100-S"
+
+# Create an LLM function with model routing metadata
+./nvcf-cli function create \
+  --name "my-llm-function" \
+  --image "nvcr.io/example/openai-compatible:latest" \
+  --inference-url "/" \
+  --inference-port 8000 \
+  --function-type LLM \
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M"
 ```
 
 All `function create` flags:
@@ -461,7 +470,7 @@ All `function create` flags:
 | `--inference-port` | Inference endpoint port (required) |
 | `--input-file` | JSON file with function configuration |
 | `--description` | Function description |
-| `--function-type` | `DEFAULT` or `STREAMING` (default: `DEFAULT`) |
+| `--function-type` | `DEFAULT`, `STREAMING`, or `LLM` (default: `DEFAULT`) |
 | `--api-body-format` | API body format (default: `CUSTOM`) |
 | `--health-uri` | Health check endpoint URI |
 | `--health-port` | Health check endpoint port |
@@ -473,6 +482,7 @@ All `function create` flags:
 | `--secrets` | Secrets in `name=value` format (repeatable) |
 | `--tags` | Comma-separated tags |
 | `--models` | Model artifacts in `name:version:uri` format (repeatable) |
+| `--llm-model` | LLM model config in `name=<model>,uris=<uri>|<uri>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>` format (repeatable) |
 | `--resources` | Resource artifacts in `name:version:uri` format (repeatable) |
 | `--helm-chart` | Helm chart specification |
 | `--helm-chart-service` | Helm chart service name |
@@ -497,6 +507,30 @@ Example function JSON:
   }
 }
 ```
+
+LLM functions use `functionType: "LLM"` and define model routing metadata under `models[].llmConfig`:
+
+```json
+{
+  "name": "sample-llm-function",
+  "containerImage": "nvcr.io/example/openai-compatible:latest",
+  "inferenceUrl": "/",
+  "inferencePort": 8000,
+  "functionType": "LLM",
+  "models": [
+    {
+      "name": "dummy-model",
+      "llmConfig": {
+        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-M"
+      }
+    }
+  ]
+}
+```
+
+For LLM models, `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
 
 **Deploy Function**
 
@@ -643,6 +677,17 @@ Example deployment JSON:
   --request-body '{"input": "Hello!"}' \
   --timeout 120
 ```
+
+LLM functions are invoked through the LLM invocation route and OpenAI-compatible paths:
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<function-id>/dummy-model","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Use the OpenAI `model` value `<function-id>/<model-name>` for LLM invocation requests.
 
 Additional `function invoke` flags:
 

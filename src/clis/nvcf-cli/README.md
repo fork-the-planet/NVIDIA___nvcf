@@ -601,6 +601,15 @@ export NVCF_TOKEN="nvapi-your-function-creation-token"
 
 # Or create with JSON configuration
 ./nvcf-cli create --input-file examples/create-function.json
+
+# Create an LLM function model with a routing method override
+./nvcf-cli function create \
+  --name "my-llm-function" \
+  --image "nvcr.io/example/openai-compatible:latest" \
+  --inference-url "/" \
+  --inference-port 8000 \
+  --function-type "LLM" \
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M"
 ```
 
 **Required flags:**
@@ -612,11 +621,12 @@ export NVCF_TOKEN="nvapi-your-function-creation-token"
 **Example JSON file (`create-function.json`):**
 ```json
 {
-  "name": "example-function",
-  "containerImage": "nvcr.io/0651155215864979/ncp-dev/load_tester_supreme:0.0.8",
-  "inferenceUrl": "/echo",
+  "name": "sample-llm-function",
+  "containerImage": "nvcr.io/example/openai-compatible:latest",
+  "inferenceUrl": "/",
   "inferencePort": 8000,
-  "description": "Example function from JSON config",
+  "functionType": "LLM",
+  "description": "Example LLM function from JSON config",
   "tags": ["example", "demo"],
   "health": {
     "protocol": "HTTP",
@@ -629,12 +639,27 @@ export NVCF_TOKEN="nvapi-your-function-creation-token"
     {"key": "MODEL_PATH", "value": "/models"},
     {"key": "BATCH_SIZE", "value": "32"}
   ],
+  "models": [
+    {
+      "name": "dummy-model",
+      "llmConfig": {
+        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-M"
+      }
+    }
+  ],
   "secrets": [
     {"name": "api-key", "value": "sk-12345"},
     {"name": "db-password", "value": "mypassword"}
   ]
 }
 ```
+
+`--llm-model` accepts `name`, `uris`, `routingMethod`, and `tokenRateLimit`
+key/value fields. Separate multiple URIs with `|`. Valid routing
+methods are `round_robin`, `power_of_two`, and `random`; the CLI validates and
+sends these API/auth spellings in the create request.
 
 #### **Deploy a Function** *Uses `NVCF_TOKEN` (with `NVCF_API_KEY` fallback)*
 
@@ -768,6 +793,17 @@ nvcf-cli invoke --grpc --request-body '{"input": "test"}'
 # Or invoke with JSON configuration
 ./nvcf-cli invoke --input-file invoke.json
 ```
+
+For LLM functions, send OpenAI-compatible requests to the LLM invocation host:
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<function-id>/dummy-model","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+The OpenAI `model` value must use `<function-id>/<model-name>`.
 
 **New Features:**
 - **Smart Context**: Uses saved function ID/version automatically

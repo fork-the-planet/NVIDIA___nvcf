@@ -17,6 +17,64 @@ Functions can be created in one of two ways:
 
 Additionally, Cloud Functions supports [Low Latency Streaming (LLS) functions](./streaming-functions.md) for video, audio, and data streaming via WebRTC.
 
+## LLM Functions
+
+Use an LLM function when the deployed workload exposes OpenAI-compatible model routes through the LLM invocation gateway. LLM functions use `functionType: "LLM"` and define model routing metadata under `models[].llmConfig`.
+
+```json
+{
+  "name": "sample-llm-function",
+  "containerImage": "nvcr.io/example/openai-compatible:latest",
+  "inferenceUrl": "/",
+  "inferencePort": 8000,
+  "functionType": "LLM",
+  "models": [
+    {
+      "name": "dummy-model",
+      "llmConfig": {
+        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-M"
+      }
+    }
+  ]
+}
+```
+
+The same configuration can be provided with CLI flags:
+
+```bash
+./nvcf-cli function create \
+  --name "sample-llm-function" \
+  --image "nvcr.io/example/openai-compatible:latest" \
+  --inference-url "/" \
+  --inference-port 8000 \
+  --function-type LLM \
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M"
+```
+
+`llmConfig.uris` lists the OpenAI-compatible paths handled by the model. `routingMethod` accepts `round_robin`, `power_of_two`, or `random`. `tokenRateLimit` uses the same rate limit format as function-level rate limits.
+
+After deployment, invoke chat completions through the LLM invocation route:
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<function-id>/dummy-model",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a one sentence summary of NVCF."
+      }
+    ]
+  }'
+```
+
+The OpenAI `model` value uses the format `<function-id>/<model-name>` so the gateway can select the target function and model.
+
 ## Best Practices
 
 ### Container Versioning

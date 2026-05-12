@@ -38,6 +38,13 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
+const (
+	errCreateNVCFClientFmt = "failed to create NVCF client: %w"
+	errLoadConfigFmt       = "failed to load configuration: %w"
+	errParseInputFileFmt   = "failed to parse JSON file '%s': %w"
+	errReadInputFileFmt    = "failed to read input file '%s': %w"
+)
+
 // ============================================================================
 // Command Definitions
 // ============================================================================
@@ -346,9 +353,17 @@ type CreateConfig struct {
 
 // ArtifactConfig represents a model or resource artifact in CLI configuration
 type ArtifactConfig struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	URI     string `json:"uri"`
+	Name      string          `json:"name"`
+	Version   string          `json:"version,omitempty"`
+	URI       string          `json:"uri,omitempty"`
+	LLMConfig *LLMConfigInput `json:"llmConfig,omitempty"`
+}
+
+// LLMConfigInput represents LLM routing metadata in CLI configuration
+type LLMConfigInput struct {
+	URIs           []string `json:"uris,omitempty"`
+	TokenRateLimit *string  `json:"tokenRateLimit,omitempty"`
+	RoutingMethod  *string  `json:"routingMethod,omitempty"`
 }
 
 // ContainerEnvironmentEntry represents an environment variable in CLI configuration
@@ -444,6 +459,7 @@ var createFlags struct {
 
 	// Models and resources
 	models    []string
+	llmModels []string
 	resources []string
 
 	// Rate limiting
@@ -527,7 +543,7 @@ func init() {
 	createCmd.Flags().IntVar(&createFlags.healthPort, "health-port", 0, "Health endpoint port")
 	createCmd.Flags().StringVar(&createFlags.healthTimeout, "health-timeout", "", "Health check timeout (ISO 8601 duration)")
 	createCmd.Flags().IntVar(&createFlags.healthExpectedStatus, "health-expected-status", 200, "Expected health check status code")
-	createCmd.Flags().StringVar(&createFlags.functionType, "function-type", "DEFAULT", "Function type (DEFAULT or STREAMING)")
+	createCmd.Flags().StringVar(&createFlags.functionType, "function-type", "DEFAULT", "Function type (DEFAULT, STREAMING, or LLM)")
 	createCmd.Flags().StringVar(&createFlags.apiBodyFormat, "api-body-format", "CUSTOM", "API body format")
 	createCmd.Flags().StringVar(&createFlags.containerArgs, "container-args", "", "Arguments for container launch")
 	createCmd.Flags().StringSliceVar(&createFlags.containerEnvironment, "container-env", []string{}, "Container environment variables (key=value)")
@@ -535,6 +551,7 @@ func init() {
 	createCmd.Flags().StringVar(&createFlags.helmChartServiceName, "helm-chart-service", "", "Helm chart service name")
 	createCmd.Flags().StringSliceVar(&createFlags.secrets, "secrets", []string{}, "Secrets in name=value format (e.g., API_KEY=secret123,DB_PASSWORD=pass456)")
 	createCmd.Flags().StringSliceVar(&createFlags.models, "models", []string{}, "Model artifacts (format: name:version:uri)")
+	createCmd.Flags().StringArrayVar(&createFlags.llmModels, "llm-model", []string{}, "LLM model config (format: name=<model>,uris=<uri>|<uri>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>)")
 	createCmd.Flags().StringSliceVar(&createFlags.resources, "resources", []string{}, "Resource artifacts (format: name:version:uri)")
 	createCmd.Flags().StringVar(&createFlags.rateLimit, "rate-limit", "", "Rate limit pattern (e.g., '100-S', '50-M', '10-H', '5-D')")
 	createCmd.Flags().StringSliceVar(&createFlags.rateLimitExempted, "rate-limit-exempted", []string{}, "NCA IDs exempted from rate limiting")
@@ -593,6 +610,148 @@ func parseArtifactString(s string) (ArtifactConfig, error) {
 		Name:    parts[0],
 		Version: parts[1],
 		URI:     uri,
+	}, nil
+}
+
+// parseLLMModelString parses "name=<model>,uris=<uri>|<uri>,..." into ArtifactConfig.
+func parseLLMModelString(s string) (ArtifactConfig, error) {
+	fields := map[string]string{}
+	for _, item := range strings.Split(s, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		parts := strings.SplitN(item, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+			return ArtifactConfig{}, fmt.Errorf("invalid field %q, expected key=value", item)
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		switch key {
+		case "name", "uris", "routingMethod", "tokenRateLimit":
+			fields[key] = value
+		default:
+			return ArtifactConfig{}, fmt.Errorf("unknown llm model field %q", key)
+		}
+	}
+
+	name := fields["name"]
+	if name == "" {
+		return ArtifactConfig{}, fmt.Errorf("name is required")
+	}
+
+	uris, err := parseLLMModelURIs(fields["uris"])
+	if err != nil {
+		return ArtifactConfig{}, err
+	}
+
+	routingMethod, err := normalizeLLMRoutingMethod(fields["routingMethod"])
+	if err != nil {
+		return ArtifactConfig{}, err
+	}
+
+	return ArtifactConfig{
+		Name: name,
+		LLMConfig: &LLMConfigInput{
+			URIs:           uris,
+			TokenRateLimit: optionalString(fields["tokenRateLimit"]),
+			RoutingMethod:  optionalString(routingMethod),
+		},
+	}, nil
+}
+
+func parseLLMModelURIs(value string) ([]string, error) {
+	if value == "" {
+		return nil, fmt.Errorf("uris is required")
+	}
+
+	var uris []string
+	for _, uri := range strings.Split(value, "|") {
+		uri = strings.TrimSpace(uri)
+		if uri == "" {
+			return nil, fmt.Errorf("uris cannot contain empty values")
+		}
+		uris = append(uris, uri)
+	}
+	return uris, nil
+}
+
+func validateLLMModelURIs(uris []string) error {
+	if len(uris) == 0 {
+		return fmt.Errorf("uris is required")
+	}
+
+	for _, uri := range uris {
+		if strings.TrimSpace(uri) == "" {
+			return fmt.Errorf("uris cannot contain empty values")
+		}
+	}
+	return nil
+}
+
+func normalizeLLMRoutingMethod(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "round_robin":
+		return "round_robin", nil
+	case "power_of_two":
+		return "power_of_two", nil
+	case "random":
+		return "random", nil
+	default:
+		return "", fmt.Errorf("unsupported routingMethod %q (expected round_robin, power_of_two, or random)", value)
+	}
+}
+
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func optionalStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func artifactConfigToClientArtifact(artifact ArtifactConfig) (client.ArtifactDto, error) {
+	llmConfig, err := llmConfigInputToClient(artifact.LLMConfig)
+	if err != nil {
+		return client.ArtifactDto{}, fmt.Errorf("model %q: %w", artifact.Name, err)
+	}
+
+	return client.ArtifactDto{
+		Name:      artifact.Name,
+		Version:   artifact.Version,
+		URI:       artifact.URI,
+		LLMConfig: llmConfig,
+	}, nil
+}
+
+func llmConfigInputToClient(input *LLMConfigInput) (*client.LLMConfigDto, error) {
+	if input == nil {
+		return nil, nil
+	}
+
+	if err := validateLLMModelURIs(input.URIs); err != nil {
+		return nil, err
+	}
+
+	routingMethod, err := normalizeLLMRoutingMethod(optionalStringValue(input.RoutingMethod))
+	if err != nil {
+		return nil, err
+	}
+
+	return &client.LLMConfigDto{
+		URIs:           input.URIs,
+		TokenRateLimit: input.TokenRateLimit,
+		RoutingMethod:  optionalString(routingMethod),
 	}, nil
 }
 
@@ -729,7 +888,7 @@ func loadTokenOnlyConfig() (*client.Config, error) {
 	// Use the standard config loading which handles state file, etc.
 	config, err := client.LoadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load configuration: %w", err)
+		return nil, fmt.Errorf(errLoadConfigFmt, err)
 	}
 
 	// Verify we have a token for delete operations
@@ -751,21 +910,51 @@ func loadCreateConfig(cmd *cobra.Command) (*CreateConfig, error) {
 		HealthExpectedStatus: 200,
 	}
 
-	// Load from JSON file if provided
-	if createFlags.inputFile != "" {
-		data, err := os.ReadFile(createFlags.inputFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read input file '%s': %w", createFlags.inputFile, err)
-		}
-
-		if err := json.Unmarshal(data, config); err != nil {
-			return nil, fmt.Errorf("failed to parse JSON file '%s': %w", createFlags.inputFile, err)
-		}
-
-		fmt.Printf("Loaded configuration from %s\n", createFlags.inputFile)
+	if err := loadCreateConfigFile(config); err != nil {
+		return nil, err
 	}
 
-	// Override with CLI flags (CLI flags take precedence)
+	if err := applyCreateFlagOverrides(cmd, config); err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+func loadCreateConfigFile(config *CreateConfig) error {
+	if createFlags.inputFile == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(createFlags.inputFile)
+	if err != nil {
+		return fmt.Errorf(errReadInputFileFmt, createFlags.inputFile, err)
+	}
+
+	if err := json.Unmarshal(data, config); err != nil {
+		return fmt.Errorf(errParseInputFileFmt, createFlags.inputFile, err)
+	}
+
+	fmt.Printf("Loaded configuration from %s\n", createFlags.inputFile)
+	return nil
+}
+
+func applyCreateFlagOverrides(cmd *cobra.Command, config *CreateConfig) error {
+	applyCreateRequiredFlagOverrides(cmd, config)
+	applyCreateMetadataFlagOverrides(cmd, config)
+	applyCreateHealthFlagOverrides(cmd, config)
+	applyCreateFunctionFlagOverrides(cmd, config)
+	applyCreateHelmFlagOverrides(cmd, config)
+	applyCreateRateLimitFlagOverrides(cmd, config)
+	applyCreateTelemetryFlagOverrides(cmd, config)
+
+	if err := applyCreateContainerEnvFlag(cmd, config); err != nil {
+		return err
+	}
+	return applyCreateArtifactFlagOverrides(cmd, config)
+}
+
+func applyCreateRequiredFlagOverrides(cmd *cobra.Command, config *CreateConfig) {
 	if cmd.Flags().Changed("name") {
 		config.Name = createFlags.name
 	}
@@ -778,12 +967,18 @@ func loadCreateConfig(cmd *cobra.Command) (*CreateConfig, error) {
 	if cmd.Flags().Changed("inference-port") {
 		config.InferencePort = createFlags.inferencePort
 	}
+}
+
+func applyCreateMetadataFlagOverrides(cmd *cobra.Command, config *CreateConfig) {
 	if cmd.Flags().Changed("description") {
 		config.Description = createFlags.description
 	}
 	if cmd.Flags().Changed("tags") {
 		config.Tags = createFlags.tags
 	}
+}
+
+func applyCreateHealthFlagOverrides(cmd *cobra.Command, config *CreateConfig) {
 	if cmd.Flags().Changed("health-uri") {
 		config.HealthURI = createFlags.healthURI
 	}
@@ -799,6 +994,9 @@ func loadCreateConfig(cmd *cobra.Command) (*CreateConfig, error) {
 	if cmd.Flags().Changed("health-expected-status") {
 		config.HealthExpectedStatus = createFlags.healthExpectedStatus
 	}
+}
+
+func applyCreateFunctionFlagOverrides(cmd *cobra.Command, config *CreateConfig) {
 	if cmd.Flags().Changed("function-type") {
 		config.FunctionType = createFlags.functionType
 	}
@@ -808,21 +1006,37 @@ func loadCreateConfig(cmd *cobra.Command) (*CreateConfig, error) {
 	if cmd.Flags().Changed("container-args") {
 		config.ContainerArgs = createFlags.containerArgs
 	}
-	if cmd.Flags().Changed("container-env") {
-		// Convert CLI flag format (key=value strings) to struct format
-		var containerEnv []ContainerEnvironmentEntry
-		for _, env := range createFlags.containerEnvironment {
-			parts := strings.SplitN(env, "=", 2)
-			if len(parts) != 2 {
-				return nil, fmt.Errorf("invalid environment variable format '%s', expected 'key=value'", env)
-			}
-			containerEnv = append(containerEnv, ContainerEnvironmentEntry{
-				Key:   parts[0],
-				Value: parts[1],
-			})
-		}
-		config.ContainerEnvironment = containerEnv
+}
+
+func applyCreateContainerEnvFlag(cmd *cobra.Command, config *CreateConfig) error {
+	if !cmd.Flags().Changed("container-env") {
+		return nil
 	}
+
+	containerEnv, err := parseContainerEnvironment(createFlags.containerEnvironment)
+	if err != nil {
+		return err
+	}
+	config.ContainerEnvironment = containerEnv
+	return nil
+}
+
+func parseContainerEnvironment(values []string) ([]ContainerEnvironmentEntry, error) {
+	containerEnv := make([]ContainerEnvironmentEntry, 0, len(values))
+	for _, env := range values {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid environment variable format '%s', expected 'key=value'", env)
+		}
+		containerEnv = append(containerEnv, ContainerEnvironmentEntry{
+			Key:   parts[0],
+			Value: parts[1],
+		})
+	}
+	return containerEnv, nil
+}
+
+func applyCreateHelmFlagOverrides(cmd *cobra.Command, config *CreateConfig) {
 	if cmd.Flags().Changed("helm-chart") {
 		config.HelmChart = createFlags.helmChart
 	}
@@ -832,32 +1046,60 @@ func loadCreateConfig(cmd *cobra.Command) (*CreateConfig, error) {
 	if cmd.Flags().Changed("secrets") {
 		config.Secrets = createFlags.secrets
 	}
+}
 
-	// Models and resources overrides
+func applyCreateArtifactFlagOverrides(cmd *cobra.Command, config *CreateConfig) error {
 	if cmd.Flags().Changed("models") {
-		var models []ArtifactConfig
-		for _, model := range createFlags.models {
-			artifact, err := parseArtifactString(model)
-			if err != nil {
-				return nil, fmt.Errorf("invalid model format '%s': %w (expected format: name:version:uri)", model, err)
-			}
-			models = append(models, artifact)
+		models, err := parseArtifactStrings(createFlags.models, "model")
+		if err != nil {
+			return err
 		}
 		config.Models = models
 	}
+
+	if cmd.Flags().Changed("llm-model") {
+		models, err := parseLLMModelStrings(createFlags.llmModels)
+		if err != nil {
+			return err
+		}
+		config.Models = append(config.Models, models...)
+	}
+
 	if cmd.Flags().Changed("resources") {
-		var resources []ArtifactConfig
-		for _, resource := range createFlags.resources {
-			artifact, err := parseArtifactString(resource)
-			if err != nil {
-				return nil, fmt.Errorf("invalid resource format '%s': %w (expected format: name:version:uri)", resource, err)
-			}
-			resources = append(resources, artifact)
+		resources, err := parseArtifactStrings(createFlags.resources, "resource")
+		if err != nil {
+			return err
 		}
 		config.Resources = resources
 	}
+	return nil
+}
 
-	// Rate limiting overrides
+func parseArtifactStrings(values []string, label string) ([]ArtifactConfig, error) {
+	artifacts := make([]ArtifactConfig, 0, len(values))
+	for _, value := range values {
+		artifact, err := parseArtifactString(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s format '%s': %w (expected format: name:version:uri)", label, value, err)
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, nil
+}
+
+func parseLLMModelStrings(values []string) ([]ArtifactConfig, error) {
+	models := make([]ArtifactConfig, 0, len(values))
+	for _, value := range values {
+		artifact, err := parseLLMModelString(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid llm model format '%s': %w", value, err)
+		}
+		models = append(models, artifact)
+	}
+	return models, nil
+}
+
+func applyCreateRateLimitFlagOverrides(cmd *cobra.Command, config *CreateConfig) {
 	if cmd.Flags().Changed("rate-limit") {
 		config.RateLimit = createFlags.rateLimit
 	}
@@ -867,8 +1109,9 @@ func loadCreateConfig(cmd *cobra.Command) (*CreateConfig, error) {
 	if cmd.Flags().Changed("rate-limit-sync") {
 		config.RateLimitSync = createFlags.rateLimitSync
 	}
+}
 
-	// Telemetry overrides
+func applyCreateTelemetryFlagOverrides(cmd *cobra.Command, config *CreateConfig) {
 	if cmd.Flags().Changed("logs-telemetry-id") {
 		config.LogsTelemetryId = createFlags.logsTelemetryId
 	}
@@ -878,8 +1121,6 @@ func loadCreateConfig(cmd *cobra.Command) (*CreateConfig, error) {
 	if cmd.Flags().Changed("traces-telemetry-id") {
 		config.TracesTelemetryId = createFlags.tracesTelemetryId
 	}
-
-	return config, nil
 }
 
 // loadDeleteConfig loads and merges configuration from JSON file and CLI flags
@@ -890,11 +1131,11 @@ func loadDeleteConfig(cmd *cobra.Command) (*DeleteConfig, error) {
 	if deleteFlags.inputFile != "" {
 		data, err := os.ReadFile(deleteFlags.inputFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read input file '%s': %w", deleteFlags.inputFile, err)
+			return nil, fmt.Errorf(errReadInputFileFmt, deleteFlags.inputFile, err)
 		}
 
 		if err := json.Unmarshal(data, config); err != nil {
-			return nil, fmt.Errorf("failed to parse JSON file '%s': %w", deleteFlags.inputFile, err)
+			return nil, fmt.Errorf(errParseInputFileFmt, deleteFlags.inputFile, err)
 		}
 
 		fmt.Printf("Loaded deletion configuration from %s\n", deleteFlags.inputFile)
@@ -930,11 +1171,11 @@ func loadInvokeConfig(cmd *cobra.Command) (*InvokeConfig, error) {
 	if invokeFlags.inputFile != "" {
 		data, err := os.ReadFile(invokeFlags.inputFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read input file '%s': %w", invokeFlags.inputFile, err)
+			return nil, fmt.Errorf(errReadInputFileFmt, invokeFlags.inputFile, err)
 		}
 
 		if err := json.Unmarshal(data, config); err != nil {
-			return nil, fmt.Errorf("failed to parse JSON file '%s': %w", invokeFlags.inputFile, err)
+			return nil, fmt.Errorf(errParseInputFileFmt, invokeFlags.inputFile, err)
 		}
 
 		fmt.Printf("Loaded invocation configuration from %s\n", invokeFlags.inputFile)
@@ -988,11 +1229,11 @@ func loadUpdateConfig(cmd *cobra.Command) (*UpdateConfig, error) {
 	if updateFlags.inputFile != "" {
 		data, err := os.ReadFile(updateFlags.inputFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read input file '%s': %w", updateFlags.inputFile, err)
+			return nil, fmt.Errorf(errReadInputFileFmt, updateFlags.inputFile, err)
 		}
 
 		if err := json.Unmarshal(data, config); err != nil {
-			return nil, fmt.Errorf("failed to parse JSON file '%s': %w", updateFlags.inputFile, err)
+			return nil, fmt.Errorf(errParseInputFileFmt, updateFlags.inputFile, err)
 		}
 
 		fmt.Printf("Loaded metadata update configuration from %s\n", updateFlags.inputFile)
@@ -1017,13 +1258,52 @@ func loadUpdateConfig(cmd *cobra.Command) (*UpdateConfig, error) {
 // ============================================================================
 
 func runCreate(cmd *cobra.Command, args []string) error {
-	// Load and merge configuration
 	config, err := loadCreateConfig(cmd)
 	if err != nil {
 		return err
 	}
 
-	// Validate required fields
+	if err := validateCreateConfig(config); err != nil {
+		return err
+	}
+
+	clientConfig, err := client.LoadConfig()
+	if err != nil {
+		return fmt.Errorf(errLoadConfigFmt, err)
+	}
+
+	nvcfClient, err := client.NewClient(clientConfig)
+	if err != nil {
+		return fmt.Errorf(errCreateNVCFClientFmt, err)
+	}
+	defer nvcfClient.Close()
+
+	req, health, err := buildCreateFunctionRequest(config)
+	if err != nil {
+		return err
+	}
+
+	if err := LoadStateForCurrentCommand(); err != nil {
+		logging.Warning("Could not load existing state: %v", err)
+	}
+
+	ctx := context.Background()
+	logging.Info("Creating function '%s'...", config.Name)
+	resp, err := nvcfClient.CreateFunction(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to create function: %w", err)
+	}
+
+	SetCurrentFunction(resp.Function.ID, resp.Function.VersionID, resp.Function.Name)
+	if err := SaveStateForCurrentCommand(); err != nil {
+		logging.Warning("Failed to save function state: %v", err)
+	}
+
+	printCreateResult(resp, config, health, clientConfig.Demo)
+	return nil
+}
+
+func validateCreateConfig(config *CreateConfig) error {
 	if config.Name == "" {
 		return fmt.Errorf("function name is required (use --name or specify in JSON file)")
 	}
@@ -1033,237 +1313,238 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if config.InferencePort == 0 {
 		return fmt.Errorf("inference port is required (use --inference-port or specify in JSON file)")
 	}
+	return nil
+}
 
-	// Load client configuration
-	clientConfig, err := client.LoadConfig()
+func buildCreateFunctionRequest(config *CreateConfig) (*client.CreateFunctionRequest, *client.HealthDto, error) {
+	secrets, err := clientSecretsFromConfig(config)
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return nil, nil, err
 	}
 
-	// Create client
-	nvcfClient, err := client.NewClient(clientConfig)
+	models, err := artifactsToClient(config.Models)
 	if err != nil {
-		return fmt.Errorf("failed to create NVCF client: %w", err)
+		return nil, nil, err
 	}
-	defer nvcfClient.Close()
 
-	// Parse container environment variables
-	var containerEnv []client.ContainerEnvironmentEntry
-	for _, env := range config.ContainerEnvironment {
+	resources, err := artifactsToClient(config.Resources)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	health := healthToClient(config)
+	req := &client.CreateFunctionRequest{
+		Name:                 config.Name,
+		ContainerImage:       config.ContainerImage,
+		InferenceURL:         config.InferenceURL,
+		InferencePort:        config.InferencePort,
+		HealthURI:            config.HealthURI,
+		Health:               health,
+		FunctionType:         createFunctionType(config.FunctionType),
+		APIBodyFormat:        createAPIBodyFormat(config.APIBodyFormat),
+		ContainerArgs:        config.ContainerArgs,
+		ContainerEnvironment: containerEnvironmentToClient(config.ContainerEnvironment),
+		HelmChart:            config.HelmChart,
+		HelmChartServiceName: config.HelmChartServiceName,
+		Secrets:              secrets,
+		Models:               models,
+		Resources:            resources,
+		RateLimit:            rateLimitToClient(config),
+		Telemetries:          telemetriesToClient(config),
+		Description:          config.Description,
+		Tags:                 config.Tags,
+	}
+	return req, health, nil
+}
+
+func containerEnvironmentToClient(entries []ContainerEnvironmentEntry) []client.ContainerEnvironmentEntry {
+	containerEnv := make([]client.ContainerEnvironmentEntry, 0, len(entries))
+	for _, env := range entries {
 		containerEnv = append(containerEnv, client.ContainerEnvironmentEntry{
 			Key:   env.Key,
 			Value: env.Value,
 		})
 	}
+	return containerEnv
+}
 
-	// Prepare secrets
-	var secrets []client.SecretDto
-
-	// Handle CLI flags (convert name=value pairs to SecretDto objects)
-	if len(createFlags.secrets) > 0 {
-		for _, secretPair := range createFlags.secrets {
-			parts := strings.SplitN(secretPair, "=", 2)
-			if len(parts) != 2 {
-				return fmt.Errorf("invalid secret format '%s': must be name=value", secretPair)
-			}
-			secrets = append(secrets, client.SecretDto{
-				Name:  parts[0],
-				Value: parts[1],
-			})
-		}
-	}
-
-	// Handle JSON configuration - parse secrets field
-	if config.Secrets != nil {
-		switch secretsData := config.Secrets.(type) {
-		case []interface{}:
-			for _, item := range secretsData {
-				switch secret := item.(type) {
-				case string:
-					// String in name=value format
-					parts := strings.SplitN(secret, "=", 2)
-					if len(parts) == 2 {
-						secrets = append(secrets, client.SecretDto{
-							Name:  parts[0],
-							Value: parts[1],
-						})
-					} else {
-						return fmt.Errorf("invalid secret format '%s': must be name=value", secret)
-					}
-				case map[string]interface{}:
-					// Full secret object
-					secretDto := client.SecretDto{}
-					if name, ok := secret["name"].(string); ok {
-						secretDto.Name = name
-					}
-					if value, exists := secret["value"]; exists {
-						secretDto.Value = value
-					}
-					secrets = append(secrets, secretDto)
-				}
-			}
-		}
-	}
-
-	// Prepare models
-	var models []client.ArtifactDto
-	for _, model := range config.Models {
-		models = append(models, client.ArtifactDto{
-			Name:    model.Name,
-			Version: model.Version,
-			URI:     model.URI,
-		})
-	}
-
-	// Prepare resources
-	var resources []client.ArtifactDto
-	for _, resource := range config.Resources {
-		resources = append(resources, client.ArtifactDto{
-			Name:    resource.Name,
-			Version: resource.Version,
-			URI:     resource.URI,
-		})
-	}
-
-	// Prepare rate limiting configuration
-	var rateLimit *client.RateLimitDto
-	if config.RateLimit != "" {
-		rateLimit = &client.RateLimitDto{
-			RateLimit:      config.RateLimit,
-			ExemptedNcaIds: config.RateLimitExempted,
-			SyncCheck:      config.RateLimitSync,
-		}
-	}
-
-	// Prepare telemetries configuration
-	var telemetries *client.TelemetriesDto
-	if config.LogsTelemetryId != "" || config.MetricsTelemetryId != "" || config.TracesTelemetryId != "" {
-		telemetries = &client.TelemetriesDto{
-			LogsTelemetryId:    config.LogsTelemetryId,
-			MetricsTelemetryId: config.MetricsTelemetryId,
-			TracesTelemetryId:  config.TracesTelemetryId,
-		}
-	}
-
-	// Build health configuration
-	// Priority: nested health object > flat fields
-	var health *client.HealthDto
-
-	// First check if there's a nested health object from JSON
-	if config.Health != nil {
-		health = &client.HealthDto{
-			Protocol:           config.Health.Protocol,
-			URI:                config.Health.URI,
-			Port:               config.Health.Port,
-			Timeout:            config.Health.Timeout,
-			ExpectedStatusCode: config.Health.ExpectedStatusCode,
-		}
-	} else if config.HealthProtocol != "" && config.HealthPort > 0 {
-		// Full health configuration with protocol and port (flat fields)
-		health = &client.HealthDto{
-			Protocol: config.HealthProtocol,
-			URI:      config.HealthURI,
-			Port:     config.HealthPort,
-		}
-
-		// Set optional health fields if provided
-		if config.HealthTimeout != "" {
-			health.Timeout = config.HealthTimeout
-		}
-		if config.HealthExpectedStatus > 0 {
-			health.ExpectedStatusCode = config.HealthExpectedStatus
-		}
-	} else if config.HealthURI != "" {
-		// Simple health configuration with just URI (fallback to HTTP on inference port)
-		health = &client.HealthDto{
-			Protocol: "HTTP",
-			URI:      config.HealthURI,
-			Port:     config.InferencePort,
-		}
-
-		// Apply expected status if specified
-		if config.HealthExpectedStatus > 0 {
-			health.ExpectedStatusCode = config.HealthExpectedStatus
-		}
-
-		// Apply timeout if specified
-		if config.HealthTimeout != "" {
-			health.Timeout = config.HealthTimeout
-		}
-	}
-
-	// Set defaults
-	functionType := config.FunctionType
-	if functionType == "" {
-		functionType = "DEFAULT"
-	}
-
-	apiBodyFormat := config.APIBodyFormat
-	if apiBodyFormat == "" {
-		apiBodyFormat = "CUSTOM"
-	}
-
-	// Prepare request
-	req := &client.CreateFunctionRequest{
-		// Required fields
-		Name:           config.Name,
-		ContainerImage: config.ContainerImage,
-		InferenceURL:   config.InferenceURL,
-		InferencePort:  config.InferencePort,
-
-		// Health configuration
-		HealthURI: config.HealthURI,
-		Health:    health,
-
-		// Function configuration
-		FunctionType:         functionType,
-		APIBodyFormat:        apiBodyFormat,
-		ContainerArgs:        config.ContainerArgs,
-		ContainerEnvironment: containerEnv,
-
-		// Helm configuration
-		HelmChart:            config.HelmChart,
-		HelmChartServiceName: config.HelmChartServiceName,
-
-		// Secrets configuration
-		Secrets: secrets,
-
-		// Models and resources
-		Models:    models,
-		Resources: resources,
-
-		// Rate limiting
-		RateLimit: rateLimit,
-
-		// Telemetries
-		Telemetries: telemetries,
-
-		// Metadata
-		Description: config.Description,
-		Tags:        config.Tags,
-	}
-
-	// Load current state to preserve any existing settings
-	if err := LoadStateForCurrentCommand(); err != nil {
-		logging.Warning("Could not load existing state: %v", err)
-	}
-
-	// Create function
-	ctx := context.Background()
-
-	logging.Info("Creating function '%s'...", config.Name)
-	resp, err := nvcfClient.CreateFunction(ctx, req)
+func clientSecretsFromConfig(config *CreateConfig) ([]client.SecretDto, error) {
+	secrets, err := secretsFromFlagPairs(createFlags.secrets)
 	if err != nil {
-		return fmt.Errorf("failed to create function: %w", err)
+		return nil, err
 	}
 
-	// Save function state for subsequent operations
-	SetCurrentFunction(resp.Function.ID, resp.Function.VersionID, resp.Function.Name)
-	if err := SaveStateForCurrentCommand(); err != nil {
-		logging.Warning("Failed to save function state: %v", err)
+	jsonSecrets, err := secretsFromJSONConfig(config.Secrets)
+	if err != nil {
+		return nil, err
+	}
+	return append(secrets, jsonSecrets...), nil
+}
+
+func secretsFromFlagPairs(pairs []string) ([]client.SecretDto, error) {
+	secrets := make([]client.SecretDto, 0, len(pairs))
+	for _, pair := range pairs {
+		secret, err := secretFromString(pair)
+		if err != nil {
+			return nil, err
+		}
+		secrets = append(secrets, secret)
+	}
+	return secrets, nil
+}
+
+func secretsFromJSONConfig(raw interface{}) ([]client.SecretDto, error) {
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil, nil
 	}
 
-	// Print results with enhanced logging
+	secrets := make([]client.SecretDto, 0, len(items))
+	for _, item := range items {
+		secret, ok, err := secretFromJSONItem(item)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		secrets = append(secrets, secret)
+	}
+	return secrets, nil
+}
+
+func secretFromJSONItem(item interface{}) (client.SecretDto, bool, error) {
+	switch secret := item.(type) {
+	case string:
+		secretDto, err := secretFromString(secret)
+		return secretDto, true, err
+	case map[string]interface{}:
+		return secretFromMap(secret), true, nil
+	default:
+		return client.SecretDto{}, false, nil
+	}
+}
+
+func secretFromString(value string) (client.SecretDto, error) {
+	parts := strings.SplitN(value, "=", 2)
+	if len(parts) != 2 {
+		return client.SecretDto{}, fmt.Errorf("invalid secret format '%s': must be name=value", value)
+	}
+	return client.SecretDto{Name: parts[0], Value: parts[1]}, nil
+}
+
+func secretFromMap(secret map[string]interface{}) client.SecretDto {
+	secretDto := client.SecretDto{}
+	if name, ok := secret["name"].(string); ok {
+		secretDto.Name = name
+	}
+	if value, exists := secret["value"]; exists {
+		secretDto.Value = value
+	}
+	return secretDto
+}
+
+func artifactsToClient(configs []ArtifactConfig) ([]client.ArtifactDto, error) {
+	artifacts := make([]client.ArtifactDto, 0, len(configs))
+	for _, config := range configs {
+		artifact, err := artifactConfigToClientArtifact(config)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, nil
+}
+
+func rateLimitToClient(config *CreateConfig) *client.RateLimitDto {
+	if config.RateLimit == "" {
+		return nil
+	}
+	return &client.RateLimitDto{
+		RateLimit:      config.RateLimit,
+		ExemptedNcaIds: config.RateLimitExempted,
+		SyncCheck:      config.RateLimitSync,
+	}
+}
+
+func telemetriesToClient(config *CreateConfig) *client.TelemetriesDto {
+	if config.LogsTelemetryId == "" && config.MetricsTelemetryId == "" && config.TracesTelemetryId == "" {
+		return nil
+	}
+	return &client.TelemetriesDto{
+		LogsTelemetryId:    config.LogsTelemetryId,
+		MetricsTelemetryId: config.MetricsTelemetryId,
+		TracesTelemetryId:  config.TracesTelemetryId,
+	}
+}
+
+func healthToClient(config *CreateConfig) *client.HealthDto {
+	if config.Health != nil {
+		return healthInputToClient(config.Health)
+	}
+	if config.HealthProtocol != "" && config.HealthPort > 0 {
+		return detailedHealthToClient(config)
+	}
+	if config.HealthURI != "" {
+		return simpleHealthToClient(config)
+	}
+	return nil
+}
+
+func healthInputToClient(input *HealthConfigInput) *client.HealthDto {
+	return &client.HealthDto{
+		Protocol:           input.Protocol,
+		URI:                input.URI,
+		Port:               input.Port,
+		Timeout:            input.Timeout,
+		ExpectedStatusCode: input.ExpectedStatusCode,
+	}
+}
+
+func detailedHealthToClient(config *CreateConfig) *client.HealthDto {
+	health := &client.HealthDto{
+		Protocol: config.HealthProtocol,
+		URI:      config.HealthURI,
+		Port:     config.HealthPort,
+	}
+	applyOptionalHealthFields(health, config)
+	return health
+}
+
+func simpleHealthToClient(config *CreateConfig) *client.HealthDto {
+	health := &client.HealthDto{
+		Protocol: "HTTP",
+		URI:      config.HealthURI,
+		Port:     config.InferencePort,
+	}
+	applyOptionalHealthFields(health, config)
+	return health
+}
+
+func applyOptionalHealthFields(health *client.HealthDto, config *CreateConfig) {
+	if config.HealthTimeout != "" {
+		health.Timeout = config.HealthTimeout
+	}
+	if config.HealthExpectedStatus > 0 {
+		health.ExpectedStatusCode = config.HealthExpectedStatus
+	}
+}
+
+func createFunctionType(functionType string) string {
+	if functionType == "" {
+		return "DEFAULT"
+	}
+	return functionType
+}
+
+func createAPIBodyFormat(apiBodyFormat string) string {
+	if apiBodyFormat == "" {
+		return "CUSTOM"
+	}
+	return apiBodyFormat
+}
+
+func printCreateResult(resp *client.CreateFunctionResponse, config *CreateConfig, health *client.HealthDto, demo bool) {
 	logging.Success("Function created successfully!")
 	logging.Plain("Function ID: %s", resp.Function.ID)
 	logging.Plain("Version ID: %s", resp.Function.VersionID)
@@ -1271,8 +1552,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	logging.Plain("Status: %s", resp.Function.Status)
 	logging.Plain("Creation Time: %s", resp.Function.CreationTime)
 
-	// Generate demo folder and JSON stubs if demo mode is enabled
-	if clientConfig.Demo {
+	if demo {
 		if err := generateDemoFolder(resp.Function.ID, resp.Function.VersionID, config); err != nil {
 			logging.Warning("Failed to generate demo folder: %v", err)
 		} else {
@@ -1280,7 +1560,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Show health configuration if set
 	if health != nil {
 		logging.Plain("Health Configuration:")
 		logging.Plain("  Protocol: %s", health.Protocol)
@@ -1295,8 +1574,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	} else if config.HealthURI != "" {
 		logging.Plain("Health URI: %s", config.HealthURI)
 	}
-
-	return nil
 }
 
 func runDelete(cmd *cobra.Command, args []string) error {
@@ -1346,13 +1623,13 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	// Load client configuration with NVCF_TOKEN only for delete operations
 	clientConfig, err := loadTokenOnlyConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return fmt.Errorf(errLoadConfigFmt, err)
 	}
 
 	// Create client
 	nvcfClient, err := client.NewClient(clientConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create NVCF client: %w", err)
+		return fmt.Errorf(errCreateNVCFClientFmt, err)
 	}
 	defer nvcfClient.Close()
 
@@ -1576,13 +1853,13 @@ func runInvoke(cmd *cobra.Command, args []string) error {
 	// Load client configuration
 	clientConfig, err := client.LoadConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return fmt.Errorf(errLoadConfigFmt, err)
 	}
 
 	// Create client
 	nvcfClient, err := client.NewClient(clientConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create NVCF client: %w", err)
+		return fmt.Errorf(errCreateNVCFClientFmt, err)
 	}
 	defer nvcfClient.Close()
 
@@ -2050,13 +2327,13 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	// Load client configuration
 	clientConfig, err := client.LoadConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return fmt.Errorf(errLoadConfigFmt, err)
 	}
 
 	// Create client
 	nvcfClient, err := client.NewClient(clientConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create NVCF client: %w", err)
+		return fmt.Errorf(errCreateNVCFClientFmt, err)
 	}
 	defer nvcfClient.Close()
 

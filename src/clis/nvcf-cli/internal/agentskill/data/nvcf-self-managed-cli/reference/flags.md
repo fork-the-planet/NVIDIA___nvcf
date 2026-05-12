@@ -56,6 +56,22 @@
 | `--ignore-existing` | Match-or-create instead of fail-on-exists | `false` |
 | `--identity-source psat\|spire` | Identity source | `psat` |
 
+## `function create`-specific
+
+`--input-file FILE` is recommended for repeatable function definitions. For ad-hoc creates:
+
+| Flag | Purpose | Default |
+|---|---|---|
+| `--name NAME` | Function name | — |
+| `--image IMAGE` | Container image | — |
+| `--inference-url URI` | Container inference endpoint | — |
+| `--inference-port PORT` | Container inference port | — |
+| `--function-type DEFAULT\|STREAMING\|LLM` | Function type | `DEFAULT` |
+| `--models NAME:VERSION:URI` | Standard model artifact; repeatable | — |
+| `--llm-model SPEC` | LLM model config; format `name=<model>,uris=<uri>|<uri>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>`; repeatable | — |
+
+In JSON, LLM functions set `functionType: "LLM"` and model routing metadata under `models[].llmConfig`. `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
+
 ## `function deploy create`-specific
 
 `--input-file FILE` is recommended (full JSON spec). For ad-hoc one-shot use:

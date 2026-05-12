@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-06T00:27:49Z",
+  "generatedAt": "2026-05-11T23:43:46Z",
   "totalFiles": 20,
-  "totalBytes": 133794,
+  "totalBytes": 136479,
   "files": [
     {
       "path": "nvcf-self-managed-cli/SKILL.md",
-      "sha256": "7ac0fad22dcaef1368a7e69948c88266230fd55516f7824f9c8ed6d4875e2573",
-      "size": 14834
+      "sha256": "d4b23ecddc11d28c58437a3c8f952151dac6d73e2f061742170cd2fbb1698498",
+      "size": 15115
     },
     {
       "path": "nvcf-self-managed-cli/examples/ci-pipelines.md",
@@ -26,8 +26,8 @@
     },
     {
       "path": "nvcf-self-managed-cli/prompts/deploy-and-invoke.md",
-      "sha256": "c795b19998764114b61a8ffaa98aac192cf4ad106cee5dcd5991acbb5b9b16bb",
-      "size": 3132
+      "sha256": "748124f5fe08fce912c764e34ad77e65e4d044eb3ea19f9f6afebb8f169fa6e0",
+      "size": 4590
     },
     {
       "path": "nvcf-self-managed-cli/prompts/diagnose-failed-install.md",
@@ -51,8 +51,8 @@
     },
     {
       "path": "nvcf-self-managed-cli/reference/commands.md",
-      "sha256": "0071b7b0600c187e4bcd0f59bc10dd722747c5c9a314a7074ac70eec1e43e1f8",
-      "size": 5984
+      "sha256": "d6fb77037c06456c96bdb9ed27f5d8a9193bc9ec69013eccd0a45b8383e857a3",
+      "size": 6050
     },
     {
       "path": "nvcf-self-managed-cli/reference/exit-codes.md",
@@ -61,8 +61,8 @@
     },
     {
       "path": "nvcf-self-managed-cli/reference/flags.md",
-      "sha256": "d4001994d5ae130ac13b9dfd165a71a2cc96b4a82369c9d834d806592b9bff86",
-      "size": 3111
+      "sha256": "acdf3c519af3736b8a05a8d5028038e15c45215d1a1c03d2b6a63ab8103668db",
+      "size": 3991
     },
     {
       "path": "nvcf-self-managed-cli/reference/troubleshooting.md",

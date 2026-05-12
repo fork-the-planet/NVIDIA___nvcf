@@ -3,16 +3,16 @@ name: nvcf-self-managed-cli
 description: |
   Install, manage, operate, and tear down self-hosted NVIDIA Cloud Functions (NVCF)
   deployments via nvcf-cli. Use when users want to bring up a control plane, register
-  a compute plane, deploy or invoke a container function, manage admin tokens, check
+  a compute plane, deploy or invoke a container or LLM function, manage admin tokens, check
   cluster health, diagnose a failed install, or tear down (uninstall) any of the
   above. Supports single-cluster (control plane and compute plane on one Kubernetes
   cluster) and split-cluster (control plane on cluster A, N compute planes on
   clusters B/C/...) topologies. Trigger keywords: nvcf, nvcf-cli, self-hosted nvcf,
   install nvcf, uninstall nvcf, tear down nvcf, remove nvcf, deploy nvcf, register
   cluster, deregister cluster, NVCFBackend, control plane, compute plane, NCP, NVCA,
-  function deploy, function invoke, GPU function, cluster register, cluster rotate,
-  cluster delete, helmfile, helmfile destroy, helm uninstall, icms, api-keys, cluster
-  ID, JWKS rotation.
+  function deploy, function invoke, GPU function, LLM function, OpenAI-compatible
+  invocation, chat completions, cluster register, cluster rotate, cluster delete,
+  helmfile, helmfile destroy, helm uninstall, icms, api-keys, cluster ID, JWKS rotation.
 allowed-tools: Bash, Read, AskUserQuestion
 argument-hint: "[install|status|check|deploy-function|register-cluster|teardown] [args]"
 ---
@@ -100,7 +100,7 @@ nvcf-cli self-hosted uninstall --no-apply --compute-plane --cluster-name=ncp-loc
 | `nvcf-cli cluster rotate --cluster-id=ID` | Rotate cluster JWKS in ICMS | When NVCA's K8s signing key changed and PSAT verification started 401-ing |
 | `nvcf-cli cluster delete --cluster-id=ID` | Remove cluster registration from ICMS | **Confirm with user.** Destroys ICMS state for the cluster. |
 | `nvcf-cli api-key generate --description="…" --expires-in=1h` | Mint an API key with `invoke_function` scope | Before invoking functions; admin tokens lack this scope by default |
-| `nvcf-cli function create --input-file=<json>` | Create function metadata in ICMS | First step of any function deploy |
+| `nvcf-cli function create --input-file=<json>` | Create function metadata in ICMS | First step of any function deploy; use `functionType: "LLM"` and `models[].llmConfig` for LLM functions |
 | `nvcf-cli function deploy create --input-file=<json>` | Schedule a deployment of a created function | Waits for ACTIVE before returning (timeout 900s) |
 | `nvcf-cli function invoke --input-file=<json>` | Invoke a deployed function | Requires API key (not admin token) |
 | `nvcf-cli function delete --function-id=ID --version-id=VID` | Remove a function and its deployment | **Confirm with user.** |
@@ -111,7 +111,7 @@ For step-by-step playbooks, load the prompt that matches the user's intent:
 
 - **Install from scratch.** [prompts/install-from-scratch.md](prompts/install-from-scratch.md) — k3d cluster → preflight → up → deploy a smoke function.
 - **Add a new compute plane.** [prompts/add-compute-plane.md](prompts/add-compute-plane.md) — split-cluster `up` against an existing control plane.
-- **Deploy and invoke a function.** [prompts/deploy-and-invoke.md](prompts/deploy-and-invoke.md) — create → deploy → API key → invoke.
+- **Deploy and invoke a function.** [prompts/deploy-and-invoke.md](prompts/deploy-and-invoke.md) — create → deploy → API key → invoke, including the LLM create/invoke variant.
 - **Diagnose a failed install.** [prompts/diagnose-failed-install.md](prompts/diagnose-failed-install.md) — `status --json` → identify failed component → kubectl describe → remediation.
 - **Rotate JWKS.** [prompts/rotate-cluster-jwks.md](prompts/rotate-cluster-jwks.md) — when PSAT auth starts failing.
 - **Tear down.** [prompts/teardown.md](prompts/teardown.md) — `down --plan-only` first, then real run. `down --cluster-name=X` for one compute plane (orchestrator: drain + uninstall + cluster delete); `uninstall --control-plane` for the control plane (per-plane primitive); `down --all --confirm` for everything; `uninstall --no-apply <plane> | kubectl delete -f -` for GitOps.
@@ -194,10 +194,11 @@ nvcf-cli init                                 # mint admin token
 nvcf-cli cluster register …                   # register cluster
 nvcf-cli api-key generate --description=…     # mint API key for invoke
 nvcf-cli function create --input-file=…       # create function
+nvcf-cli function create --function-type=LLM --llm-model=<spec>  # create LLM function metadata
 nvcf-cli function deploy create --input-file=…
 nvcf-cli function invoke --input-file=…
 ```
 
 ## Feedback
 
-If the user hits a bug or limitation, file a Jira against project NVCF-PSA. Don't include secrets.
+If the user hits a bug or limitation, file an issue through the project tracker. Don't include secrets.

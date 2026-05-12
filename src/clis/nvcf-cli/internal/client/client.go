@@ -711,9 +711,17 @@ type ContainerEnvironmentEntry struct {
 
 // ArtifactDto represents a model or resource artifact
 type ArtifactDto struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	URI     string `json:"uri"`
+	Name      string        `json:"name"`
+	Version   string        `json:"version,omitempty"`
+	URI       string        `json:"uri,omitempty"`
+	LLMConfig *LLMConfigDto `json:"llmConfig,omitempty"`
+}
+
+// LLMConfigDto represents LLM routing metadata for a model artifact
+type LLMConfigDto struct {
+	URIs           []string `json:"uris,omitempty"`
+	TokenRateLimit *string  `json:"tokenRateLimit,omitempty"`
+	RoutingMethod  *string  `json:"routingMethod,omitempty"`
 }
 
 // SecretDto represents a secret configuration
@@ -749,7 +757,7 @@ type CreateFunctionRequest struct {
 	Health    *HealthDto `json:"health,omitempty"`    // Detailed health configuration
 
 	// Function configuration
-	FunctionType         string                      `json:"functionType,omitempty"`         // DEFAULT or STREAMING
+	FunctionType         string                      `json:"functionType,omitempty"`         // DEFAULT, STREAMING, or LLM
 	APIBodyFormat        string                      `json:"apiBodyFormat,omitempty"`        // Invocation request body format
 	ContainerArgs        string                      `json:"containerArgs,omitempty"`        // Args to be passed when launching container
 	ContainerEnvironment []ContainerEnvironmentEntry `json:"containerEnvironment,omitempty"` // Environment settings for container
