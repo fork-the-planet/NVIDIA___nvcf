@@ -172,7 +172,7 @@ It fails if:
 - `NOTICE` is missing.
 - `NOTICE` is out of sync with the generated output from `collect-notices`.
 - source headers fail `check-license-headers`.
-- a monorepo-native Go root contains `github.com/NVIDIA/...` module paths or imports in `go.mod`, `go.work`, or `.go` files.
+- a monorepo-native Go root contains private/internal Go module paths or imports in `go.mod`, `go.work`, or `.go` files.
 
 Today it runs `check-license-headers` with the `ess-agent` MPL exception shown above.
 

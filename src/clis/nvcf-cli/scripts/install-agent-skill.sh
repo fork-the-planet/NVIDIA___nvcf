@@ -22,13 +22,12 @@
 # 'nvcf-cli agent-skill install' instead.
 #
 # AUTHENTICATION:
-#   This script fetches from github.com/NVIDIA, which requires auth.
-#   Set GITLAB_TOKEN in your environment (a GitLab personal access token with
-#   read_repository scope), or ensure ~/.netrc has credentials for the host.
-#   Get a token at: https://github.com/NVIDIA/-/user_settings/personal_access_tokens
+#   This script fetches public files from github.com/NVIDIA/nvcf. Authentication
+#   is optional; set GITHUB_TOKEN if your environment needs a higher GitHub API
+#   rate limit.
 #
 # MANUAL SMOKE TEST:
-#   export GITLAB_TOKEN=<your-token>
+#   export GITHUB_TOKEN=<optional-token>
 #
 #   # Install to a temp base skills dir:
 #   bash scripts/install-agent-skill.sh --target=/tmp/skill-smoke
@@ -49,8 +48,8 @@
 set -euo pipefail
 
 DEFAULT_BRANCH="main"
-GITLAB_HOST="github.com/NVIDIA"
-GITLAB_PROJECT="nvcf/nvcf"
+GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
+GITHUB_REPO="${GITHUB_REPO:-NVIDIA/nvcf}"
 SOURCE_PATH="ai-tooling/user/skills"
 SKILL_NAMES=("nvcf-self-managed-cli" "nvcf-self-managed-installation")
 MANIFEST_MARKER=".nvcf-cli-public-skills.manifest.json"
@@ -75,16 +74,17 @@ Options:
   --help            print this message and exit
 
 Examples:
-  curl -sSfL <URL> | GITLAB_TOKEN=<token> bash
-  curl -sSfL <URL> | GITLAB_TOKEN=<token> bash -s -- --branch=feat/foo
-  curl -sSfL <URL> | GITLAB_TOKEN=<token> bash -s -- --uninstall
-  curl -sSfL <URL> | GITLAB_TOKEN=<token> bash -s -- --target=/path/to/skills
+  curl -sSfL <URL> | bash
+  curl -sSfL <URL> | bash -s -- --branch=feat/foo
+  curl -sSfL <URL> | bash -s -- --uninstall
+  curl -sSfL <URL> | bash -s -- --target=/path/to/skills
 
 Environment:
-  GITLAB_TOKEN      GitLab personal access token (read_repository scope)
-                    If unset, curl will attempt to use ~/.netrc credentials.
+  GITHUB_TOKEN      Optional GitHub token for higher API rate limits.
+  GITHUB_REPO       Source repository in owner/name form (default: NVIDIA/nvcf).
+  GITHUB_API_URL    GitHub API endpoint (default: https://api.github.com).
 
-Source: github.com/NVIDIA/nvcf/nvcf/ai-tooling/user/skills/
+Source: github.com/NVIDIA/nvcf/ai-tooling/user/skills/
 EOF
 }
 
@@ -147,17 +147,13 @@ need mktemp
 need python3
 
 declare -a CURL_AUTH_FLAGS
-if [[ -n "${GITLAB_TOKEN:-}" ]]; then
-    CURL_AUTH_FLAGS=(-H "PRIVATE-TOKEN: $GITLAB_TOKEN")
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    CURL_AUTH_FLAGS=(-H "Authorization: Bearer $GITHUB_TOKEN")
 else
-    if grep -q "$GITLAB_HOST" "$HOME/.netrc" 2>/dev/null; then
-        CURL_AUTH_FLAGS=(-n)
-    else
-        echo "Warning: GITLAB_TOKEN not set and no ~/.netrc entry for $GITLAB_HOST." >&2
-        echo "Set GITLAB_TOKEN=<personal-access-token> to authenticate." >&2
-        CURL_AUTH_FLAGS=()
-    fi
+    CURL_AUTH_FLAGS=()
 fi
+CURL_JSON_FLAGS=("${CURL_AUTH_FLAGS[@]}" -H "Accept: application/vnd.github+json")
+CURL_RAW_FLAGS=("${CURL_AUTH_FLAGS[@]}" -H "Accept: application/vnd.github.raw")
 
 url_encode() {
     python3 - "$1" <<'PY'
@@ -168,24 +164,17 @@ print(urllib.parse.quote(sys.argv[1], safe=""))
 PY
 }
 
-project_encoded="$(url_encode "$GITLAB_PROJECT")"
 ref_encoded="$(url_encode "$BRANCH")"
 
-gitlab_raw_url() {
+github_raw_url() {
     local file_path="$1"
-    local file_encoded
-    file_encoded="$(url_encode "$file_path")"
-    printf 'https://%s/api/v4/projects/%s/repository/files/%s/raw?ref=%s' \
-        "$GITLAB_HOST" "$project_encoded" "$file_encoded" "$ref_encoded"
+    printf '%s/repos/%s/contents/%s?ref=%s' \
+        "${GITHUB_API_URL%/}" "$GITHUB_REPO" "$file_path" "$ref_encoded"
 }
 
-gitlab_tree_url() {
-    local tree_path="$1"
-    local page="$2"
-    local path_encoded
-    path_encoded="$(url_encode "$tree_path")"
-    printf 'https://%s/api/v4/projects/%s/repository/tree?path=%s&recursive=true&per_page=100&page=%s&ref=%s' \
-        "$GITLAB_HOST" "$project_encoded" "$path_encoded" "$page" "$ref_encoded"
+github_tree_url() {
+    printf '%s/repos/%s/git/trees/%s?recursive=1' \
+        "${GITHUB_API_URL%/}" "$GITHUB_REPO" "$ref_encoded"
 }
 
 validate_rel_path() {
@@ -217,47 +206,38 @@ declare -a FILE_PATHS
 declare -a REL_PATHS
 
 echo ">>> Listing public NVCF skill files from $BRANCH..."
-for skill in "${SKILL_NAMES[@]}"; do
-    page=1
-    while true; do
-        tree_json="$STAGE/tree-$skill-$page.json"
-        paths_file="$STAGE/tree-$skill-$page.paths"
-        curl -sSfL "${CURL_AUTH_FLAGS[@]}" -o "$tree_json" "$(gitlab_tree_url "$SOURCE_PATH/$skill" "$page")"
-        page_count="$(python3 - "$tree_json" "$paths_file" <<'PY'
+tree_json="$STAGE/tree.json"
+paths_file="$STAGE/tree.paths"
+curl -sSfL "${CURL_JSON_FLAGS[@]}" -o "$tree_json" "$(github_tree_url)"
+python3 - "$tree_json" "$paths_file" "$SOURCE_PATH" "${SKILL_NAMES[@]}" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     data = json.load(f)
-if not isinstance(data, list):
+if not isinstance(data, dict) or not isinstance(data.get("tree"), list):
     message = data.get("message", data) if isinstance(data, dict) else data
-    raise SystemExit(f"repository tree response was not a list: {message}")
+    raise SystemExit(f"repository tree response was not a GitHub tree: {message}")
+if data.get("truncated"):
+    raise SystemExit("GitHub tree response was truncated; use a narrower source repo or ref")
+source_path = sys.argv[3].strip("/")
+skills = sys.argv[4:]
+prefixes = tuple(f"{source_path}/{skill}/" for skill in skills)
 with open(sys.argv[2], "w", encoding="utf-8") as out:
-    for item in data:
-        if item.get("type") == "blob":
-            print(item["path"], file=out)
-print(len(data))
+    for item in data["tree"]:
+        path = item.get("path", "")
+        if item.get("type") == "blob" and path.startswith(prefixes):
+            print(path, file=out)
 PY
-)"
-        page_paths=()
-        while IFS= read -r line; do
-            page_paths+=("$line")
-        done < "$paths_file"
-        for file_path in "${page_paths[@]}"; do
-            rel="${file_path#"$SOURCE_PATH"/}"
-            if [[ "$rel" == "$file_path" ]] || ! validate_rel_path "$rel"; then
-                echo "Repository tree returned suspicious path: $file_path" >&2
-                exit 1
-            fi
-            FILE_PATHS+=("$file_path")
-            REL_PATHS+=("$rel")
-        done
-        if (( page_count == 0 || page_count < 100 )); then
-            break
-        fi
-        page=$((page + 1))
-    done
-done
+while IFS= read -r file_path; do
+    rel="${file_path#"$SOURCE_PATH"/}"
+    if [[ "$rel" == "$file_path" ]] || ! validate_rel_path "$rel"; then
+        echo "Repository tree returned suspicious path: $file_path" >&2
+        exit 1
+    fi
+    FILE_PATHS+=("$file_path")
+    REL_PATHS+=("$rel")
+done < "$paths_file"
 
 expected_count="${#REL_PATHS[@]}"
 if (( expected_count == 0 )); then
@@ -271,7 +251,7 @@ for idx in "${!FILE_PATHS[@]}"; do
     rel="${REL_PATHS[$idx]}"
     dst="$STAGE/$rel"
     mkdir -p "$(dirname "$dst")"
-    curl -sSfL "${CURL_AUTH_FLAGS[@]}" -o "$dst" "$(gitlab_raw_url "$file_path")"
+    curl -sSfL "${CURL_RAW_FLAGS[@]}" -o "$dst" "$(github_raw_url "$file_path")"
 done
 
 python3 - "$STAGE" "${REL_PATHS[@]}" > "$STAGE/$MANIFEST_MARKER" <<'PY'

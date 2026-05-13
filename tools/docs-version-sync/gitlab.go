@@ -38,7 +38,10 @@ type GitLabClient struct {
 func NewGitLabClientFromEnvironment() (*GitLabClient, error) {
 	baseURL := strings.TrimRight(os.Getenv("DOC_VERSION_SYNC_GITLAB_BASE_URL"), "/")
 	if baseURL == "" {
-		baseURL = "https://github.com/NVIDIA"
+		baseURL = strings.TrimRight(os.Getenv("CI_SERVER_URL"), "/")
+	}
+	if baseURL == "" {
+		return nil, fmt.Errorf("set DOC_VERSION_SYNC_GITLAB_BASE_URL or CI_SERVER_URL")
 	}
 	parsed, err := url.Parse(baseURL)
 	if err != nil {

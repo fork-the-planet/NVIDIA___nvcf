@@ -17,7 +17,7 @@ run_checker() {
     CI_MERGE_REQUEST_IID=136 \
         CI_MERGE_REQUEST_DESCRIPTION="${description}" \
         CI_MERGE_REQUEST_DESCRIPTION_IS_TRUNCATED=false \
-        CI_MERGE_REQUEST_PROJECT_URL="https://github.com/NVIDIA/nvcf/nvcf" \
+        CI_MERGE_REQUEST_PROJECT_URL="https://gitlab.example.com/nvcf/nvcf" \
         bash "${script_path}" >"${output_path}" 2>&1
     status=$?
     set -e
@@ -51,7 +51,7 @@ assert_status 1 "${status}"
 assert_contains "Add this exact footer as the final section of the GitLab MR description:" "${output}"
 assert_contains "Github commit:" "${output}"
 assert_contains "Everything after the marker becomes the exact public GitHub commit message" "${output}"
-assert_contains "MR: https://github.com/NVIDIA/nvcf/nvcf/-/merge_requests/136" "${output}"
+assert_contains "MR: https://gitlab.example.com/nvcf/nvcf/-/merge_requests/136" "${output}"
 
 run_checker $'JIRA: NO-REF\n\nGithub commit:\n   ' "${output}"
 assert_status 1 "${status}"

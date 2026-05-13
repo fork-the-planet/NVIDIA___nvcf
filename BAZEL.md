@@ -243,9 +243,9 @@ the same way.
 
 - **Host**: nvcfbarn.nvidia.com is on a 6-month VM lease (provisioned
   late Q1 2026, scheduled review by Q3 2026).
-- **Provisioning**: managed in the
-  [bazel-remote-cache repo](https://github.com/NVIDIA/ncp/nvcf/sandbox/bazel-remote-cache)
-  via `scripts/provision.sh`. Re-runnable; bb-deployments docker stack.
+- **Provisioning**: managed by the NVCF team through the internal
+  bazel-remote-cache automation (`scripts/provision.sh`). Re-runnable;
+  bb-deployments docker stack.
 - **Storage**: starts modest; expansion happens out-of-band as cache
   size grows. If you observe high cache-miss rates after large
   ingestion windows, check `bb-browser` at

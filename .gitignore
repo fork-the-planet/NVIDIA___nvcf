@@ -45,6 +45,8 @@ __pycache__/
 /tools/scripts/sync-synthetic-imports
 # Wrong -o path: with `go build -C tools/sync-synthetic-imports`, `-o scripts/...` is under the module.
 /tools/sync-synthetic-imports/scripts/sync-synthetic-imports
+# Checked-in BYOO otelconfig test binary output.
+/tools/byoo/testdata/otelconfig/create/main
 # Built from tools/collect-dependencies/
 /tools/collect-dependencies/collect-dependencies
 # Built from tools/generate-subproject-ci/
