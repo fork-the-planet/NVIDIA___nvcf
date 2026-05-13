@@ -17,13 +17,13 @@
 #
 # update-collector-version.sh - Update OpenTelemetry Collector version across the repo.
 #
-# Usage: ./scripts/update-collector-version.sh <new_version>
+# Usage: ./scripts/update-collector-version.sh <new_version> [new_provider_version]
 #
-# Example: ./scripts/update-collector-version.sh v0.147.0
-#          ./scripts/update-collector-version.sh 0.147.0
+# Example: ./scripts/update-collector-version.sh v0.152.0
+#          ./scripts/update-collector-version.sh 0.152.0 v1.58.0
 #
-# Updates: otel-collector-build.yaml, AGENTS.md, README.md, Dockerfile,
-#          Dockerfile.nvcf-otel-collector, .gitlab-ci.yml
+# Updates: otel-collector-build.yaml, AGENTS.md, README.md, Makefile, Dockerfile,
+#          Dockerfile.nvcf-otel-collector, .gitlab-ci.yml, VERSION
 # Run from repository root.
 
 set -euo pipefail
@@ -33,13 +33,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 usage() {
-	echo "Usage: $0 <new_version>" >&2
+	echo "Usage: $0 <new_version> [new_provider_version]" >&2
 	echo "" >&2
-	echo "  new_version  OpenTelemetry Collector version, with or without 'v' (e.g. v0.147.0 or 0.147.0)" >&2
+	echo "  new_version           OpenTelemetry Collector version, with or without 'v' (e.g. v0.152.0 or 0.152.0)" >&2
+	echo "  new_provider_version  Optional confmap provider version, with or without 'v' (e.g. v1.58.0 or 1.58.0)" >&2
 	exit 1
 }
 
-if [ $# -ne 1 ]; then
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
 	usage
 fi
 
@@ -53,8 +54,23 @@ if [[ "$NEW_ARG" =~ ^v?(0\.[0-9]+\.[0-9]+)$ ]]; then
 		NEW_V="v${NEW_ARG}"
 	fi
 else
-	echo "Error: version must match 0.x.y or v0.x.y (e.g. v0.147.0)" >&2
+	echo "Error: version must match 0.x.y or v0.x.y (e.g. v0.152.0)" >&2
 	usage
+fi
+
+NEW_PROVIDER_V=""
+if [ $# -eq 2 ]; then
+	NEW_PROVIDER_ARG="$2"
+	if [[ "$NEW_PROVIDER_ARG" =~ ^v?(1\.[0-9]+\.[0-9]+)$ ]]; then
+		if [[ "$NEW_PROVIDER_ARG" == v* ]]; then
+			NEW_PROVIDER_V="${NEW_PROVIDER_ARG}"
+		else
+			NEW_PROVIDER_V="v${NEW_PROVIDER_ARG}"
+		fi
+	else
+		echo "Error: provider version must match 1.x.y or v1.x.y (e.g. v1.58.0)" >&2
+		usage
+	fi
 fi
 
 # Detect current version from otel-collector-build.yaml (first v0.x.y on a gomod line)
@@ -65,17 +81,24 @@ if [ -z "$CURRENT_V" ]; then
 fi
 CURRENT_PLAIN="${CURRENT_V#v}"
 
-if [ "$CURRENT_V" = "$NEW_V" ]; then
-	echo "Already at version $NEW_V, nothing to do."
-	exit 0
+CURRENT_PROVIDER_V=""
+if [ -n "$NEW_PROVIDER_V" ]; then
+	CURRENT_PROVIDER_V=$(grep -oE 'v1\.[0-9]+\.[0-9]+' otel-collector-build.yaml | head -1 || true)
+	if [ -z "$CURRENT_PROVIDER_V" ]; then
+		echo "Error: could not detect current confmap provider version in otel-collector-build.yaml" >&2
+		exit 1
+	fi
 fi
 
 echo "Updating OpenTelemetry Collector version: $CURRENT_V -> $NEW_V"
 echo "  (plain form: $CURRENT_PLAIN -> $NEW_PLAIN)"
+if [ -n "$NEW_PROVIDER_V" ]; then
+	echo "Updating confmap provider version: $CURRENT_PROVIDER_V -> $NEW_PROVIDER_V"
+fi
 echo ""
 
 # Replace vX.Y.Z (builder/gomod form)
-for f in otel-collector-build.yaml AGENTS.md README.md Dockerfile Dockerfile.nvcf-otel-collector .gitlab-ci.yml; do
+for f in otel-collector-build.yaml AGENTS.md README.md Makefile Dockerfile Dockerfile.nvcf-otel-collector .gitlab-ci.yml; do
 	if [ -f "$f" ]; then
 		sed -i "s/${CURRENT_V}/${NEW_V}/g" "$f"
 		echo "  Updated $f (v-form)"
@@ -89,6 +112,21 @@ for f in .gitlab-ci.yml Dockerfile.nvcf-otel-collector; do
 		echo "  Updated $f (plain form)"
 	fi
 done
+
+if [ -n "$NEW_PROVIDER_V" ]; then
+	sed -i "s/${CURRENT_PROVIDER_V}/${NEW_PROVIDER_V}/g" otel-collector-build.yaml
+	echo "  Updated otel-collector-build.yaml (provider v-form)"
+fi
+
+if [ -f VERSION ]; then
+	printf "%s\n" "$NEW_PLAIN" > VERSION
+	echo "  Updated VERSION"
+fi
+
+if [ -f Dockerfile.nvcf-otel-collector ]; then
+	sed -i -E "s/LABEL version=\"[0-9]+\.[0-9]+\.[0-9]+\"/LABEL version=\"${NEW_PLAIN}\"/" Dockerfile.nvcf-otel-collector
+	echo "  Updated Dockerfile.nvcf-otel-collector (LABEL version)"
+fi
 
 echo ""
 echo "Done. Verify with: git diff"

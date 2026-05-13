@@ -23,7 +23,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
 )
 
 var (

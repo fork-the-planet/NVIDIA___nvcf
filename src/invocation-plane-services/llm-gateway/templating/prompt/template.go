@@ -20,10 +20,10 @@ package prompt
 import (
 	"errors"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/output"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/token"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/tools"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/output"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/token"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/tools"
 )
 
 var (
@@ -39,14 +39,14 @@ type Template interface {
 	Version() string
 }
 
-//go:generate go tool mockgen -package promptmock -destination promptmock/text_template.go . TextTemplate
+//go:generate go run go.uber.org/mock/mockgen@v0.6.0 -package promptmock -destination promptmock/text_template.go . TextTemplate
 type TextTemplate interface {
 	Template
 
 	RenderText([]models.ChatMessage, tools.Params) (Prompt, error)
 }
 
-//go:generate go tool mockgen -package promptmock -destination promptmock/tokenized_template.go . TokenizedTemplate
+//go:generate go run go.uber.org/mock/mockgen@v0.6.0 -package promptmock -destination promptmock/tokenized_template.go . TokenizedTemplate
 type TokenizedTemplate interface {
 	Template
 

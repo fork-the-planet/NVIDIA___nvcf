@@ -53,6 +53,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	apischema "k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -2753,6 +2754,40 @@ rules:
 				Type:    v1alpha1.MiniServiceConditionCleanupSuccessful,
 				Status:  metav1.ConditionFalse,
 				Reason:  "SomeObjectsPendingDeletion",
+				Message: `Objects: "/v1, Kind=Pod, job-pod;"`,
+			},
+		}, sms.Status.Conditions)
+	}
+
+	// Controller should have deleted the pod, even if listed in message condition.
+	err = r.Client.Delete(ctx, jobPod)
+	require.True(t, apierrors.IsNotFound(err))
+
+	gotRes, err = r.Reconcile(ctx, req)
+	assert.NoError(t, err)
+	assert.Equal(t, reconcile.Result{}, gotRes)
+
+	sms = &v1alpha1.MiniService{}
+	err = r.Client.Get(ctx, client.ObjectKeyFromObject(ms), sms)
+	require.NoError(t, err)
+	assert.Equal(t, []string{finalizer}, sms.Finalizers)
+
+	if assert.Len(t, sms.Status.Conditions, 3) {
+		cmpConditions(t, []metav1.Condition{
+			{
+				Reason: "AllObjectsApplied",
+				Type:   v1alpha1.MiniServiceConditionInstallSuccessful,
+				Status: metav1.ConditionTrue,
+			},
+			{
+				Reason: "ObjectsReady",
+				Type:   v1alpha1.MiniServiceConditionObjectsHealthy,
+				Status: metav1.ConditionTrue,
+			},
+			{
+				Type:    v1alpha1.MiniServiceConditionCleanupSuccessful,
+				Status:  metav1.ConditionFalse,
+				Reason:  "SomeObjectsPendingDeletion",
 				Message: "StorageRequests: shared-storage",
 			},
 		}, sms.Status.Conditions)
@@ -3466,8 +3501,9 @@ rules:
 	podList := &corev1.PodList{}
 	err = r.Client.List(ctx, podList, client.InNamespace(ms.Spec.Namespace))
 	require.NoError(t, err)
-	gotTaskPodsToDelete := getTaskPodsToDelete(ms, podList)
-	assert.Len(t, gotTaskPodsToDelete, 0)
+	gotTaskPodsToDelete, gotForceDelete := getTaskPodsToDelete(ms, podList)
+	assert.Len(t, gotTaskPodsToDelete, 1)
+	assert.False(t, gotForceDelete)
 
 	// Mark utils pod as running over max runtime duration, ensure miniservice is marked failed.
 	ms.Status.Phase = v1alpha1.MiniServiceRunning
@@ -3556,13 +3592,10 @@ rules:
 	require.NoError(t, err)
 	// Ensure SMB pod is skipped.
 	podList.Items = append(podList.Items, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: nvcastorage.SMBServerPodName}})
-	gotTaskPodsToDelete = getTaskPodsToDelete(ms, podList)
-	if assert.Len(t, gotTaskPodsToDelete, 2) {
-		sort.Slice(gotTaskPodsToDelete, func(i, j int) bool {
-			return gotTaskPodsToDelete[i].Name < gotTaskPodsToDelete[j].Name
-		})
+	gotTaskPodsToDelete, gotForceDelete = getTaskPodsToDelete(ms, podList)
+	assert.True(t, gotForceDelete)
+	if assert.Len(t, gotTaskPodsToDelete, 1) {
 		assert.Equal(t, jobPod.Name, gotTaskPodsToDelete[0].Name)
-		assert.Equal(t, common.UtilsPodName, gotTaskPodsToDelete[1].Name)
 	}
 
 	// Attempt cleanup on failed task with cleanup already run, expect explicit deletion.
@@ -3574,13 +3607,10 @@ rules:
 			Reason: "SomeObjectsPendingDeletion",
 		},
 	)
-	gotTaskPodsToDelete = getTaskPodsToDelete(cleanupMS, podList)
-	if assert.Len(t, gotTaskPodsToDelete, 2) {
-		sort.Slice(gotTaskPodsToDelete, func(i, j int) bool {
-			return gotTaskPodsToDelete[i].Name < gotTaskPodsToDelete[j].Name
-		})
+	gotTaskPodsToDelete, gotForceDelete = getTaskPodsToDelete(cleanupMS, podList)
+	assert.True(t, gotForceDelete)
+	if assert.Len(t, gotTaskPodsToDelete, 1) {
 		assert.Equal(t, jobPod.Name, gotTaskPodsToDelete[0].Name)
-		assert.Equal(t, common.UtilsPodName, gotTaskPodsToDelete[1].Name)
 	}
 
 	err = r.Client.Delete(ctx, ms)
@@ -3593,7 +3623,9 @@ rules:
 	podList = &corev1.PodList{}
 	err = r.Client.List(ctx, podList, client.InNamespace(ms.Spec.Namespace))
 	require.NoError(t, err)
-	assert.Len(t, podList.Items, 0)
+	// Utils pod is not included in taskPodsToDelete (handled by namespace deletion),
+	// so it may still be present until the namespace is fully deleted.
+	assert.LessOrEqual(t, len(podList.Items), 1)
 
 	gotRes, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
@@ -4561,5 +4593,145 @@ func TestGVKCache(t *testing.T) {
 		pod := &corev1.Pod{}
 		_, err := cache.Get(pod)
 		assert.Error(t, err)
+	})
+}
+
+func TestReconciler_list(t *testing.T) {
+	ctx := newTestContext()
+	msName := "test-ms"
+	nsName := "test-ns"
+	ms := &v1alpha1.MiniService{
+		ObjectMeta: metav1.ObjectMeta{Name: msName},
+		Spec:       v1alpha1.MiniServiceSpec{Namespace: nsName},
+	}
+
+	configMapGVK := apischema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	customGVK := apischema.GroupVersionKind{Group: "example.io", Version: "v1", Kind: "Widget"}
+
+	t.Run("structured namespaced objects are converted to typed", func(t *testing.T) {
+		cm1 := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "cm-1", Namespace: nsName},
+			Data:       map[string]string{"key": "val1"},
+		}
+		cm2 := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "cm-2", Namespace: nsName},
+			Data:       map[string]string{"key": "val2"},
+		}
+		otherNS := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "cm-other", Namespace: "other-ns"},
+		}
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
+		otherNSObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "other-ns"}}
+
+		c, _ := newFakeClient(mgrScheme, ns, otherNSObj, cm1, cm2, otherNS)
+		r := &Reconciler{Client: c}
+
+		objs, err := r.list(ctx, ms, configMapGVK)
+		require.NoError(t, err)
+		require.Len(t, objs, 2)
+
+		for _, obj := range objs {
+			typedCM, ok := obj.(*corev1.ConfigMap)
+			require.True(t, ok, "expected *corev1.ConfigMap, got %T", obj)
+			assert.Equal(t, nsName, typedCM.Namespace)
+			assert.Equal(t, configMapGVK, obj.GetObjectKind().GroupVersionKind())
+		}
+	})
+
+	t.Run("unstructured namespaced objects stay unstructured", func(t *testing.T) {
+		u1 := &unstructured.Unstructured{}
+		u1.SetGroupVersionKind(customGVK)
+		u1.SetName("widget-1")
+		u1.SetNamespace(nsName)
+		u2 := &unstructured.Unstructured{}
+		u2.SetGroupVersionKind(customGVK)
+		u2.SetName("widget-2")
+		u2.SetNamespace(nsName)
+
+		rm := meta.NewDefaultRESTMapper(mgrScheme.PreferredVersionAllGroups())
+		for gvk := range mgrScheme.AllKnownTypes() {
+			scope := meta.RESTScopeNamespace
+			if gvk.Kind == "MiniService" {
+				scope = meta.RESTScopeRoot
+			}
+			rm.Add(gvk, scope)
+		}
+		rm.Add(customGVK, meta.RESTScopeNamespace)
+
+		tracker := k8stesting.NewObjectTracker(mgrScheme, scheme.Codecs.UniversalDecoder())
+		c := clientfake.NewClientBuilder().
+			WithScheme(mgrScheme).
+			WithObjectTracker(tracker).
+			WithRESTMapper(rm).
+			WithObjects(u1, u2).
+			Build()
+
+		r := &Reconciler{Client: c}
+
+		objs, err := r.list(ctx, ms, customGVK)
+		require.NoError(t, err)
+		require.Len(t, objs, 2)
+
+		for _, obj := range objs {
+			_, ok := obj.(*unstructured.Unstructured)
+			require.True(t, ok, "expected *unstructured.Unstructured, got %T", obj)
+			assert.Equal(t, customGVK, obj.GetObjectKind().GroupVersionKind())
+			assert.Equal(t, nsName, obj.GetNamespace())
+		}
+	})
+
+	t.Run("cluster-scoped objects list by label selector", func(t *testing.T) {
+		matchingMS := &v1alpha1.MiniService{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "matching-ms",
+				Labels: map[string]string{
+					miniserviceNameLabel: msName,
+				},
+			},
+			Spec: v1alpha1.MiniServiceSpec{Namespace: "some-ns"},
+		}
+		nonMatchingMS := &v1alpha1.MiniService{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "non-matching-ms",
+				Labels: map[string]string{
+					miniserviceNameLabel: "other",
+				},
+			},
+			Spec: v1alpha1.MiniServiceSpec{Namespace: "some-ns"},
+		}
+
+		c, _ := newFakeClient(mgrScheme, matchingMS, nonMatchingMS)
+		r := &Reconciler{Client: c}
+
+		msGVK := apischema.GroupVersionKind{Group: v1alpha1.SchemeGroupVersion.Group, Version: v1alpha1.SchemeGroupVersion.Version, Kind: "MiniService"}
+		objs, err := r.list(ctx, ms, msGVK)
+		require.NoError(t, err)
+		require.Len(t, objs, 1)
+		assert.Equal(t, "matching-ms", objs[0].GetName())
+	})
+
+	t.Run("empty result returns nil slice", func(t *testing.T) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
+		c, _ := newFakeClient(mgrScheme, ns)
+		r := &Reconciler{Client: c}
+
+		objs, err := r.list(ctx, ms, configMapGVK)
+		require.NoError(t, err)
+		assert.Nil(t, objs)
+	})
+
+	t.Run("list error is propagated", func(t *testing.T) {
+		injectedErr := fmt.Errorf("synthetic list failure")
+		c, _ := newFakeClientWithInterceptors(mgrScheme,
+			interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					return injectedErr
+				},
+			},
+		)
+		r := &Reconciler{Client: c}
+
+		_, err := r.list(ctx, ms, configMapGVK)
+		require.ErrorIs(t, err, injectedErr)
 	})
 }

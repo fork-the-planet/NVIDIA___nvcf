@@ -26,12 +26,12 @@ import (
 
 	echo "github.com/labstack/echo/v4"
 
-	openairesponses "github.com/NVIDIA/nvcf/llm-api-gateway/api/adapters/openairesponses"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/config"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/ptr"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/provider"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/requestctx"
+	openairesponses "github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/api/adapters/openairesponses"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/config"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/provider"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/requestctx"
 )
 
 func TestCreateResponseDelegatesUnaryThroughChatHandler(t *testing.T) {

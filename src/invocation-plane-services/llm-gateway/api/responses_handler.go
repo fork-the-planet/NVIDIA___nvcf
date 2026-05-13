@@ -25,11 +25,11 @@ import (
 	"github.com/google/uuid"
 	echo "github.com/labstack/echo/v4"
 
-	openairesponses "github.com/NVIDIA/nvcf/llm-api-gateway/api/adapters/openairesponses"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/must"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/ptr"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/provider"
+	openairesponses "github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/api/adapters/openairesponses"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/must"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/provider"
 )
 
 func (h *ResponsesHandlers) RegisterRoutes(group *echo.Group) {

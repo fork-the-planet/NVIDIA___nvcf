@@ -22,9 +22,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/must"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/tools"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/must"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/tools"
 )
 
 func TestNewEphemeralTemplateConfiguresJinjaParams(t *testing.T) {

@@ -25,8 +25,8 @@ import (
 	"github.com/nvidia-lpu/harmony"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/ptr"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
 )
 
 func TestOrionToHarmonyMessages(t *testing.T) {

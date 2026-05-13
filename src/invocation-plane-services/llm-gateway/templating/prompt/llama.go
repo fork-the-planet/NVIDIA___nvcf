@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/container/set"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/encoding/json"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/pool"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/ptr"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/tools"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/container/set"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/encoding/json"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/pool"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/tools"
 )
 
 const _llama3KnowledgeCutoff = "December 2023"

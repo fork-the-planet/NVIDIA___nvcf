@@ -24,10 +24,10 @@ import (
 
 	"go.mway.dev/chrono/clock"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/output"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/token"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/tools"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/output"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/token"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/tools"
 )
 
 var ErrHarmonyUnavailable = errors.New("harmony-backed templates are unavailable in this build")

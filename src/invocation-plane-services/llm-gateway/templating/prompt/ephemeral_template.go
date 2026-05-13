@@ -22,9 +22,9 @@ import (
 
 	"github.com/nvidia-lpu/minijinja"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/must"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/tools"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/must"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/tools"
 )
 
 type EphemeralTemplate struct {

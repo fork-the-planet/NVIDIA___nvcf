@@ -35,11 +35,11 @@ The collector handles:
 go build -o bin/byoo-otel-collector ./cmd/byoo-otel-collector
 
 # Build the custom otel-collector-contrib binary
-go install go.opentelemetry.io/collector/cmd/builder@v0.147.0
+go install go.opentelemetry.io/collector/cmd/builder@v0.152.0
 builder --config=./otel-collector-build.yaml
 
 # Build Docker image
-docker build --build-arg OTEL_BUILDER_VERSION=v0.147.0 \
+docker build --build-arg OTEL_BUILDER_VERSION=v0.152.0 \
   -f ./Dockerfile -t byoo-otel-collector:latest .
 ```
 
@@ -326,13 +326,15 @@ If adding/changing configuration templates:
 
 ### Upgrading the OpenTelemetry Collector
 
+Agents that can read Cursor project skills should load `.cursor/skills/update-otel-collector-version/SKILL.md` before changing collector versions.
+
 When upgrading to a new OpenTelemetry Collector version, use the update script so all references stay in sync:
 
 ```bash
-./scripts/update-collector-version.sh v0.147.0
+./scripts/update-collector-version.sh v0.152.0 v1.58.0
 ```
 
-The script updates the version in: `otel-collector-build.yaml`, `AGENTS.md`, `README.md`, `Dockerfile`, `Dockerfile.nvcf-otel-collector`, and `.gitlab-ci.yml`. Run it from the repository root. You can pass the version with or without the `v` prefix (e.g. `v0.147.0` or `0.147.0`). After running, verify with `git diff` and run a build to confirm.
+The script updates the version in: `otel-collector-build.yaml`, `AGENTS.md`, `README.md`, `Makefile`, `Dockerfile`, `Dockerfile.nvcf-otel-collector`, `.gitlab-ci.yml`, and `VERSION`. Run it from the repository root. You can pass versions with or without the `v` prefix (e.g. `v0.152.0` or `0.152.0`). Pass the optional `v1.x.y` provider version when the confmap provider modules need a matching stable release. After running, verify with `git diff` and run a build to confirm.
 
 ### Working with Telemetry Backends
 
@@ -404,7 +406,7 @@ make update-examples
 make validate-otelconfig
 
 # Upgrade OpenTelemetry Collector version (updates all relevant files)
-./scripts/update-collector-version.sh v0.147.0
+./scripts/update-collector-version.sh v0.152.0 v1.58.0
 
 # Find all test files
 find . -name '*_test.go' -not -path './vendor/*' -not -path './validator/*' -not -path './generator/*'

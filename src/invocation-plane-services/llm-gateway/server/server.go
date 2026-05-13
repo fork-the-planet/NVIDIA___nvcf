@@ -27,15 +27,15 @@ import (
 	echo "github.com/labstack/echo/v4"
 	echoMiddleware "github.com/labstack/echo/v4/middleware"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/api"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/config"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/provider"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/ratelimit"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/ratelimitsync"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/telemetry"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/tokenizers"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/util"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/api"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/config"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/provider"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/ratelimit"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/ratelimitsync"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/telemetry"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/tokenizers"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/util"
 )
 
 func New(

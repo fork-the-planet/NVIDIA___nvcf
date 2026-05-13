@@ -24,7 +24,7 @@ import (
 	gcppubsub "cloud.google.com/go/pubsub/v2"
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/telemetry"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/telemetry"
 )
 
 type Message interface {

@@ -368,7 +368,64 @@ def test_worker_http():
 
 ### Prerequisites
 
-- Go 1.24 or higher
+- Bazel 8.6.0 via Bazelisk (Bazel is the only build path; see "Building with Bazel" below)
+- Go 1.25 is downloaded hermetically by Bazel; no system Go is required.
+
+### Building with Bazel
+
+This repo carries the same Bazel toolchain conventions as the NVCF
+umbrella (`github.com/NVIDIA/nvcf/nvcf`). The umbrella ships a
+one-shot installer that drops Bazelisk into `~/.local/bin` and prints
+exactly what to install for Go + OCI + cross-compile toolchains; reuse
+it instead of duplicating the setup here:
+
+```bash
+# From a checkout of the umbrella repo (or via curl if you don't have it):
+curl -fsSL https://github.com/NVIDIA/nvcf/nvcf/-/raw/main/setup.sh | bash
+
+# Pinned Bazel version is read from this repo's .bazelversion (8.6.0).
+bazel version
+```
+
+Day-to-day commands:
+
+```bash
+# Build the grpc-proxy binary.
+bazel build //...
+
+# Run all tests. Tests tagged `requires-docker` (proxy/geo:geo_test
+# spins up testcontainers + localstack) need a reachable Docker
+# daemon; either run on a host with Docker installed or skip them
+# with --test_tag_filters=-requires-docker.
+bazel test //...
+
+# Just the proxy binary.
+bazel build //:nvcf-grpc-proxy
+./bazel-bin/nvcf-grpc-proxy_/nvcf-grpc-proxy --help
+
+# Build the multi-arch OCI image index (amd64 + arm64), matching the
+# image the CI publishes to nvcr.io/nv-ngc-devops/nvcf-grpc-proxy.
+bazel build //:image_index
+
+# Push the image to the registry. Requires nvcr.io credentials in
+# ~/.docker/config.json (`docker login nvcr.io -u \$oauthtoken ...`).
+bazel run --stamp //:image_push
+
+# Regenerate BUILD files after adding a Go file or import.
+bazel run //:gazelle
+
+# Refresh use_repo entries when go.mod changes.
+bazel mod tidy
+```
+
+CI runs the Bazel lane as the single source of truth for build, test,
+and image publication. The included `nvcf-golang-ci-pipeline.yml`
+template's Go-build / Go-test / docker-build / docker-push jobs are
+explicitly disabled in `.gitlab-ci.yml`. See the rollout tracker at
+`github.com/NVIDIA/nvcf/nvcf/-/blob/main/docs/dev/bazel-rollout.md`
+for the broader Phase B context.
+
+### Environment Setup
 
 ### Environment Setup
 

@@ -14,7 +14,8 @@ This document provides guidance on using DevSpace for local development and depl
 Before using DevSpace with this project, you need to install the required plugin:
 
 ```bash
-devspace add plugin ssh://git@github.com/NVIDIA:12051/cds/devspaces/devspace-plugin-nv-core.git
+export DEVSPACE_PLUGIN_URL="<devspace-nv-core-plugin-git-url>"
+devspace add plugin "${DEVSPACE_PLUGIN_URL}"
 ```
 
 This plugin provides additional functionality required for the nvcf-nats-auth-callout-service service development workflow.

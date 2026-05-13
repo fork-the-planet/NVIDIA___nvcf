@@ -26,9 +26,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/nvcf"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/requestctx"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/telemetry"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/nvcf"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/requestctx"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/telemetry"
 )
 
 type InvocationAuthClient interface {

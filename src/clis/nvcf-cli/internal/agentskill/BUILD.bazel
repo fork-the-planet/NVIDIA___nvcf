@@ -15,20 +15,16 @@
 
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
-genrule(
-    name = "skilldata_generated_go",
-    srcs = ["//ai-tooling/user/skills:nvcf_public_user_skills"],
-    outs = ["skilldata_generated.go"],
-    cmd = "$(location //src/clis/nvcf-cli/internal/agentskill/skilldatagen) -strip-prefix=ai-tooling/user/skills -out=$@ $(SRCS)",
-    tools = ["//src/clis/nvcf-cli/internal/agentskill/skilldatagen"],
-)
+# skilldata_generated.go is checked in (see //go:generate in install.go). From
+# this directory run: go generate ./...
+# Or from src/clis/nvcf-cli: go generate ./internal/agentskill/...
 
 go_library(
     name = "agentskill",
     srcs = [
         "install.go",
         "manifest.go",
-        ":skilldata_generated_go",
+        "skilldata_generated.go",
     ],
     importpath = "nvcf-cli/internal/agentskill",
     visibility = ["//src/clis/nvcf-cli:__subpackages__"],

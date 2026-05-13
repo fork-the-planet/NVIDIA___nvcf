@@ -26,13 +26,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/golden"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/must"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/ptr"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/prompt"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/testhelpers"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/tools"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/must"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/prompt"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/testhelpers"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/tools"
 )
 
 const tokenizerDir = "../../lib/tokenizers/vendor"

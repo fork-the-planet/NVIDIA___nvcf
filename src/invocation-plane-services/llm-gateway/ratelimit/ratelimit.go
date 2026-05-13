@@ -27,7 +27,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/telemetry"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/telemetry"
 )
 
 // limiterMode is the state-transition mode used inside leakyBucket. It is an
@@ -72,7 +72,7 @@ func (l RateLimit) String() string {
 	return fmt.Sprintf("%d/%s", l.Limit, l.Period.String())
 }
 
-//go:generate go tool mockgen -package ratelimitmock -destination ratelimitmock/rate_limiter.go . RateLimiter
+//go:generate go run go.uber.org/mock/mockgen@v0.6.0 -package ratelimitmock -destination ratelimitmock/rate_limiter.go . RateLimiter
 type RateLimiter interface {
 	CheckLimit(
 		ctx context.Context,

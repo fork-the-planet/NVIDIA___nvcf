@@ -32,14 +32,14 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/config"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/must"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/ptr"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/ratelimit"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/requestctx"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/telemetry"
-	templatingprompt "github.com/NVIDIA/nvcf/llm-api-gateway/templating/prompt"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/config"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/must"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/ratelimit"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/requestctx"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/telemetry"
+	templatingprompt "github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/prompt"
 )
 
 const (

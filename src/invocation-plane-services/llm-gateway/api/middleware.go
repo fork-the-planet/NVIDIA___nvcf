@@ -32,9 +32,9 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/config"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/requestctx"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/telemetry"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/config"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/requestctx"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/telemetry"
 )
 
 const (

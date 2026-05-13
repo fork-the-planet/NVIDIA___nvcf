@@ -33,7 +33,7 @@ replace (
 	k8s.io/component-base => k8s.io/component-base v0.35.3
 )
 
-require github.com/NVIDIA/nvcf/src/libraries/go/lib v0.0.0-20260429212700-acf8e2b672a4
+require github.com/NVIDIA/nvcf/src/libraries/go/lib v0.0.0-20260512103107-793c25223b40
 
 require (
 	dario.cat/mergo v1.0.2 // indirect

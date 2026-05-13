@@ -28,7 +28,7 @@ import (
 	zlog "github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/must"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/must"
 )
 
 var (

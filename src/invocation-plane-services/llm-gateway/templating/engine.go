@@ -33,12 +33,12 @@ import (
 	"github.com/nvidia-lpu/minijinja"
 	zlog "github.com/rs/zerolog/log"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/must"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/ptr"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/output"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/prompt"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/tools"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/must"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/output"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/prompt"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/tools"
 )
 
 var (
@@ -320,7 +320,7 @@ func (e *Engine) RegisterHFTemplates(basedir string) error {
 			toolParseConfig = tools.NewDeepSeekParseConfig()
 		}
 
-		// TODO(mway): https://github.com/NVIDIA/nvcf/llm-api-gateway/pull/3988
+		// TODO(mway): https://github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/pull/3988
 		switch d.Name() {
 		case "minimax-m2":
 			reasoningConfig = output.XMLThinkWithPrefillReasoningConfig()

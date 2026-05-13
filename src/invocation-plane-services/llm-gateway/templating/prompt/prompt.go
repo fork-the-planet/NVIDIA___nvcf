@@ -23,9 +23,9 @@ import (
 	"slices"
 	"unsafe"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/pool"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating/token"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/pool"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/token"
 )
 
 var _normalizeMessagesBufferPool = pool.NewWithReleaser(

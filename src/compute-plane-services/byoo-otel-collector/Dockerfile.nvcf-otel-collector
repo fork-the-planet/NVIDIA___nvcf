@@ -11,7 +11,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26.2-bookworm AS builder-otelcol
 
 ARG TARGETOS=linux
 ARG TARGETARCH
-ARG OTEL_BUILDER_VERSION=v0.147.0
+ARG OTEL_BUILDER_VERSION=v0.152.0
 
 ENV CGO_ENABLED=0
 
@@ -28,7 +28,7 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} builder --config=./otel-collector-buil
 FROM nvcr.io/nvidia/distroless/go:v4.0.4 AS nvcf-otel-collector
 
 LABEL description="NVCF OpenTelemetry Collector - Custom build with curated components for NVCF services"
-LABEL version="0.147.2"
+LABEL version="0.152.0"
 
 COPY --from=builder-otelcol /app/output/otelcol-contrib /otelcol-contrib
 

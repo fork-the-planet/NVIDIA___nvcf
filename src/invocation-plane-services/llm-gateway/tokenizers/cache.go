@@ -21,9 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/cache"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/must"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/util"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/cache"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/must"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/util"
 )
 
 var (

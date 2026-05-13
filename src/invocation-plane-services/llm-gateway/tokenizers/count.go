@@ -18,7 +18,7 @@ limitations under the License.
 package tokenizers
 
 import (
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
 )
 
 func numTokensForString(tokenizer *CachingTokenizer, s string) (int, error) {

@@ -17,6 +17,8 @@ limitations under the License.
 
 package agentskill
 
+//go:generate go run ./skilldatagen -skills-root=../../../../../ai-tooling/user/skills -strip-prefix=ai-tooling/user/skills -out=skilldata_generated.go
+
 import (
 	"context"
 	"errors"

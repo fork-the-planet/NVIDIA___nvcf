@@ -27,8 +27,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	orionpubsub "github.com/NVIDIA/nvcf/llm-api-gateway/pubsub"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/telemetry"
+	orionpubsub "github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/pubsub"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/telemetry"
 )
 
 const (

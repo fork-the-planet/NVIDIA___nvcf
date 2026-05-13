@@ -25,3 +25,7 @@ build-errors.log
 
 # Binary
 /nvcf-nats-auth-callout-service
+
+# Bazel workspace symlinks (bazel writes these next to the WORKSPACE
+# pointing into ~/.cache/bazel; never commit them).
+/bazel-*

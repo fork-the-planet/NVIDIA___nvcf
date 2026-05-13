@@ -18,11 +18,11 @@ limitations under the License.
 package server
 
 import (
-	"github.com/NVIDIA/nvcf/llm-api-gateway/api"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
-	"github.com/NVIDIA/nvcf/llm-api-gateway/templating"
-	templatingprompt "github.com/NVIDIA/nvcf/llm-api-gateway/templating/prompt"
-	templatingtools "github.com/NVIDIA/nvcf/llm-api-gateway/templating/tools"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/api"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating"
+	templatingprompt "github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/prompt"
+	templatingtools "github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/templating/tools"
 )
 
 var _ api.TemplateEngine = (*templateEngineAdapter)(nil)

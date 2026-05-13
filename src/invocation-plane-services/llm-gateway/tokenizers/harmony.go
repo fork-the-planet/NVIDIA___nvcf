@@ -23,7 +23,7 @@ import (
 
 	"github.com/nvidia-lpu/harmony"
 
-	"github.com/NVIDIA/nvcf/llm-api-gateway/internal/ptr"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
 )
 
 type HarmonyTokenizer struct {

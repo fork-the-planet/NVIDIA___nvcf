@@ -56,11 +56,20 @@ func (s *InterceptedHttpServer) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
-	listener = ListenerInterceptor{Listener: listener, InterceptFunc: func(conn net.Conn) net.Conn {
+	return s.Serve(listener)
+}
+
+// Serve wraps an already-bound listener with the connection-tracking
+// interceptor and hands it to the embedded http.Server. Callers that
+// need to discover the bound address before serving (eg tests using
+// ephemeral ports) bind a listener themselves and pass it here; this
+// keeps the interceptor wrap in one place instead of duplicating it.
+func (s *InterceptedHttpServer) Serve(l net.Listener) error {
+	l = ListenerInterceptor{Listener: l, InterceptFunc: func(conn net.Conn) net.Conn {
 		zap.L().Debug("new http/2 listener connection")
 		return worker.NewConnectionTrackingConn(conn)
 	}}
-	return s.Serve(listener)
+	return s.Server.Serve(l)
 }
 
 type ListenerInterceptor struct {

@@ -18,7 +18,7 @@ limitations under the License.
 package prompt
 
 import (
-	"github.com/NVIDIA/nvcf/llm-api-gateway/models"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
 )
 
 type IncrementalTokenParser interface {
