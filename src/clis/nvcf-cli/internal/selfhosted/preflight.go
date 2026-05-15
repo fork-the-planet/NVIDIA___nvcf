@@ -272,6 +272,12 @@ func (r Role) String() string {
 type RoleConfig struct {
 	KubeContext string // used for the kubectl-check probes (passed to subprocesses)
 	SISURL      string // when non-empty, RoleComputePlane adds an HTTP-reachability probe
+
+	// InotifyProber probes node-level inotify limits on the compute-plane
+	// cluster. When nil, the inotify check is skipped (e.g. callers that opted
+	// out via --skip-inotify-check or environments where the prober cannot be
+	// constructed). Production wires NewInotifyProber; tests pass fakes.
+	InotifyProber NodeInotifyProber
 }
 
 // categorySpec groups a set of checks under a named category. Categories run
@@ -353,7 +359,8 @@ func controlPlaneCheckCategory(_ RoleConfig) categorySpec {
 }
 
 // computePlaneCheckCategory returns the placeholder compute-plane checks.
-// Conditionally adds an SIS reachability probe when RoleConfig.SISURL is set.
+// Conditionally adds an SIS reachability probe when RoleConfig.SISURL is set
+// and a node-inotify-limits probe when RoleConfig.InotifyProber is set.
 func computePlaneCheckCategory(rc RoleConfig) categorySpec {
 	cat := categorySpec{
 		name: "compute-plane-cluster",
@@ -366,7 +373,110 @@ func computePlaneCheckCategory(rc RoleConfig) categorySpec {
 	if rc.SISURL != "" {
 		cat.checks = append(cat.checks, sisReachabilityCheck(rc.SISURL))
 	}
+	if rc.InotifyProber != nil {
+		cat.checks = append(cat.checks, nodeInotifyCheck(rc.InotifyProber, rc.KubeContext))
+	}
 	return cat
+}
+
+// Required minimum inotify limits per
+// docs/user/cluster-management/self-managed.md#node-inotify-limits.
+// NVCA bootstrap fails with "too many open files" when these are too low,
+// which surfaces downstream as opaque errors like empty clusterGroups or
+// "Invalid GPU specified" on function deploy.
+const (
+	minInotifyMaxUserInstances = 8192
+	minInotifyMaxUserWatches   = 524288
+	inotifyHintURL             = "https://docs.nvidia.com/nvcf/self-managed-clusters#node-inotify-limits"
+)
+
+// NodeInotifyLimits captures one node's observed inotify sysctls. Err is
+// populated only on per-node probe failure; cluster-wide failures surface as
+// the prober's returned error instead.
+type NodeInotifyLimits struct {
+	NodeName         string
+	MaxUserInstances int64
+	MaxUserWatches   int64
+	Err              error
+}
+
+// NodeInotifyProber returns one NodeInotifyLimits per cluster node, or a
+// non-nil error if probing the cluster failed before any per-node result
+// could be collected.
+type NodeInotifyProber func(ctx context.Context, kubeContext string) ([]NodeInotifyLimits, error)
+
+// nodeInotifyCheck verifies fs.inotify.max_user_instances and
+// fs.inotify.max_user_watches on every compute-plane node meet NVCA's
+// minimums. On failure it lists the offending nodes with observed-vs-required
+// values and a link to the documented remediation DaemonSet.
+func nodeInotifyCheck(prober NodeInotifyProber, kubeContext string) binaryCheckSpec {
+	const id = "node-inotify-limits"
+	return binaryCheckSpec{
+		ID:         id,
+		HumanLabel: "checking node inotify limits…",
+		Run: func(ctx context.Context) CheckResult {
+			r := CheckResult{
+				ID:       id,
+				Severity: "error",
+				HintURL:  inotifyHintURL,
+			}
+			limits, err := prober(ctx, kubeContext)
+			if err != nil {
+				r.Severity = "warning"
+				r.Message = "node inotify probe failed: " + err.Error()
+				r.Err = err
+				return r
+			}
+			if len(limits) == 0 {
+				r.Severity = "warning"
+				r.Passed = true
+				r.Message = "no nodes returned by inotify probe; skipping"
+				return r
+			}
+			var failing, probeErrs []string
+			for _, l := range limits {
+				if l.Err != nil {
+					probeErrs = append(probeErrs, fmt.Sprintf("%s: %v", l.NodeName, l.Err))
+					continue
+				}
+				if l.MaxUserInstances < minInotifyMaxUserInstances || l.MaxUserWatches < minInotifyMaxUserWatches {
+					failing = append(failing, fmt.Sprintf(
+						"%s (max_user_instances=%d/%d, max_user_watches=%d/%d)",
+						l.NodeName,
+						l.MaxUserInstances, minInotifyMaxUserInstances,
+						l.MaxUserWatches, minInotifyMaxUserWatches,
+					))
+				}
+			}
+			// Limit violations take priority over probe errors. If both are
+			// present, surface the violations as error and append the probe
+			// errors so non-compliant nodes are never hidden behind warning
+			// noise from an unrelated RBAC/scheduling failure.
+			if len(failing) > 0 {
+				msg := fmt.Sprintf(
+					"node inotify limits below NVCA minimums (max_user_instances >= %d, max_user_watches >= %d) on %d node(s): %s",
+					minInotifyMaxUserInstances, minInotifyMaxUserWatches, len(failing), strings.Join(failing, "; "),
+				)
+				if len(probeErrs) > 0 {
+					msg += fmt.Sprintf("; additionally could not probe %d node(s): %s",
+						len(probeErrs), strings.Join(probeErrs, "; "))
+				}
+				r.Message = msg
+				return r
+			}
+			if len(probeErrs) > 0 {
+				r.Severity = "warning"
+				r.Message = fmt.Sprintf(
+					"could not probe inotify limits on %d node(s): %s",
+					len(probeErrs), strings.Join(probeErrs, "; "),
+				)
+				return r
+			}
+			r.Passed = true
+			r.Message = fmt.Sprintf("inotify limits meet NVCA minimums on %d node(s)", len(limits))
+			return r
+		},
+	}
 }
 
 // placeholderCheck returns a binaryCheckSpec that emits a passing "info"

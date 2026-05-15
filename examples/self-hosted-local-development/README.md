@@ -16,7 +16,7 @@ Run the full NVCF self-hosted control plane on your laptop using [k3d](https://k
 
 ## Quick Start
 
-`setup.sh` owns local cluster bootstrap and is the source of truth for this workflow. It creates the k3d cluster, installs KWOK, installs the fake GPU operator, installs CSI SMB, and installs Envoy Gateway. Product docs should reference this script instead of repeating every bootstrap command.
+`setup.sh` owns local cluster bootstrap and is the source of truth for this workflow. It creates the k3d cluster, applies the documented `node-inotify-tuner` DaemonSet, installs KWOK, installs the fake GPU operator, installs CSI SMB, and installs Envoy Gateway. Product docs should reference this script instead of repeating every bootstrap command.
 
 ### 1. Create the local cluster
 
@@ -27,6 +27,7 @@ chmod +x setup.sh teardown.sh
 
 This creates a k3d cluster with:
 - 6 nodes (1 server + 5 agents)
+- Per-node inotify limits raised to `fs.inotify.max_user_instances=8192` and `fs.inotify.max_user_watches=524288` via the `node-inotify-tuner` DaemonSet (see [Node inotify limits](https://docs.nvidia.com/nvcf/self-managed-clusters#node-inotify-limits))
 - 2 nodes with 8 simulated H100 GPUs each (via fake GPU operator)
 - CSI SMB driver for shared storage
 - Envoy Gateway with `shared-gw` and `grpc-gw` Gateway API resources
@@ -114,7 +115,7 @@ helm upgrade -i gpu-operator fake-gpu-operator/fake-gpu-operator \
 | File | Purpose |
 |------|---------|
 | `k3d-config.yaml` | k3d cluster configuration (5 agents, fake GPU labels, port mappings) |
-| `setup.sh` | Creates cluster, installs KWOK, fake GPU operator, CSI SMB, Envoy Gateway |
+| `setup.sh` | Creates cluster, tunes node inotify limits, installs KWOK, fake GPU operator, CSI SMB, Envoy Gateway |
 | `teardown.sh` | Destroys the NVCF stack and k3d cluster |
 
 ## Limitations

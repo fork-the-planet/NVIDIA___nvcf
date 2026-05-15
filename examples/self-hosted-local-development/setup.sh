@@ -210,8 +210,79 @@ log_info "kubectl context set to k3d-${CLUSTER_NAME}"
 kubectl wait --for=condition=Ready nodes --all --timeout=120s > /dev/null 2>&1
 log_info "All nodes are Ready."
 
-# --- Step 2: Install KWOK + Fake GPU Operator ---
-log_info "========== STEP 2: FAKE GPU OPERATOR =========="
+# --- Step 2: Tune node inotify limits ---
+# Matches the node-inotify-tuner DaemonSet documented in
+# docs/user/cluster-management/self-managed.md (Node inotify limits). NVCA
+# operator and agent rely on file watchers for ConfigMap and Secret
+# reconciliation; the default fs.inotify.max_user_instances=128 on some node
+# images is too low for the full NVCF stack.
+log_info "========== STEP 2: NODE INOTIFY LIMITS =========="
+
+if kubectl get daemonset node-inotify-tuner -n kube-system &> /dev/null; then
+    log_info "node-inotify-tuner DaemonSet already installed. Skipping."
+else
+    log_info "Applying node-inotify-tuner DaemonSet (fs.inotify.max_user_instances=8192, fs.inotify.max_user_watches=524288)..."
+    kubectl apply -f - <<'EOF'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-inotify-tuner
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-inotify-tuner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-inotify-tuner
+    spec:
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 1
+      initContainers:
+        - name: set-sysctl
+          image: busybox:1.36
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /host/etc/sysctl.d
+              {
+                echo 'fs.inotify.max_user_instances=8192'
+                echo 'fs.inotify.max_user_watches=524288'
+              } > /host/etc/sysctl.d/99-inotify.conf
+              nsenter -t 1 -m -u -i -n -p -- sysctl -w fs.inotify.max_user_instances=8192
+              nsenter -t 1 -m -u -i -n -p -- sysctl -w fs.inotify.max_user_watches=524288
+          volumeMounts:
+            - name: host
+              mountPath: /host
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1m"
+              memory: "1Mi"
+            limits:
+              cpu: "10m"
+              memory: "16Mi"
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+EOF
+    kubectl -n kube-system rollout status ds/node-inotify-tuner --timeout=120s
+    log_info "Node inotify limits applied."
+fi
+
+# --- Step 3: Install KWOK + Fake GPU Operator ---
+log_info "========== STEP 3: FAKE GPU OPERATOR =========="
 
 if kubectl get deployment kwok-controller -n kube-system &> /dev/null; then
     log_info "KWOK controller already installed. Skipping."
@@ -256,8 +327,8 @@ for i in {1..30}; do
     sleep 2
 done
 
-# --- Step 3: Install CSI SMB Driver ---
-log_info "========== STEP 3: CSI SMB DRIVER =========="
+# --- Step 4: Install CSI SMB Driver ---
+log_info "========== STEP 4: CSI SMB DRIVER =========="
 
 if helm status csi-driver-smb -n kube-system &> /dev/null; then
     log_info "CSI SMB driver already installed. Skipping."
@@ -271,8 +342,8 @@ else
     log_info "CSI SMB driver installed."
 fi
 
-# --- Step 4: Install Envoy Gateway ---
-log_info "========== STEP 4: ENVOY GATEWAY =========="
+# --- Step 5: Install Envoy Gateway ---
+log_info "========== STEP 5: ENVOY GATEWAY =========="
 
 if helm status eg -n envoy-gateway-system &> /dev/null; then
     log_info "Envoy Gateway already installed. Skipping."

@@ -32,13 +32,21 @@ import (
 )
 
 var (
-	checkPre          bool
-	checkControlPlane bool
-	checkComputePlane bool
-	checkAll          bool
-	checkClusterName  string
-	checkLocalOnly    bool
+	checkPre              bool
+	checkControlPlane     bool
+	checkComputePlane     bool
+	checkAll              bool
+	checkClusterName      string
+	checkLocalOnly        bool
+	checkSkipInotifyCheck bool
 )
+
+// newInotifyProberForSelfHosted is a package-level seam so unit tests can
+// inject a fake prober without standing up a real Kubernetes client.
+// Production callers use selfhosted.NewInotifyProber.
+var newInotifyProberForSelfHosted = func() selfhosted.NodeInotifyProber {
+	return selfhosted.NewInotifyProber()
+}
 
 var selfHostedCheckCmd = &cobra.Command{
 	Use:          "check",
@@ -55,6 +63,10 @@ func init() {
 	selfHostedCheckCmd.Flags().BoolVar(&checkAll, "all", false, "Run all check categories")
 	selfHostedCheckCmd.Flags().StringVar(&checkClusterName, "cluster-name", "", "Cluster name for compute-plane checks")
 	selfHostedCheckCmd.Flags().BoolVar(&checkLocalOnly, "local-only", false, "Run local-host checks only (no kubectl contact)")
+	selfHostedCheckCmd.Flags().BoolVar(&checkSkipInotifyCheck, "skip-inotify-check", false,
+		"Disable the per-node inotify-limits probe. Required in environments where the CLI's kubeconfig user "+
+			"cannot create pods in the default namespace (PSA-restricted clusters, locked-down RBAC). "+
+			"Env: NVCF_CLI_SELFHOSTED_SKIP_INOTIFY")
 }
 
 func runSelfHostedCheck(c *cobra.Command, _ []string) error {
@@ -171,6 +183,12 @@ func runPreflightByRole(ctx context.Context, cfg selfhosted.PreflightConfig, sin
 	}
 	mode := kubectx.SelectMode(selfHostedControlPlaneContext, selfHostedComputePlaneContext)
 
+	skipInotify := checkSkipInotifyCheck || os.Getenv("NVCF_CLI_SELFHOSTED_SKIP_INOTIFY") != ""
+	var inotifyProber selfhosted.NodeInotifyProber
+	if !skipInotify {
+		inotifyProber = newInotifyProberForSelfHosted()
+	}
+
 	switch mode {
 	case kubectx.ModeSplit:
 		// Run both roles in parallel; each gets its own kubeconfig context.
@@ -185,7 +203,11 @@ func runPreflightByRole(ctx context.Context, cfg selfhosted.PreflightConfig, sin
 			return nil
 		})
 		eg.Go(func() error {
-			rc := selfhosted.RoleConfig{KubeContext: selfHostedComputePlaneContext, SISURL: icmsURL}
+			rc := selfhosted.RoleConfig{
+				KubeContext:   selfHostedComputePlaneContext,
+				SISURL:        icmsURL,
+				InotifyProber: inotifyProber,
+			}
 			gpuResults = selfhosted.RunPreflightForRole(egCtx, cfg, selfhosted.RoleComputePlane, rc, sink)
 			return nil
 		})
@@ -193,9 +215,10 @@ func runPreflightByRole(ctx context.Context, cfg selfhosted.PreflightConfig, sin
 		return append(cpResults, gpuResults...)
 
 	default: // ModeSingle — no context flags; union both role check sets sequentially.
-		rc := selfhosted.RoleConfig{SISURL: icmsURL}
-		cpResults := selfhosted.RunPreflightForRole(ctx, cfg, selfhosted.RoleControlPlane, rc, sink)
-		gpuResults := selfhosted.RunPreflightForRole(ctx, cfg, selfhosted.RoleComputePlane, rc, sink)
+		cpRC := selfhosted.RoleConfig{SISURL: icmsURL}
+		gpuRC := selfhosted.RoleConfig{SISURL: icmsURL, InotifyProber: inotifyProber}
+		cpResults := selfhosted.RunPreflightForRole(ctx, cfg, selfhosted.RoleControlPlane, cpRC, sink)
+		gpuResults := selfhosted.RunPreflightForRole(ctx, cfg, selfhosted.RoleComputePlane, gpuRC, sink)
 		return append(cpResults, gpuResults...)
 	}
 }

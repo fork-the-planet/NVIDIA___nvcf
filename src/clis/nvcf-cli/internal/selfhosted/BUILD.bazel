@@ -19,6 +19,7 @@ go_library(
     name = "selfhosted",
     srcs = [
         "helm_runtime.go",
+        "inotify_probe.go",
         "orchestrator.go",
         "orchestrator_errors.go",
         "output.go",
@@ -34,14 +35,20 @@ go_library(
         "//src/clis/nvcf-cli/internal/selfhosted/helmruntime",
         "//src/clis/nvcf-cli/internal/selfhosted/progress",
         "@com_github_masterminds_semver_v3//:semver",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_client_go//kubernetes",
         "@io_k8s_client_go//rest",
         "@io_k8s_client_go//tools/clientcmd",
+        "@org_golang_x_sync//errgroup",
     ],
 )
 
 go_test(
     name = "selfhosted_test",
     srcs = [
+        "inotify_probe_test.go",
         "orchestrator_errors_test.go",
         "orchestrator_test.go",
         "output_test.go",
@@ -57,6 +64,11 @@ go_test(
         "@com_github_masterminds_semver_v3//:semver",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_client_go//kubernetes/fake",
         "@io_k8s_client_go//rest",
+        "@io_k8s_client_go//testing",
     ],
 )
