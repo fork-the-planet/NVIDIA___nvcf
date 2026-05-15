@@ -168,7 +168,7 @@ chmod +x run_http_self_managed_test.sh
 ### Virtual users (VUs)
 
 Each VU simulates a single concurrent HTTP client, sending requests in a loop
-and holding the connection open while waiting for a response (long-polling). The
+and holding the invocation connection open while waiting for a response. The
 number of VUs directly controls the concurrency hitting your endpoint.
 
 | VUs | Simulates |

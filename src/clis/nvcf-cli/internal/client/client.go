@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -46,6 +47,10 @@ type AuthType string
 const (
 	AuthTypeOAuth2 AuthType = "oauth2"
 	AuthTypeBearer AuthType = "bearer"
+
+	headerContentType = "Content-Type"
+	contentTypeJSON   = "application/json"
+	apiErrorFormat    = "API error %d: %s"
 )
 
 // Config holds the configuration for the NVCF client
@@ -404,6 +409,41 @@ func baseHTTPURLHost(baseURL string) string {
 	return u.Host
 }
 
+func directInvocationURL(baseInvokeURL, functionID, inferenceURL string) (string, error) {
+	u, err := url.Parse(baseInvokeURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse invoke URL %q: %w", baseInvokeURL, err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invoke URL must include scheme and host: %q", baseInvokeURL)
+	}
+
+	hostname := u.Hostname()
+	if strings.HasPrefix(hostname, functionID+".") {
+		// Already function-specific.
+	} else if strings.HasPrefix(hostname, "invocation.") {
+		hostname = functionID + "." + hostname
+	} else if strings.HasPrefix(hostname, "api.") {
+		hostname = functionID + ".invocation." + strings.TrimPrefix(hostname, "api.")
+	} else {
+		hostname = functionID + ".invocation." + hostname
+	}
+	if port := u.Port(); port != "" {
+		u.Host = hostname + ":" + port
+	} else {
+		u.Host = hostname
+	}
+
+	u.Path = path.Join(u.Path, inferenceURL)
+	if !strings.HasPrefix(u.Path, "/") {
+		u.Path = "/" + u.Path
+	}
+	if strings.HasSuffix(inferenceURL, "/") && !strings.HasSuffix(u.Path, "/") {
+		u.Path += "/"
+	}
+	return u.String(), nil
+}
+
 // expandTildePath expands ~ to the user's home directory
 func expandTildePath(path string) string {
 	if path == "" || !strings.HasPrefix(path, "~/") {
@@ -608,9 +648,9 @@ func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body 
 	}
 
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", contentTypeJSON)
 
 	return c.httpClient.Do(req)
 }
@@ -860,7 +900,7 @@ func (c *Client) CreateFunction(ctx context.Context, req *CreateFunctionRequest)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result CreateFunctionResponse
@@ -890,7 +930,7 @@ func (c *Client) DeleteFunction(ctx context.Context, functionID, versionID strin
 
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -943,7 +983,7 @@ func (c *Client) GetFunction(ctx context.Context, functionID, versionID string) 
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result GetFunctionResponse
@@ -1081,7 +1121,7 @@ func (c *Client) DeployFunction(ctx context.Context, functionID, versionID strin
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -1112,7 +1152,7 @@ func (c *Client) UpdateGpuSpecification(ctx context.Context, deploymentID, gpuSp
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -1146,7 +1186,7 @@ func (c *Client) UpdateFunctionMetadata(ctx context.Context, functionID, version
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -1176,7 +1216,7 @@ func (c *Client) DeleteDeployment(ctx context.Context, functionID, versionID str
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -1195,7 +1235,7 @@ func (c *Client) GetDeployment(ctx context.Context, functionID, versionID string
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result DeploymentResponse
@@ -1304,79 +1344,33 @@ type InvokeFunctionResponse struct {
 type InvokeFunctionOptions struct {
 	InferenceURL         string   // Function's inference endpoint (e.g., "/echo")
 	InputAssetReferences []string // Optional input asset references
-	PollDurationSeconds  int      // Optional polling duration in seconds
+	PollDurationSeconds  int      // Optional invocation hold-open duration in seconds
 }
 
-// InvokeFunction invokes a function and polls for results
-func (c *Client) InvokeFunction(ctx context.Context, functionID, versionID string, requestBody map[string]interface{}, timeoutSec, maxPollRate int) (*InvokeFunctionResponse, error) {
-	return c.InvokeFunctionWithOptions(ctx, functionID, versionID, requestBody, timeoutSec, maxPollRate, nil)
+// InvokeFunction invokes a function.
+func (c *Client) InvokeFunction(ctx context.Context, functionID, versionID string, requestBody map[string]interface{}, timeoutSec int) (*InvokeFunctionResponse, error) {
+	return c.InvokeFunctionWithOptions(ctx, functionID, versionID, requestBody, timeoutSec, nil)
 }
 
 // InvokeFunctionWithOptions invokes a function with additional options using direct invocation
-func (c *Client) InvokeFunctionWithOptions(ctx context.Context, functionID, versionID string, requestBody map[string]interface{}, timeoutSec, maxPollRate int, options *InvokeFunctionOptions) (*InvokeFunctionResponse, error) {
-	// Get inference URL from options or fetch from function details
-	var inferenceURL string
-	if options != nil && options.InferenceURL != "" {
-		inferenceURL = options.InferenceURL
-	} else {
-		// Try to get function details to retrieve the inferenceUrl
-		funcDetails, err := c.GetFunctionDetails(ctx, functionID, versionID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get function details for invocation (hint: specify inferenceUrl in config to skip this): %w", err)
-		}
-		if funcDetails.InferenceURL == "" {
-			return nil, fmt.Errorf("function has no inferenceUrl configured")
-		}
-		inferenceURL = funcDetails.InferenceURL
+func (c *Client) InvokeFunctionWithOptions(ctx context.Context, functionID, versionID string, requestBody map[string]interface{}, timeoutSec int, options *InvokeFunctionOptions) (*InvokeFunctionResponse, error) {
+	if timeoutSec > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+		defer cancel()
 	}
 
-	// Direct mode invocation (always use direct HTTP calls)
-	invokeURL := c.config.BaseInvokeURL
-	if invokeURL == "" {
-		invokeURL = c.baseURL
-	}
-
-	// Create request with standard body
-	var reqBody io.Reader
-	jsonBody, err := json.Marshal(requestBody)
+	inferenceURL, err := c.invokeInferenceURL(ctx, functionID, versionID, options)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, err
 	}
-	reqBody = bytes.NewReader(jsonBody)
-
-	// Create HTTP request for transparent load balancer (TLB) invocation
-	// POST directly to the inference URL with function routing headers
-	fullURL := invokeURL + inferenceURL
-	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, reqBody)
+	fullURL, err := directInvocationURL(c.invokeBaseURL(), functionID, inferenceURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, err
 	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "*/*")
-
-	// Add function routing headers for transparent load balancer
-	req.Header.Set("function-id", functionID)
-	req.Header.Set("function-version-id", versionID)
-
-	// Set Host header for hostname-based routing (self-hosted deployments)
-	if c.config.InvokeHost != "" {
-		req.Host = c.config.InvokeHost
-		if c.config.Debug {
-			log.Printf("DEBUG: Using Invoke Host header override: %s", c.config.InvokeHost)
-		}
-	}
-
-	// Add optional headers
-	if options != nil {
-		if len(options.InputAssetReferences) > 0 {
-			for _, ref := range options.InputAssetReferences {
-				req.Header.Add("NVCF-INPUT-ASSET-REFERENCES", ref)
-			}
-		}
-		if options.PollDurationSeconds > 0 {
-			req.Header.Set("NVCF-POLL-SECONDS", fmt.Sprintf("%d", options.PollDurationSeconds))
-		}
+	req, err := c.newInvokeRequest(ctx, fullURL, functionID, requestBody, options)
+	if err != nil {
+		return nil, err
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -1391,7 +1385,93 @@ func (c *Client) InvokeFunctionWithOptions(ctx context.Context, functionID, vers
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Create result and extract response headers
+	return decodeInvokeFunctionResponse(resp, bodyBytes)
+}
+
+func (c *Client) invokeInferenceURL(ctx context.Context, functionID, versionID string, options *InvokeFunctionOptions) (string, error) {
+	if options != nil && options.InferenceURL != "" {
+		return options.InferenceURL, nil
+	}
+
+	funcDetails, err := c.GetFunctionDetails(ctx, functionID, versionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get function details for invocation (hint: specify inferenceUrl in config to skip this): %w", err)
+	}
+	if funcDetails.InferenceURL == "" {
+		return "", fmt.Errorf("function has no inferenceUrl configured")
+	}
+	return funcDetails.InferenceURL, nil
+}
+
+func (c *Client) invokeBaseURL() string {
+	if c.config.BaseInvokeURL != "" {
+		return c.config.BaseInvokeURL
+	}
+	return c.baseURL
+}
+
+func (c *Client) newInvokeRequest(ctx context.Context, fullURL, functionID string, requestBody map[string]interface{}, options *InvokeFunctionOptions) (*http.Request, error) {
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set(headerContentType, contentTypeJSON)
+	req.Header.Set("Accept", "*/*")
+	c.applyInvokeRouting(req, functionID)
+	applyInvokeOptions(req, options)
+	return req, nil
+}
+
+func (c *Client) applyInvokeRouting(req *http.Request, functionID string) {
+	if c.config.InvokeHost == "" {
+		return
+	}
+
+	req.Host = functionID + "." + c.config.InvokeHost
+	if c.config.Debug {
+		log.Printf("DEBUG: Using Invoke Host header override: %s", req.Host)
+	}
+}
+
+func applyInvokeOptions(req *http.Request, options *InvokeFunctionOptions) {
+	if options == nil {
+		return
+	}
+
+	for _, ref := range options.InputAssetReferences {
+		req.Header.Add("NVCF-INPUT-ASSET-REFERENCES", ref)
+	}
+	if options.PollDurationSeconds > 0 {
+		req.Header.Set("NVCF-POLL-SECONDS", fmt.Sprintf("%d", options.PollDurationSeconds))
+	}
+}
+
+func decodeInvokeFunctionResponse(resp *http.Response, bodyBytes []byte) (*InvokeFunctionResponse, error) {
+	result := invokeFunctionResponseFromHeaders(resp)
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		if len(bodyBytes) > 0 {
+			result.Response = decodeInvokeResponsePayload(bodyBytes, resp.Header.Get(headerContentType))
+		}
+		return &result, nil
+	case resp.StatusCode == http.StatusFound:
+		return &result, nil
+	case resp.StatusCode >= 400:
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(bodyBytes))
+	default:
+		if len(bodyBytes) > 0 {
+			result.ResponseBody = decodeInvokeResponsePayload(bodyBytes, resp.Header.Get(headerContentType))
+		}
+		return &result, nil
+	}
+}
+
+func invokeFunctionResponseFromHeaders(resp *http.Response) InvokeFunctionResponse {
 	var result InvokeFunctionResponse
 	if reqID := resp.Header.Get("NVCF-REQID"); reqID != "" {
 		result.RequestID = reqID
@@ -1405,114 +1485,24 @@ func (c *Client) InvokeFunctionWithOptions(ctx context.Context, functionID, vers
 	if location := resp.Header.Get("Location"); location != "" {
 		result.LocationURL = location
 	}
-
-	// Handle successful response (200) - direct function result
-	if resp.StatusCode == http.StatusOK {
-		// Try to parse as JSON, but handle non-JSON responses gracefully
-		if len(bodyBytes) > 0 {
-			var responseData interface{}
-			if err := json.Unmarshal(bodyBytes, &responseData); err != nil {
-				// Not JSON - store as raw string
-				result.Response = map[string]interface{}{
-					"rawResponse": string(bodyBytes),
-					"contentType": resp.Header.Get("Content-Type"),
-				}
-			} else {
-				// Valid JSON - store the parsed data
-				if respMap, ok := responseData.(map[string]interface{}); ok {
-					result.Response = respMap
-				} else {
-					// JSON but not an object - wrap it
-					result.Response = map[string]interface{}{
-						"result": responseData,
-					}
-				}
-			}
-		}
-		return &result, nil
-	}
-
-	// Handle redirect (302) - result is available at location URL
-	if resp.StatusCode == http.StatusFound {
-		return &result, nil
-	}
-
-	// Handle pending (202) and other responses that need JSON parsing
-	if len(bodyBytes) > 0 {
-		// Try to parse as JSON for structured responses
-		var jsonData interface{}
-		if err := json.Unmarshal(bodyBytes, &jsonData); err == nil {
-			if respMap, ok := jsonData.(map[string]interface{}); ok {
-				result.ResponseBody = respMap
-			} else {
-				result.ResponseBody = map[string]interface{}{
-					"result": jsonData,
-				}
-			}
-		} else {
-			// Not JSON - store as raw response
-			result.ResponseBody = map[string]interface{}{
-				"rawResponse": string(bodyBytes),
-				"contentType": resp.Header.Get("Content-Type"),
-			}
-		}
-	}
-
-	// If response is pending (202), poll for result
-	if resp.StatusCode == http.StatusAccepted && result.RequestID != "" {
-		return c.pollForResult(ctx, result.RequestID, timeoutSec, maxPollRate)
-	}
-
-	// Handle error responses (4xx, 5xx)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	return &result, nil
+	return result
 }
 
-// pollForResult polls for function invocation result
-func (c *Client) pollForResult(ctx context.Context, requestID string, timeoutSec, maxPollRate int) (*InvokeFunctionResponse, error) {
-	timeout := time.Duration(timeoutSec) * time.Second
-	deadline := time.Now().Add(timeout)
-	pollInterval := time.Duration(maxPollRate) * time.Second
-
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		lastPoll := time.Now()
-
-		endpoint := fmt.Sprintf("/v2/nvcf/pexec/status/%s", url.PathEscape(requestID))
-		resp, err := c.makeRequest(ctx, "GET", endpoint, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		var result InvokeFunctionResponse
-		err = json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode response: %w", err)
-		}
-
-		// Check if result is ready
-		if resp.StatusCode == http.StatusOK {
-			return &result, nil
-		}
-
-		// Don't overload the server if it responds too quickly
-		elapsed := time.Since(lastPoll)
-		if elapsed < pollInterval {
-			time.Sleep(pollInterval - elapsed)
+func decodeInvokeResponsePayload(bodyBytes []byte, contentType string) map[string]interface{} {
+	var responseData interface{}
+	if err := json.Unmarshal(bodyBytes, &responseData); err != nil {
+		return map[string]interface{}{
+			"rawResponse": string(bodyBytes),
+			"contentType": contentType,
 		}
 	}
 
-	return nil, fmt.Errorf("timeout while fetching result for request ID %s after %d seconds", requestID, timeoutSec)
+	if respMap, ok := responseData.(map[string]interface{}); ok {
+		return respMap
+	}
+	return map[string]interface{}{
+		"result": responseData,
+	}
 }
 
 // GetHTTPClient returns the underlying HTTP client for advanced usage
@@ -1650,7 +1640,7 @@ func (c *Client) ListFunctionIDs(ctx context.Context) (*ListFunctionIdsResponse,
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result ListFunctionIdsResponse
@@ -1675,7 +1665,7 @@ func (c *Client) ListFunctions(ctx context.Context) (*ListFunctionsResponse, err
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result ListFunctionsResponse
@@ -1699,7 +1689,7 @@ func (c *Client) ListFunctionVersions(ctx context.Context, functionID string) (*
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result ListFunctionsResponse
@@ -1722,7 +1712,7 @@ func (c *Client) GetFunctionDetails(ctx context.Context, functionID, versionID s
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	// API returns wrapped response: {"function": {...}}
@@ -1748,7 +1738,7 @@ func (c *Client) ListClusterGroups(ctx context.Context) (*ClusterGroupsResponse,
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result ClusterGroupsResponse
@@ -1779,7 +1769,7 @@ func (c *Client) CreateAsset(ctx context.Context, req *CreateAssetRequest) (*Cre
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result CreateAssetResponse
@@ -1802,7 +1792,7 @@ func (c *Client) GetAsset(ctx context.Context, assetID string) (*AssetResponse, 
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result AssetResponse
@@ -1823,7 +1813,7 @@ func (c *Client) ListAssets(ctx context.Context) (*ListAssetsResponse, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result ListAssetsResponse
@@ -1846,7 +1836,7 @@ func (c *Client) DeleteAsset(ctx context.Context, assetID string) error {
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -1866,7 +1856,7 @@ func (c *Client) GetQueuePosition(ctx context.Context, requestID string) (*GetPo
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result GetPositionInQueueResponse
@@ -1889,7 +1879,7 @@ func (c *Client) GetQueueDetails(ctx context.Context, functionID string) (*GetQu
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result GetQueuesResponse
@@ -1912,7 +1902,7 @@ func (c *Client) GetQueueDetailsForVersion(ctx context.Context, functionID, vers
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf(apiErrorFormat, resp.StatusCode, string(body))
 	}
 
 	var result GetQueuesResponse

@@ -198,12 +198,13 @@ var invokeCmd = &cobra.Command{
 	Long: `Invokes a function with a JSON request body.
 
 This command sends a request to the specified function and waits for the response.
-The request body must be a valid JSON string. If the function takes longer than
-the polling timeout, the command will poll for results until completion.
+The request body must be a valid JSON string. Use --poll-duration to ask the
+service to hold the invocation connection open for that many seconds before it
+returns pending request metadata.
 
 Invocation Methods:
   --grpc     Use gRPC invocation (native Go client with JSON encoding)
-  (default)  Use direct REST invocation (recommended)
+  (default)  Use direct REST invocation through <function-id>.invocation.<domain>
 
 Examples:
   # Direct REST invocation (default)
@@ -402,7 +403,6 @@ type InvokeConfig struct {
 	InferenceURL         string                 `json:"inferenceUrl"` // Function's inference endpoint (e.g., "/echo")
 	RequestBody          map[string]interface{} `json:"requestBody"`
 	Timeout              int                    `json:"timeout,omitempty"`
-	PollRate             int                    `json:"pollRate,omitempty"`
 	InputAssetReferences []string               `json:"inputAssetReferences,omitempty"`
 	PollDurationSeconds  int                    `json:"pollDurationSeconds,omitempty"`
 
@@ -491,7 +491,6 @@ var invokeFlags struct {
 	versionID            string
 	requestBody          string
 	timeout              int
-	pollRate             int
 	inputAssetReferences []string
 	pollDurationSeconds  int
 	useGRPC              bool // Use gRPC proxy instead of direct REST invocation
@@ -579,9 +578,8 @@ func init() {
 	invokeCmd.Flags().StringVar(&invokeFlags.versionID, "version-id", "", "Version ID (required)")
 	invokeCmd.Flags().StringVar(&invokeFlags.requestBody, "request-body", "", "JSON request body (required)")
 	invokeCmd.Flags().IntVar(&invokeFlags.timeout, "timeout", 60, "Request timeout in seconds")
-	invokeCmd.Flags().IntVar(&invokeFlags.pollRate, "poll-rate", 3, "Polling rate in seconds")
 	invokeCmd.Flags().StringSliceVar(&invokeFlags.inputAssetReferences, "input-asset-references", []string{}, "Input asset references")
-	invokeCmd.Flags().IntVar(&invokeFlags.pollDurationSeconds, "poll-duration", 5, "Initial polling duration in seconds")
+	invokeCmd.Flags().IntVar(&invokeFlags.pollDurationSeconds, "poll-duration", 5, "Invocation hold-open duration in seconds")
 	invokeCmd.Flags().BoolVar(&invokeFlags.useGRPC, "grpc", false, "Use gRPC invocation (native Go client)")
 	invokeCmd.Flags().StringVar(&invokeFlags.grpcService, "grpc-service", "", "gRPC service name")
 	invokeCmd.Flags().StringVar(&invokeFlags.grpcMethod, "grpc-method", "", "gRPC method name")
@@ -1163,7 +1161,6 @@ func loadInvokeConfig(cmd *cobra.Command) (*InvokeConfig, error) {
 	config := &InvokeConfig{
 		// Set defaults
 		Timeout:             60,
-		PollRate:            3,
 		PollDurationSeconds: 5,
 	}
 
@@ -1198,9 +1195,6 @@ func loadInvokeConfig(cmd *cobra.Command) (*InvokeConfig, error) {
 	}
 	if cmd.Flags().Changed("timeout") {
 		config.Timeout = invokeFlags.timeout
-	}
-	if cmd.Flags().Changed("poll-rate") {
-		config.PollRate = invokeFlags.pollRate
 	}
 	if cmd.Flags().Changed("input-asset-references") {
 		config.InputAssetReferences = invokeFlags.inputAssetReferences
@@ -1890,7 +1884,6 @@ func runInvoke(cmd *cobra.Command, args []string) error {
 		config.VersionID,
 		config.RequestBody,
 		config.Timeout,
-		config.PollRate,
 		options,
 	)
 	if err != nil {
@@ -2094,7 +2087,7 @@ func invokeViaGRPCDirect(clientConfig *client.Config, currentState *state.State,
 		"function-version-id", config.VersionID,
 	)
 
-	// Add poll duration if specified
+	// Add hold-open duration if specified
 	if config.PollDurationSeconds > 0 {
 		md.Append("nvcf-poll-seconds", fmt.Sprintf("%d", config.PollDurationSeconds))
 	}

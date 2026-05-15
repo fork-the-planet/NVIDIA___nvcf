@@ -33,6 +33,20 @@ import (
 
 func ptrInt(v int) *int { return &v }
 
+type invokeRequestCaptureTransport struct {
+	req *http.Request
+}
+
+func (t *invokeRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.req = req
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Request:    req,
+	}, nil
+}
+
 func TestBaseHTTPURLHost(t *testing.T) {
 	tests := []struct {
 		name string
@@ -51,6 +65,86 @@ func TestBaseHTTPURLHost(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := baseHTTPURLHost(tt.in); got != tt.want {
 				t.Errorf("baseHTTPURLHost(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInvokeFunctionWithOptionsUsesFunctionHostnameRouting(t *testing.T) {
+	tests := []struct {
+		name          string
+		baseInvokeURL string
+		inferenceURL  string
+		invokeHost    string
+		wantURL       string
+		wantHost      string
+	}{
+		{
+			name:          "invocation host gets function prefix",
+			baseInvokeURL: "https://invocation.example.com",
+			inferenceURL:  "/echo",
+			wantURL:       "https://func-123.invocation.example.com/echo",
+			wantHost:      "func-123.invocation.example.com",
+		},
+		{
+			name:          "api host gets function invocation domain",
+			baseInvokeURL: "https://api.example.com",
+			inferenceURL:  "/echo",
+			wantURL:       "https://func-123.invocation.example.com/echo",
+			wantHost:      "func-123.invocation.example.com",
+		},
+		{
+			name:          "preserves port and base path",
+			baseInvokeURL: "http://invocation.example.com:8080/base",
+			inferenceURL:  "echo",
+			wantURL:       "http://func-123.invocation.example.com:8080/base/echo",
+			wantHost:      "func-123.invocation.example.com:8080",
+		},
+		{
+			name:          "self hosted host header adds function prefix",
+			baseInvokeURL: "http://invocation.localhost:8080",
+			inferenceURL:  "/echo",
+			invokeHost:    "invocation.localhost",
+			wantURL:       "http://func-123.invocation.localhost:8080/echo",
+			wantHost:      "func-123.invocation.localhost",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capture := &invokeRequestCaptureTransport{}
+			client := &Client{
+				config: &Config{
+					BaseInvokeURL: tt.baseInvokeURL,
+					InvokeHost:    tt.invokeHost,
+				},
+				httpClient: &http.Client{Transport: capture},
+			}
+
+			_, err := client.InvokeFunctionWithOptions(context.Background(), "func-123", "ver-456", map[string]interface{}{"message": "hello"}, 0, &InvokeFunctionOptions{
+				InferenceURL:        tt.inferenceURL,
+				PollDurationSeconds: 10,
+			})
+			if err != nil {
+				t.Fatalf("InvokeFunctionWithOptions returned error: %v", err)
+			}
+			if capture.req == nil {
+				t.Fatal("expected invocation request to be captured")
+			}
+			if got := capture.req.URL.String(); got != tt.wantURL {
+				t.Fatalf("request URL = %q, want %q", got, tt.wantURL)
+			}
+			if got := capture.req.Host; got != tt.wantHost {
+				t.Fatalf("request Host = %q, want %q", got, tt.wantHost)
+			}
+			if got := capture.req.Header.Get("function-id"); got != "" {
+				t.Fatalf("function-id header = %q, want empty", got)
+			}
+			if got := capture.req.Header.Get("function-version-id"); got != "" {
+				t.Fatalf("function-version-id header = %q, want empty", got)
+			}
+			if got := capture.req.Header.Get("NVCF-POLL-SECONDS"); got != "10" {
+				t.Fatalf("NVCF-POLL-SECONDS = %q, want 10", got)
 			}
 		})
 	}
@@ -253,18 +347,11 @@ func TestIsAdminOperation(t *testing.T) {
 			reason:   "List versions is a read operation",
 		},
 		{
-			name:     "Invoke function",
+			name:     "Direct invocation path",
 			method:   "POST",
-			path:     "/v2/nvcf/pexec/functions/id/versions/vid",
+			path:     "/echo",
 			expected: false,
-			reason:   "Function invocation is a user operation",
-		},
-		{
-			name:     "Get invocation status",
-			method:   "GET",
-			path:     "/v2/nvcf/pexec/status/request-id",
-			expected: false,
-			reason:   "Status check is a user operation",
+			reason:   "Direct invocation is a user operation",
 		},
 		{
 			name:     "Queue position",

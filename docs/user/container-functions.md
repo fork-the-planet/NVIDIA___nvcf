@@ -321,4 +321,5 @@ When creating the gRPC function, set the `inferenceUrl` field to `/grpc`:
 
 ### gRPC Function Invocation
 
-gRPC function invocation uses the same `Authorization: Bearer $NVCF_TOKEN` header as HTTP invocation, passed as gRPC metadata. See the [gRPC invocation examples](https://github.com/NVIDIA/nv-cloud-function-helpers/tree/main/examples) for details on how to authenticate and invoke your gRPC function.
+For gRPC authentication metadata, gateway address configuration, and client
+examples, see [gRPC Function Invocation](./grpc-function-invocation.md).

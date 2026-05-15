@@ -417,7 +417,7 @@ NVCF_API_KEY: "nvapi-nvcf-stg-EIMjEiBR3mRbCBWRTx3EWkLpnXhxVVr2W2P8467WV8I9-dtxUY
 # For production/staging environments
 NVCF_BASE_HTTP_URL: "https://api.nvcf.nvidia.com"
 NVCF_BASE_GRPC_URL: "grpc.nvcf.nvidia.com:443"
-NVCF_INVOKE: "https://invocation.nvcf.nvidia.com"
+NVCF_INVOKE_URL: "https://invocation.nvcf.nvidia.com"
 
 # Client ID (account identifier)
 NVCF_CLIENT_ID: "nvcf-default"
@@ -937,16 +937,26 @@ Error: invalid secret format 'invalid' - expected NAME=VALUE
 ./nvcf-cli invoke --grpc --file examples/invoke-function.json
 ```
 
+Direct HTTP invocation routes through the function-specific invocation host, not function routing headers:
+
+```bash
+curl --request POST \
+  --url "https://${FUNCTION_ID}.invocation.${INVOCATION_DOMAIN}/echo" \
+  --header "Authorization: Bearer ${API_KEY}" \
+  --header "Content-Type: application/json" \
+  --data '{"message": "hello"}'
+```
+
 LLM functions use the OpenAI-compatible LLM invocation route:
 
 ```bash
-curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+curl -sS -X POST "https://llm.invocation.${INVOCATION_DOMAIN}/v1/chat/completions" \
   -H "Authorization: Bearer ${NVCF_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"model":"<function-id>/dummy-model","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+  -d "{\"model\":\"${FUNCTION_ID}/${MODEL_NAME}\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
 ```
 
-Use the OpenAI `model` value `<function-id>/<model-name>` for LLM invocation requests.
+Use the OpenAI `model` value `${FUNCTION_ID}/${MODEL_NAME}` for LLM invocation requests.
 
 #### Sample Invocation JSON (`examples/invoke-function.json`)
 ```json

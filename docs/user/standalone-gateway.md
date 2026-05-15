@@ -33,7 +33,7 @@ to NVCF services through the Gateway.
 
 | **Chart** | `nvcf-gateway-routes` |
 | --- | --- |
-| **Version** | `1.10.0` |
+| **Version** | `1.11.0` |
 | **Namespace** | `envoy-gateway-system` |
 | **Depends on** | Notary Service, API Keys (must be running), Gateway (must be programmed) |
 
@@ -74,7 +74,7 @@ Replace `<DOMAIN>` with the `GATEWAY_ADDR` value obtained above.
 ```bash
 helm upgrade --install ingress \
   oci://${REGISTRY}/${REPOSITORY}/nvcf-gateway-routes \
-  --version 1.10.0 \
+  --version 1.11.0 \
   --namespace envoy-gateway-system \
   --wait --timeout 10m \
   -f gateway-routes-values.yaml
@@ -109,7 +109,7 @@ export GATEWAY_ADDR=$(kubectl get gateway nvcf-gateway -n envoy-gateway -o jsonp
 
 helm upgrade admin-issuer-proxy \
   oci://${REGISTRY}/${REPOSITORY}/helm-admin-token-issuer-proxy \
-  --version 1.3.1 \
+  --version 1.3.2 \
   --namespace api-keys \
   --wait --timeout 10m \
   --reuse-values \
@@ -233,6 +233,8 @@ The `backend` value should match the cluster group name registered by the NVCA o
 The `instanceType` and `gpu` values depend on the GPU types available in your cluster.
 For invocation, the Host header uses wildcard subdomain routing:
 `<function-id>.invocation.<gateway-addr>`.
+For full HTTP invocation behavior, streaming, and errors, see
+[Generic HTTP Function Invocation](./generic-http-function-invocation.md).
 
 </Note>
 </Accordion>

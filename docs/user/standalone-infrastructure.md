@@ -123,7 +123,7 @@ pull secrets.
 
 | **Chart** | `helm-nvcf-openbao-server` |
 | --- | --- |
-| **Version** | `0.30.9` |
+| **Version** | `0.30.11` |
 | **Namespace** | `vault-system` |
 | **Depends on** | NATS (must be running) |
 
@@ -233,7 +233,7 @@ If you are using node selectors, uncomment the `nodeSelector` sections under bot
 ```bash
 helm upgrade --install openbao-server \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-openbao-server \
-  --version 0.30.9 \
+  --version 0.30.11 \
   --namespace vault-system \
   --wait --wait-for-jobs --timeout 15m \
   -f openbao-values.yaml
@@ -352,7 +352,7 @@ deployment state, and other operational data.
 
 | **Chart** | `helm-nvcf-cassandra` |
 | --- | --- |
-| **Version** | `0.14.1` |
+| **Version** | `0.14.3` |
 | **Namespace** | `cassandra-system` |
 | **Depends on** | None (can be installed in parallel with NATS) |
 
@@ -424,7 +424,7 @@ should use a minimum of 3 replicas.
 ```bash
 helm upgrade --install cassandra \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-cassandra \
-  --version 0.14.1 \
+  --version 0.14.3 \
   --namespace cassandra-system \
   --wait --wait-for-jobs --timeout 15m \
   -f cassandra-values.yaml

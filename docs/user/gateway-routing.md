@@ -322,6 +322,10 @@ When the LLM invocation route is enabled, send OpenAI-compatible requests to `ht
 
 </Tip>
 
+For request examples and invocation-specific behavior over these routes, see
+[Generic HTTP Function Invocation](./generic-http-function-invocation.md) and
+[gRPC Function Invocation](./grpc-function-invocation.md).
+
 ### How Routing Works
 
 1. The Gateway's LoadBalancer service exposes ports 80 (HTTP) and 10081 (gRPC) externally.

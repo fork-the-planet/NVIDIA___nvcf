@@ -437,6 +437,8 @@ The `instanceType` and `gpu` values depend on the GPU types available in your cl
 
 For invocation, the Host header uses wildcard subdomain routing: `<function-id>.invocation.<gateway-addr>`.
 The URL path should match the function's `inferenceUrl` (e.g., `/echo`).
+For full HTTP invocation behavior, streaming, and errors, see
+[Generic HTTP Function Invocation](../generic-http-function-invocation.md).
 
 </Note>
 

@@ -363,7 +363,7 @@ debug: false
 # Direct API endpoints for production
 NVCF_BASE_HTTP_URL: "https://api.nvcf.nvidia.com"
 NVCF_BASE_GRPC_URL: "grpc.nvcf.nvidia.com:443"
-NVCF_INVOKE: "https://invoke.nvcf.nvidia.com"
+NVCF_INVOKE_URL: "https://invocation.nvcf.nvidia.com"
 
 # Set your production credentials
 NVCF_API_KEY: "nvapi-your-production-key-here"
@@ -787,23 +787,33 @@ nvcf-cli invoke --grpc --request-body '{"input": "test"}'
   --version-id "ver-12345678-1234-1234-1234-123456789abc" \
   --request-body '{"input": "Hello, World!", "parameters": {"temperature": 0.7}}' \
   --timeout 60 \
-  --poll-rate 3 \
+  --poll-duration 5 \
   --asset-references "asset-123"
 
 # Or invoke with JSON configuration
 ./nvcf-cli invoke --input-file invoke.json
 ```
 
+Direct HTTP invocation routes through the function-specific invocation host, not function routing headers:
+
+```bash
+curl --request POST \
+  --url "https://${FUNCTION_ID}.invocation.${INVOCATION_DOMAIN}/echo" \
+  --header "Authorization: Bearer ${API_KEY}" \
+  --header "Content-Type: application/json" \
+  --data '{"message": "hello"}'
+```
+
 For LLM functions, send OpenAI-compatible requests to the LLM invocation host:
 
 ```bash
-curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+curl -sS -X POST "https://llm.invocation.${INVOCATION_DOMAIN}/v1/chat/completions" \
   -H "Authorization: Bearer ${NVCF_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"model":"<function-id>/dummy-model","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+  -d "{\"model\":\"${FUNCTION_ID}/${MODEL_NAME}\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
 ```
 
-The OpenAI `model` value must use `<function-id>/<model-name>`.
+The OpenAI `model` value must use `${FUNCTION_ID}/${MODEL_NAME}`.
 
 **New Features:**
 - **Smart Context**: Uses saved function ID/version automatically
@@ -828,6 +838,8 @@ The OpenAI `model` value must use `<function-id>/<model-name>`.
   "inputAssetReferences": ["asset-123", "asset-456"]
 }
 ```
+
+`pollDurationSeconds` maps to the `NVCF-POLL-SECONDS` hold-open hint. The service may keep the invocation connection open for that duration before returning pending request metadata.
 
 #### **Delete a Function** *Uses `NVCF_TOKEN` ONLY*
 
@@ -1422,7 +1434,7 @@ The CLI now provides comprehensive coverage of NVIDIA Cloud Function APIs:
 | **API Category** | **Status** | **Endpoints** |
 |------------------|------------|---------------|
 | **Function Management** | Complete | Create, Deploy, Update, Delete, List, Get Details |
-| **Function Invocation** | Complete | Invoke with polling, Asset references |
+| **Function Invocation** | Complete | Invoke with hold-open hint, Asset references |
 | **Asset Management** | Complete | Create, Upload, List, Get, Delete (Hidden CLI) |
 | **Cluster Groups** | Complete | List available GPU resources |
 | **Queue Management** | Complete | Position, Details, Status |

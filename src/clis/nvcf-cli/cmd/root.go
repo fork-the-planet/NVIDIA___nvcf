@@ -74,7 +74,7 @@ Token Generation:
 API Endpoints:
   NVCF_BASE_HTTP_URL (default: https://api.nvcf.nvidia.com)
   NVCF_BASE_GRPC_URL (default: grpc.nvcf.nvidia.com:443)
-  NVCF_INVOKE (dedicated invocation endpoint)
+  NVCF_INVOKE_URL (dedicated invocation endpoint)
   API_KEYS_SERVICE_URL (API key management endpoint)
   API_KEYS_ADMIN_SERVICE_URL (admin token generation endpoint; falls back to API_KEYS_SERVICE_URL)
 

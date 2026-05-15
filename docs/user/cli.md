@@ -689,6 +689,10 @@ curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
 
 Use the OpenAI `model` value `<function-id>/<model-name>` for LLM invocation requests.
 
+For raw HTTP invocation, HTTP streaming, gRPC metadata, and invocation error
+behavior, see [Generic HTTP Function Invocation](./generic-http-function-invocation.md)
+and [gRPC Function Invocation](./grpc-function-invocation.md).
+
 Additional `function invoke` flags:
 
 | Flag | Description |
@@ -698,8 +702,7 @@ Additional `function invoke` flags:
 | `--grpc-method` | gRPC method name |
 | `--grpc-plaintext` | Use plaintext (insecure) gRPC |
 | `--timeout` | Request timeout in seconds (default: 60) |
-| `--poll-duration` | Initial polling duration in seconds (default: 5) |
-| `--poll-rate` | Polling rate in seconds (default: 3) |
+| `--poll-duration` | Invocation hold-open duration in seconds (default: 5) |
 | `--input-file` | JSON file with invocation configuration |
 | `--input-asset-references` | Input asset references (repeatable) |
 

@@ -22,7 +22,7 @@ API Keys provides authentication token management for all NVCF API interactions.
 
 | **Chart** | `helm-nvcf-api-keys` |
 | --- | --- |
-| **Version** | `1.4.0` |
+| **Version** | `1.5.0` |
 | **Namespace** | `api-keys` |
 | **Depends on** | Infrastructure only |
 
@@ -54,7 +54,7 @@ Replace `<REGISTRY>` and `<REPOSITORY>` with your registry settings.
 ```bash
 helm upgrade --install api-keys \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-api-keys \
-  --version 1.4.0 \
+  --version 1.5.0 \
   --namespace api-keys \
   --wait --timeout 10m \
   -f api-keys-values.yaml
@@ -74,7 +74,7 @@ The Spot Instance Service (SIS) handles cluster registration and GPU resource ma
 
 | **Chart** | `helm-nvcf-sis` |
 | --- | --- |
-| **Version** | `1.13.6` |
+| **Version** | `1.14.2` |
 | **Namespace** | `sis` |
 | **Depends on** | Infrastructure only |
 
@@ -104,7 +104,7 @@ sis:
 ```bash
 helm upgrade --install sis \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-sis \
-  --version 1.13.6 \
+  --version 1.14.2 \
   --namespace sis \
   --wait --timeout 10m \
   -f sis-values.yaml
@@ -124,7 +124,7 @@ The ESS (Enterprise Secrets Service) API distributes secrets to NVCF services vi
 
 | **Chart** | `helm-nvcf-ess-api` |
 | --- | --- |
-| **Version** | `1.5.2` |
+| **Version** | `1.5.3` |
 | **Namespace** | `ess` |
 | **Depends on** | Infrastructure only |
 
@@ -150,7 +150,7 @@ ess:
 ```bash
 helm upgrade --install ess-api \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-ess-api \
-  --version 1.5.2 \
+  --version 1.5.3 \
   --namespace ess \
   --wait --timeout 10m \
   -f ess-api-values.yaml
@@ -172,7 +172,7 @@ install to initialize the NVCF account with registry credentials.
 
 | **Chart** | `helm-nvcf-api` |
 | --- | --- |
-| **Version** | `1.19.1` |
+| **Version** | `1.19.2` |
 | **Namespace** | `nvcf` |
 | **Depends on** | ESS API (must be running) |
 
@@ -253,7 +253,7 @@ Replace the following placeholders:
 ```bash
 helm upgrade --install api \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-api \
-  --version 1.19.1 \
+  --version 1.19.2 \
   --namespace nvcf \
   --wait --wait-for-jobs --timeout 15m \
   -f nvcf-api-values.yaml
@@ -318,7 +318,7 @@ The Invocation Service handles function invocation requests and routes them to w
 
 | **Chart** | `helm-nvcf-invocation-service` |
 | --- | --- |
-| **Version** | `1.5.2` |
+| **Version** | `1.5.4` |
 | **Namespace** | `nvcf` |
 | **Depends on** | NVCF API (must be running) |
 
@@ -348,7 +348,7 @@ invocation:
 ```bash
 helm upgrade --install invocation-service \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-invocation-service \
-  --version 1.5.2 \
+  --version 1.5.4 \
   --namespace nvcf \
   --wait --timeout 10m \
   -f invocation-service-values.yaml
@@ -368,7 +368,7 @@ The gRPC Proxy enables streaming workloads over gRPC connections.
 
 | **Chart** | `helm-nvcf-grpc-proxy` |
 | --- | --- |
-| **Version** | `1.6.2` |
+| **Version** | `1.6.4` |
 | **Namespace** | `nvcf` |
 | **Depends on** | NVCF API (must be running) |
 
@@ -398,7 +398,7 @@ grpcproxy:
 ```bash
 helm upgrade --install grpc-proxy \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-grpc-proxy \
-  --version 1.6.2 \
+  --version 1.6.4 \
   --namespace nvcf \
   --wait --timeout 10m \
   -f grpc-proxy-values.yaml
@@ -418,7 +418,7 @@ The Notary Service handles request signing and validation for secure inter-servi
 
 | **Chart** | `helm-nvcf-notary-service` |
 | --- | --- |
-| **Version** | `1.3.1` |
+| **Version** | `1.4.1` |
 | **Namespace** | `nvcf` |
 | **Depends on** | Infrastructure only |
 
@@ -448,7 +448,7 @@ notary:
 ```bash
 helm upgrade --install notary-service \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-notary-service \
-  --version 1.3.1 \
+  --version 1.4.1 \
   --namespace nvcf \
   --wait --timeout 10m \
   -f notary-service-values.yaml
@@ -469,7 +469,7 @@ installed in the `nvcf` namespace with the `helm-reval` chart.
 
 | **Chart** | `helm-reval` |
 | --- | --- |
-| **Version** | `1.3.3` |
+| **Version** | `1.3.4` |
 | **Namespace** | `nvcf` |
 | **Depends on** | Infrastructure only |
 
@@ -501,7 +501,7 @@ Replace `<REGISTRY>` and `<REPOSITORY>` with your registry settings.
 ```bash
 helm upgrade --install reval \
   oci://${REGISTRY}/${REPOSITORY}/helm-reval \
-  --version 1.3.3 \
+  --version 1.3.4 \
   --namespace nvcf \
   --wait --timeout 10m \
   -f reval-values.yaml
@@ -522,7 +522,7 @@ requiring pre-existing credentials. It is used for initial setup and emergency a
 
 | **Chart** | `helm-admin-token-issuer-proxy` |
 | --- | --- |
-| **Version** | `1.3.1` |
+| **Version** | `1.3.2` |
 | **Namespace** | `api-keys` |
 | **Depends on** | API Keys (must be running) |
 
@@ -565,7 +565,7 @@ Gateway resource are not yet installed. The admin endpoint HTTPRoute will be cre
 ```bash
 helm upgrade --install admin-issuer-proxy \
   oci://${REGISTRY}/${REPOSITORY}/helm-admin-token-issuer-proxy \
-  --version 1.3.1 \
+  --version 1.3.2 \
   --namespace api-keys \
   --wait --timeout 10m \
   -f admin-issuer-proxy-values.yaml
