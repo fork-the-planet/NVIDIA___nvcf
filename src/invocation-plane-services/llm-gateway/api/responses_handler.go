@@ -18,11 +18,17 @@ limitations under the License.
 package api
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
-	"time"
 
-	"github.com/google/uuid"
 	echo "github.com/labstack/echo/v4"
 
 	openairesponses "github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/api/adapters/openairesponses"
@@ -30,6 +36,20 @@ import (
 	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/internal/ptr"
 	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/models"
 	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/provider"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/ratelimit"
+	"github.com/NVIDIA/nvcf/src/invocation-plane-services/llm-gateway/requestctx"
+)
+
+const (
+	responsesEndpointPath   = "/v1/responses"
+	headerResponsesInput    = "X-Input-Tokens"
+	headerResponsesEstimate = "X-Token-Estimate"
+	headerResponsesRequest  = "X-Request-Id"
+	headerResponsesRegion   = "X-Groq-Region"
+	headerResponsesRouting  = "X-Routing-Key"
+	headerResponsesMethod   = "X-Routing-Method"
+	headerResponsesModel    = "X-Model"
+	headerResponsesAffinity = "X-Cache-Affinity-Key"
 )
 
 func (h *ResponsesHandlers) RegisterRoutes(group *echo.Group) {
@@ -38,6 +58,11 @@ func (h *ResponsesHandlers) RegisterRoutes(group *echo.Group) {
 
 func (h *ResponsesHandlers) CreateResponse(ec echo.Context) error {
 	c := must.As[*GatewayContext](ec)
+
+	body, err := captureRequestBody(c.Request())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
 
 	var request openairesponses.CreateRequest
 	if err := c.Bind(&request); err != nil {
@@ -51,259 +76,415 @@ func (h *ResponsesHandlers) CreateResponse(ec echo.Context) error {
 		return err
 	}
 
-	chatRequest := ConvertToChatCompletionRequest(&request)
-	return h.handlers.AsOpenAIChatHandlers().handleChatCompletionRequest(
+	clientWantsStream := ptr.Deref(request.Stream)
+	normalized, outboundBody, err := h.prepareNativeResponsesRequest(c, &request, body)
+	if err != nil {
+		return err
+	}
+
+	resp, err := h.dispatchNativeResponsesRequest(
 		c,
-		chatRequest,
-		h.createUnaryResponseSender(&request),
-		h.createStreamResponseSender(&request),
+		normalized,
+		outboundBody,
 	)
-}
-
-func (h *ResponsesHandlers) createUnaryResponseSender(
-	request *openairesponses.CreateRequest,
-) UnaryResponseSender {
-	return func(
-		c *GatewayContext,
-		chatResponse *models.ChatCompletionResponse,
-		_ *provider.NormalizedRequest,
-	) error {
-		return c.JSON(http.StatusOK, responseFromChat(chatResponse, request))
+	if err != nil {
+		return err
 	}
-}
-
-func (h *ResponsesHandlers) createStreamResponseSender(
-	request *openairesponses.CreateRequest,
-) StreamResponseSender {
-	return func(
-		c *GatewayContext,
-		stream <-chan provider.StreamEvent,
-		normalized *provider.NormalizedRequest,
-	) error {
-		return h.streamResponse(c, request, normalized, stream)
+	if resp == nil {
+		return echo.NewHTTPError(http.StatusBadGateway, "proxy provider returned no response")
 	}
+
+	if clientWantsStream {
+		return h.relayNativeResponsesStream(c, normalized, resp)
+	}
+	return h.aggregateNativeResponsesStream(c, normalized, resp)
 }
 
-func (h *ResponsesHandlers) streamResponse(
+func (h *ResponsesHandlers) prepareNativeResponsesRequest(
 	c *GatewayContext,
 	request *openairesponses.CreateRequest,
-	_ *provider.NormalizedRequest,
-	stream <-chan provider.StreamEvent,
-) error {
-	writer, err := openairesponses.NewSSEWriter(c.UserContext(), c.Response().Writer)
+	body []byte,
+) (*provider.NormalizedRequest, []byte, error) {
+	reqCtx := c.RequestContext()
+	if reqCtx == nil {
+		return nil, nil, echo.NewHTTPError(
+			http.StatusBadRequest,
+			"model prefix is required",
+		)
+	}
+
+	routedModel, err := normalizeOpenAIRequestModel(reqCtx, request.Model)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return nil, nil, err
 	}
-	defer writer.Close()
+	request.Model = routedModel
+	reqCtx.Model = routedModel
+	setRoutingMethodForModel(reqCtx, routedModel)
 
-	response := &openairesponses.Response{
-		ID:         "resp_" + uuid.NewString(),
-		Object:     openairesponses.ObjectResponse,
-		Status:     openairesponses.StatusInProgress,
-		CreatedAt:  time.Now().Unix(),
-		Model:      ptr.To(request.Model),
-		Output:     []openairesponses.OutputItem{},
-		Background: ptr.To(false),
-		Store:      request.Store,
+	if err := requireResponsesURI(reqCtx, routedModel); err != nil {
+		return nil, nil, err
 	}
 
-	messageID := "msg_" + uuid.NewString()
-	contentIndex := 0
-	outputIndex := 0
-	statusInProgress := openairesponses.StatusInProgress
-	statusCompleted := openairesponses.StatusCompleted
-	outputItem := openairesponses.OutputItem{
-		Type:   openairesponses.ItemTypeMessage,
-		ID:     messageID,
-		Role:   openairesponses.RoleAssistant,
-		Status: &statusInProgress,
-		Content: []openairesponses.OutputContent{
-			{
-				Type: openairesponses.ContentTypeOutputText,
-				Text: "",
-			},
-		},
-	}
-
-	if err := writer.SendResponseCreated(response); err != nil {
-		return err
-	}
-	if err := writer.SendResponseInProgress(response); err != nil {
-		return err
-	}
-	if err := writer.SendOutputItemAdded(outputIndex, outputItem); err != nil {
-		return err
-	}
-	if err := writer.SendContentPartAdded(
-		messageID,
-		outputIndex,
-		contentIndex,
-		outputItem.Content[0],
-	); err != nil {
-		return err
-	}
-
-	var (
-		textBuilder strings.Builder
+	countRequest := ConvertToChatCompletionRequest(request)
+	estimatedInputTokens := estimatedInputTokensForNormalizedRequest(
+		countRequest.Model,
+		countRequest.Messages,
+		nil,
 	)
+	inputTokens := h.handlers.countInputTokensForNormalizedRequest(
+		c.UserContext(),
+		reqCtx,
+		countRequest,
+		nil,
+		estimatedInputTokens,
+	)
+	maxOutputTokens := maxOutputTokensForRequest(countRequest)
+	checkRequest := ratelimit.ResourceRequest{
+		Requests:     1,
+		InputTokens:  int64(estimatedInputTokens),
+		OutputTokens: int64(maxOutputTokens),
+	}
+	consumeRequest := ratelimit.ResourceRequest{
+		Requests:     1,
+		InputTokens:  int64(inputTokens),
+		OutputTokens: int64(maxOutputTokens),
+	}
+	admissionPlan, err := NewAdmissionPlan(
+		c,
+		reqCtx,
+		c.Request().URL.Path,
+		h.handlers.limitResolver,
+		h.handlers.rateLimiter,
+		checkRequest,
+		consumeRequest,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	if admissionPlan != nil {
+		defer admissionPlan.Close()
+		if err := admissionPlan.CheckRequests(c.UserContext()); err != nil {
+			return nil, nil, err
+		}
+		if _, err := admissionPlan.CheckTokensAndFinalize(c.UserContext()); err != nil {
+			return nil, nil, err
+		}
+	}
 
-	for event := range stream {
-		if event.Err != nil {
-			_ = writer.SendError(nil, event.Err.Error(), nil)
-			response.Status = openairesponses.StatusFailed
-			_ = writer.SendResponseFailed(response)
+	outboundBody, err := rewriteResponsesProxyBody(body, routedModel, true)
+	if err != nil {
+		return nil, nil, echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	return &provider.NormalizedRequest{
+		ChatRequest:     countRequest,
+		InputTokens:     inputTokens,
+		MaxOutputTokens: maxOutputTokens,
+		AdmissionPlan:   admissionPlan,
+	}, outboundBody, nil
+}
+
+func requireResponsesURI(reqCtx *requestctx.RequestContext, model string) error {
+	if reqCtx == nil || reqCtx.ModelSpecs == nil {
+		return nil
+	}
+
+	spec, ok := reqCtx.ModelSpecs[model]
+	if !ok || len(spec.URIs) == 0 {
+		return nil
+	}
+
+	for _, uri := range spec.URIs {
+		if normalizeModelURI(uri) == responsesEndpointPath {
 			return nil
 		}
+	}
 
-		if event.Chunk == nil {
-			continue
+	return echo.NewHTTPError(
+		http.StatusBadRequest,
+		fmt.Sprintf("model %q does not support %s", model, responsesEndpointPath),
+	)
+}
+
+func normalizeModelURI(uri string) string {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return ""
+	}
+	return "/" + strings.TrimPrefix(uri, "/")
+}
+
+func rewriteResponsesProxyBody(body []byte, model string, stream bool) ([]byte, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("unmarshal responses request: %w", err)
+	}
+
+	encodedModel, err := json.Marshal(model)
+	if err != nil {
+		return nil, fmt.Errorf("marshal responses model: %w", err)
+	}
+	encodedStream, err := json.Marshal(stream)
+	if err != nil {
+		return nil, fmt.Errorf("marshal responses stream flag: %w", err)
+	}
+
+	payload["model"] = encodedModel
+	payload["stream"] = encodedStream
+	return json.Marshal(payload)
+}
+
+func (h *ResponsesHandlers) dispatchNativeResponsesRequest(
+	c *GatewayContext,
+	request *provider.NormalizedRequest,
+	body []byte,
+) (*provider.ProxyResponse, error) {
+	if h.handlers.proxyProvider == nil {
+		return nil, echo.NewHTTPError(http.StatusNotImplemented, "proxy endpoint is not configured")
+	}
+
+	headers := c.Request().Header.Clone()
+	headers.Set(echo.HeaderContentLength, strconv.Itoa(len(body)))
+	headers.Set(headerResponsesInput, strconv.Itoa(request.InputTokens))
+	headers.Set(
+		headerResponsesEstimate,
+		strconv.Itoa(request.InputTokens+request.MaxOutputTokens),
+	)
+	setResponsesProxyContextHeaders(headers, c.RequestContext())
+
+	resp, err := h.handlers.proxyProvider.Proxy(
+		c.UserContext(),
+		c.RequestContext(),
+		&provider.ProxyRequest{
+			Method:        c.Request().Method,
+			Path:          stargatePath(c.Request().URL.Path),
+			RawQuery:      c.Request().URL.RawQuery,
+			Header:        headers,
+			Body:          io.NopCloser(bytes.NewReader(body)),
+			InputTokens:   request.InputTokens,
+			TokenEstimate: request.InputTokens + request.MaxOutputTokens,
+		},
+	)
+	if err != nil {
+		if errors.Is(err, provider.ErrProxyNotSupported) {
+			return nil, echo.NewHTTPError(http.StatusNotImplemented, err.Error())
 		}
+		return nil, providerHTTPError(err)
+	}
+	return resp, nil
+}
 
-		for _, choice := range event.Chunk.Choices {
-			if choice.Delta.Content != nil {
-				textBuilder.WriteString(*choice.Delta.Content)
-				if err := writer.SendOutputTextDelta(
-					messageID,
-					outputIndex,
-					contentIndex,
-					*choice.Delta.Content,
-				); err != nil {
-					return err
+func setResponsesProxyContextHeaders(headers http.Header, reqCtx *requestctx.RequestContext) {
+	if headers == nil || reqCtx == nil {
+		return
+	}
+	if reqCtx.RequestID != "" {
+		headers.Set(headerResponsesRequest, reqCtx.RequestID)
+	}
+	if reqCtx.TargetRegion != "" {
+		headers.Set(headerResponsesRegion, reqCtx.TargetRegion)
+	}
+	if reqCtx.RoutingKey != "" {
+		headers.Set(headerResponsesRouting, reqCtx.RoutingKey)
+	}
+	if reqCtx.RoutingMethod != "" {
+		headers.Set(headerResponsesMethod, reqCtx.RoutingMethod)
+	}
+	if reqCtx.Model != "" {
+		headers.Set(headerResponsesModel, reqCtx.Model)
+	}
+	if reqCtx.CacheAffinityKey != "" {
+		headers.Set(headerResponsesAffinity, reqCtx.CacheAffinityKey)
+	}
+}
+
+func (h *ResponsesHandlers) relayNativeResponsesStream(
+	c *GatewayContext,
+	request *provider.NormalizedRequest,
+	resp *provider.ProxyResponse,
+) error {
+	copyProxyHeaders(c.Response().Header(), resp.Header)
+	setMultiTurnSessionResponseHeader(c)
+	c.Response().WriteHeader(resp.StatusCode)
+	if resp.Body == nil {
+		h.finalizeNativeResponsesUsage(c.UserContext(), request, nil)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	terminalResponse, err := consumeNativeResponsesSSE(
+		resp.Body,
+		c.Response().Writer,
+	)
+	h.finalizeNativeResponsesUsage(c.UserContext(), request, terminalResponse)
+	return err
+}
+
+func (h *ResponsesHandlers) aggregateNativeResponsesStream(
+	c *GatewayContext,
+	request *provider.NormalizedRequest,
+	resp *provider.ProxyResponse,
+) error {
+	if resp.Body == nil {
+		h.finalizeNativeResponsesUsage(c.UserContext(), request, nil)
+		return echo.NewHTTPError(http.StatusBadGateway, "responses proxy returned no body")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		copyProxyHeaders(c.Response().Header(), resp.Header)
+		setMultiTurnSessionResponseHeader(c)
+		c.Response().WriteHeader(resp.StatusCode)
+		_, err := io.Copy(c.Response().Writer, resp.Body)
+		h.finalizeNativeResponsesUsage(c.UserContext(), request, nil)
+		return err
+	}
+
+	terminalResponse, err := consumeNativeResponsesSSE(resp.Body, nil)
+	if err != nil {
+		h.finalizeNativeResponsesUsage(c.UserContext(), request, nil)
+		return err
+	}
+	if terminalResponse == nil {
+		h.finalizeNativeResponsesUsage(c.UserContext(), request, nil)
+		return echo.NewHTTPError(
+			http.StatusBadGateway,
+			"responses proxy stream ended without a terminal response event",
+		)
+	}
+
+	h.finalizeNativeResponsesUsage(c.UserContext(), request, terminalResponse)
+	setMultiTurnSessionResponseHeader(c)
+	return c.JSON(http.StatusOK, terminalResponse)
+}
+
+func consumeNativeResponsesSSE(
+	reader io.Reader,
+	writer io.Writer,
+) (*openairesponses.Response, error) {
+	if reader == nil {
+		return nil, nil
+	}
+
+	lineReader := bufio.NewReader(reader)
+	var (
+		eventBlock       bytes.Buffer
+		terminalResponse *openairesponses.Response
+	)
+
+	for {
+		line, err := lineReader.ReadBytes('\n')
+		if len(line) > 0 {
+			if writer != nil {
+				if _, writeErr := writer.Write(line); writeErr != nil {
+					return terminalResponse, writeErr
+				}
+			}
+			eventBlock.Write(line)
+			if isSSEBlankLine(line) {
+				if response := parseNativeResponsesSSEBlock(eventBlock.Bytes()); response != nil {
+					terminalResponse = response
+				}
+				eventBlock.Reset()
+				if flusher, ok := writer.(http.Flusher); ok {
+					flusher.Flush()
 				}
 			}
 		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		return terminalResponse, err
+	}
 
-		if usageHasTokenCounts(event.Chunk.Usage) {
-			usage := *event.Chunk.Usage
-			response.Usage = responseUsageFromChat(usage)
+	if eventBlock.Len() > 0 {
+		if response := parseNativeResponsesSSEBlock(eventBlock.Bytes()); response != nil {
+			terminalResponse = response
 		}
 	}
-
-	finalText := textBuilder.String()
-	outputItem.Status = &statusCompleted
-	outputItem.Content[0].Text = finalText
-	response.Output = []openairesponses.OutputItem{outputItem}
-	response.Status = openairesponses.StatusCompleted
-
-	if err := writer.SendOutputTextDone(
-		messageID,
-		outputIndex,
-		contentIndex,
-		finalText,
-	); err != nil {
-		return err
-	}
-	if err := writer.SendContentPartDone(
-		messageID,
-		outputIndex,
-		contentIndex,
-		outputItem.Content[0],
-	); err != nil {
-		return err
-	}
-	if err := writer.SendOutputItemDone(outputIndex, outputItem); err != nil {
-		return err
-	}
-
-	return writer.SendResponseCompleted(response)
+	return terminalResponse, nil
 }
 
-func responseFromChat(
-	chatResponse *models.ChatCompletionResponse,
-	request *openairesponses.CreateRequest,
-) *openairesponses.Response {
-	response := &openairesponses.Response{
-		ID:         "resp_" + uuid.NewString(),
-		Object:     openairesponses.ObjectResponse,
-		Status:     openairesponses.StatusCompleted,
-		CreatedAt:  chatResponse.CreatedAt,
-		Model:      ptr.To(chatResponse.Model),
-		Output:     []openairesponses.OutputItem{},
-		Background: ptr.To(false),
-		Store:      request.Store,
-		Tools:      request.Tools,
-		ToolChoice: request.ToolChoice,
-		Text:       request.Text,
-		Usage:      responseUsageFromChat(chatResponse.Usage),
-	}
+func isSSEBlankLine(line []byte) bool {
+	return len(bytes.TrimSpace(line)) == 0
+}
 
-	if len(chatResponse.Choices) == 0 {
-		return response
-	}
+func parseNativeResponsesSSEBlock(block []byte) *openairesponses.Response {
+	var (
+		eventType string
+		dataLines []string
+	)
 
-	choice := chatResponse.Choices[0]
-	if choice.Message.ToolCalls != nil {
-		for _, toolCall := range *choice.Message.ToolCalls {
-			status := openairesponses.StatusCompleted
-			response.Output = append(response.Output, openairesponses.OutputItem{
-				Type:   openairesponses.ItemTypeFunctionCall,
-				ID:     "fc_" + uuid.NewString(),
-				Status: &status,
-				ToolCallData: openairesponses.FunctionToolCall{
-					Type:      openairesponses.ItemTypeFunctionCall,
-					CallID:    toolCall.ID,
-					Name:      toolCall.Function.Name,
-					Arguments: toolCall.Function.Arguments,
-					Status:    &status,
-				},
-			})
+	for _, rawLine := range strings.Split(string(block), "\n") {
+		line := strings.TrimSuffix(rawLine, "\r")
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data := strings.TrimPrefix(line, "data:")
+			data = strings.TrimPrefix(data, " ")
+			dataLines = append(dataLines, data)
 		}
 	}
-
-	if choice.Message.FunctionCall != nil {
-		status := openairesponses.StatusCompleted
-		response.Output = append(response.Output, openairesponses.OutputItem{
-			Type:   openairesponses.ItemTypeFunctionCall,
-			ID:     "fc_" + uuid.NewString(),
-			Status: &status,
-			ToolCallData: openairesponses.FunctionToolCall{
-				Type:      openairesponses.ItemTypeFunctionCall,
-				CallID:    "call_" + uuid.NewString(),
-				Name:      choice.Message.FunctionCall.Name,
-				Arguments: choice.Message.FunctionCall.Arguments,
-				Status:    &status,
-			},
-		})
+	if len(dataLines) == 0 {
+		return nil
 	}
 
-	message := openairesponses.OutputItem{
-		Type: openairesponses.ItemTypeMessage,
-		ID:   "msg_" + uuid.NewString(),
-		Role: openairesponses.RoleAssistant,
-		Content: []openairesponses.OutputContent{
-			{
-				Type: openairesponses.ContentTypeOutputText,
-				Text: ptr.Deref(choice.Message.Content),
-			},
-		},
+	data := strings.Join(dataLines, "\n")
+	if data == "[DONE]" {
+		return nil
 	}
-	response.Output = append(response.Output, message)
 
-	return response
+	var event struct {
+		Type     string                    `json:"type"`
+		Response *openairesponses.Response `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		return nil
+	}
+	if eventType == "" {
+		eventType = event.Type
+	}
+
+	switch eventType {
+	case openairesponses.EventTypeResponseCompleted,
+		openairesponses.EventTypeResponseFailed,
+		openairesponses.EventTypeResponseIncomplete:
+		return event.Response
+	default:
+		return nil
+	}
 }
 
-func responseUsageFromChat(
-	usage models.ChatCompletionUsage,
-) *openairesponses.ResponseUsage {
-	var cachedTokens int
-	if usage.PromptTokensDetails != nil {
-		cachedTokens = int(usage.PromptTokensDetails.CachedTokens)
+func (h *ResponsesHandlers) finalizeNativeResponsesUsage(
+	ctx context.Context,
+	request *provider.NormalizedRequest,
+	response *openairesponses.Response,
+) {
+	h.handlers.finalizeTokenConsumption(ctx, request, chatUsageFromResponses(response))
+}
+
+func chatUsageFromResponses(response *openairesponses.Response) *models.ChatCompletionUsage {
+	if response == nil || response.Usage == nil {
+		return nil
 	}
 
-	var reasoningTokens int
-	if usage.CompletionTokensDetails != nil {
-		reasoningTokens = int(usage.CompletionTokensDetails.ReasoningTokens)
+	return &models.ChatCompletionUsage{
+		PromptTokens:     responsesUsageTokenCount(response.Usage.InputTokens),
+		CompletionTokens: responsesUsageTokenCount(response.Usage.OutputTokens),
+		TotalTokens:      responsesUsageTokenCount(response.Usage.TotalTokens),
 	}
+}
 
-	return &openairesponses.ResponseUsage{
-		InputTokens:  int(usage.PromptTokens),
-		OutputTokens: int(usage.CompletionTokens),
-		TotalTokens:  int(usage.TotalTokens),
-		InputTokensDetails: openairesponses.InputTokensDetails{
-			CachedTokens: cachedTokens,
-		},
-		OutputTokensDetails: openairesponses.OutputTokensDetails{
-			ReasoningTokens: reasoningTokens,
-		},
+func responsesUsageTokenCount(value int) uint32 {
+	if value <= 0 {
+		return 0
 	}
+	if uint64(value) > uint64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(value)
 }

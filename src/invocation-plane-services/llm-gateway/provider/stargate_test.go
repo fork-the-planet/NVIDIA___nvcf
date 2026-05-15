@@ -260,9 +260,11 @@ func TestStargateProviderProxyForwardsRoutingMethod(t *testing.T) {
 		CacheAffinityKey: "mt:v1:header:proxy-hash",
 	}
 	request := &ProxyRequest{
-		Method: http.MethodPost,
-		Path:   "/v1/embeddings",
-		Body:   io.NopCloser(strings.NewReader(`{"model":"proxy-model","input":"hello"}`)),
+		Method:        http.MethodPost,
+		Path:          "/v1/embeddings",
+		Body:          io.NopCloser(strings.NewReader(`{"model":"proxy-model","input":"hello"}`)),
+		InputTokens:   11,
+		TokenEstimate: 29,
 	}
 
 	provider, err := NewStargateProvider(config.StargateConfig{URL: "http://stargate.example"})
@@ -277,6 +279,8 @@ func TestStargateProviderProxyForwardsRoutingMethod(t *testing.T) {
 		require.Equal(t, "proxy-model", r.Header.Get(headerModel))
 		require.Equal(t, "least_loaded", r.Header.Get(headerRoutingMethod))
 		require.Equal(t, "mt:v1:header:proxy-hash", r.Header.Get(headerCacheAffinityKey))
+		require.Equal(t, "11", r.Header.Get(headerInputTokens))
+		require.Equal(t, "29", r.Header.Get(headerTokenEstimate))
 
 		return &http.Response{
 			StatusCode: http.StatusOK,

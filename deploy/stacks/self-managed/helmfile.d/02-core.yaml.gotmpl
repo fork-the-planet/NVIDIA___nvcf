@@ -39,7 +39,7 @@ releases:
       - template: service
 
   - name: sis
-    version: 1.14.2
+    version: 1.14.4
     namespace: sis
     inherit:
       - template: service
@@ -143,7 +143,7 @@ releases:
 
   - name: llm-request-router
     chart: nvcf/helm-nvcf-llm-request-router
-    version: 1.2.2
+    version: 1.3.1
     namespace: nvcf
     condition: addons.llm.enabled
     values:

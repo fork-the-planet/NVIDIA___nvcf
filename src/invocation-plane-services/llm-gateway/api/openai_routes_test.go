@@ -236,7 +236,25 @@ func TestOpenAIChatCompletionsRejectsMissingModel(t *testing.T) {
 func TestOpenAIResponsesServesRequests(t *testing.T) {
 	t.Parallel()
 
-	e := newTestAPI(config.Default())
+	cfg := config.Default()
+	e := echo.New()
+	e.Use(NewContextMiddleware(cfg))
+	RegisterRoutes(
+		e,
+		NewHandlers(
+			cfg,
+			&stubResponsesProvider{
+				completeResponse: &models.ChatCompletionResponse{
+					ID:        "chatcmpl-routes",
+					Object:    models.ObjectChatCompletion,
+					CreatedAt: 123,
+					Model:     "company-name/model-name",
+				},
+			},
+			nil,
+			nil,
+		),
+	)
 
 	body := `{"model":"fn-alpha/company-name/model-name","input":"hello"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
@@ -256,8 +274,8 @@ func TestOpenAIResponsesServesRequests(t *testing.T) {
 	if response["object"] != "response" {
 		t.Fatalf("object = %v, want response", response["object"])
 	}
-	if response["model"] != "fn-alpha/company-name/model-name" {
-		t.Fatalf("model = %v, want fn-alpha/company-name/model-name", response["model"])
+	if response["model"] != "company-name/model-name" {
+		t.Fatalf("model = %v, want company-name/model-name", response["model"])
 	}
 }
 

@@ -285,6 +285,12 @@ func (p *StargateProvider) Proxy(
 			outbound.Header.Set(headerAuthorization, "Bearer "+bearerToken)
 		}
 	}
+	if request.InputTokens > 0 {
+		outbound.Header.Set(headerInputTokens, strconv.Itoa(request.InputTokens))
+	}
+	if request.TokenEstimate > 0 {
+		outbound.Header.Set(headerTokenEstimate, strconv.Itoa(request.TokenEstimate))
+	}
 
 	resp, err := p.client.Do(outbound)
 	if err != nil {

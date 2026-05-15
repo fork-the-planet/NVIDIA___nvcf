@@ -49,7 +49,7 @@ releases:
       - nats-system/nats
 
   - name: cassandra
-    version: 0.14.3
+    version: 0.14.5
     condition: cassandra.enabled # From defaults.yaml or env overrides
     namespace: cassandra-system
     <<: *dependency # Inherits base values from the dependency template
