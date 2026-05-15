@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "enforce",
+    srcs = [
+        "metadata.go",
+        "overhead.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nvca/enforce",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/util/k8sutil",
+        "//pkg/featureflag",
+        "//pkg/nvca/enforce/kata",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/types/nvca/config",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_api//node/v1:node",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_client_go//kubernetes",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":enforce",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "enforce_test",
+    srcs = [
+        "metadata_test.go",
+        "overhead_test.go",
+    ],
+    embed = [":enforce"],
+    deps = [
+        "//pkg/featureflag",
+        "//pkg/featureflag/mock",
+        "//pkg/nvca/enforce/kata",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/types/nvca/config",
+        "@com_github_stretchr_testify//assert",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_api//node/v1:node",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_apimachinery//pkg/watch",
+        "@io_k8s_client_go//applyconfigurations/node/v1:node",
+        "@io_k8s_client_go//kubernetes/fake",
+        "@io_k8s_client_go//kubernetes/typed/node/v1:node",
+        "@io_k8s_client_go//testing",
+    ],
+)

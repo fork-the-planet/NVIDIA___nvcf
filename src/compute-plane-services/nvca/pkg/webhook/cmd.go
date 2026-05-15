@@ -50,12 +50,13 @@ import (
 	"k8s.io/klog/v2"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/metrics"
+	nvcametrics "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/metrics"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/util/k8sutil"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/featureflag"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nodefeatures"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nodefeatures/sharedcluster"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nvca/enforce/kata"
+	whmetrics "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/webhook/metrics"
 )
 
 const (
@@ -177,7 +178,6 @@ func NewCommand() *cli.Command {
 				readTimeout:      5 * time.Second,
 				writeTimeout:     10 * time.Second,
 				attrFetcher:      featureflag.DefaultFetcher,
-				metrics:          metrics.FromContext(ctx),
 				addNodePublisher: sharedcluster.AddNodePublisher,
 			}
 
@@ -208,7 +208,6 @@ type webhookManager struct {
 	dcgmMetrics  DCGMMetricsConfig
 
 	attrFetcher featureflag.AttributeFetcher
-	metrics     *metrics.Metrics
 
 	k8sClient kubernetes.Interface
 	namespace string
@@ -307,6 +306,8 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 
 	r := mux.NewRouter()
 
+	nvcametrics.AddMetricsRoute(r, log, nil, "")
+
 	// Use a max request size of 7MB like controller-runtime does
 	// since full object(s) are embedded in webhook req/res.
 	// https://github.com/kubernetes-sigs/controller-runtime/blob/961fc2c/pkg/webhook/admission/http.go#L55
@@ -328,7 +329,7 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 		log.WithError(err).Error("Error creating validating webhook")
 		return err
 	}
-	handleWebhook(r, "/validate", valWH)
+	handleWebhook(ctx, r, "/validate", valWH)
 
 	genNodeAffValWH, err := newStandaloneWebhook(ctx,
 		"validate-instance-type-nodeaffinity.nvca.nvcf.nvidia.io",
@@ -337,7 +338,7 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 		log.WithError(err).Error("Error creating instance type node affinity validating webhook")
 		return err
 	}
-	handleWebhook(r, "/validate-instance-type-nodeaffinity", genNodeAffValWH)
+	handleWebhook(ctx, r, "/validate-instance-type-nodeaffinity", genNodeAffValWH)
 
 	podAffinityMuWH, err := NewPodAffinityMutatingWebhook(ctx,
 		"mutate-pod-nodeaffinity.nvca.nvcf.nvidia.io",
@@ -351,7 +352,7 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 		log.WithError(err).Error("Error creating pod node affinity mutating webhook")
 		return err
 	}
-	handleWebhook(r, "/mutate-pod-nodeaffinity", podAffinityMuWH)
+	handleWebhook(ctx, r, "/mutate-pod-nodeaffinity", podAffinityMuWH)
 
 	enfMuWH, err := NewPodEnforcementMutatingWebhook(ctx,
 		"mutate-pod-enforcement.nvca.nvcf.nvidia.io",
@@ -364,7 +365,7 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 		log.WithError(err).Error("Error creating pod enforcement mutating webhook")
 		return err
 	}
-	handleWebhook(r, "/mutate-pod-enforcement", enfMuWH)
+	handleWebhook(ctx, r, "/mutate-pod-enforcement", enfMuWH)
 
 	// Note: the helm storage mutating webhook is now just a stub for backwards-compatibility.
 	// The MiniService mutating webhook now handles all storage mutations.
@@ -374,7 +375,7 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 		log.WithError(err).Error("Error creating Helm storage mutating webhook")
 		return err
 	}
-	handleWebhook(r, "/mutate-helm-storage", helmStorageMuWebhook)
+	handleWebhook(ctx, r, "/mutate-helm-storage", helmStorageMuWebhook)
 
 	helmPersistentStorageMuWebhook, err := newStandaloneWebhook(ctx,
 		"mutate-helm-storage.nvca.nvcf.nvidia.io",
@@ -385,7 +386,7 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 		log.WithError(err).Error("Error creating Helm persistent storage mutating webhook")
 		return err
 	}
-	handleWebhook(r, "/mutate-helm-persistent-storage", helmPersistentStorageMuWebhook)
+	handleWebhook(ctx, r, "/mutate-helm-persistent-storage", helmPersistentStorageMuWebhook)
 
 	nvcaMutatingWebhook, err := newStandaloneWebhook(ctx,
 		"nvca-mutating-webhook.nvca.nvcf.nvidia.io",
@@ -394,7 +395,7 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 		log.WithError(err).Error("Error creating NVCA mutating webhook")
 		return err
 	}
-	handleWebhook(r, "/nvca-mutating-webhook", nvcaMutatingWebhook)
+	handleWebhook(ctx, r, "/nvca-mutating-webhook", nvcaMutatingWebhook)
 
 	miniserviceMuWH, err := NewMiniserviceMutatingWebhook(ctx,
 		"mutate-miniservice",
@@ -403,7 +404,7 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 		log.WithError(err).Error("Error creating miniservice mutating webhook")
 		return err
 	}
-	handleWebhook(r, "/mutate-miniservice", miniserviceMuWH)
+	handleWebhook(ctx, r, "/mutate-miniservice", miniserviceMuWH)
 
 	server := &http.Server{
 		Handler:      r,
@@ -450,7 +451,8 @@ func (m *webhookManager) startWebhooks(ctx context.Context, shutdownSignal chan 
 	return nil
 }
 
-func handleWebhook(r *mux.Router, path string, wh http.Handler) {
+func handleWebhook(ctx context.Context, r *mux.Router, path string, wh http.Handler) {
+	wh = whmetrics.FromContext(ctx).InstrumentedHook(path, wh)
 	r.Path(path).Handler(wh).Methods("POST")
 }
 
@@ -599,9 +601,7 @@ func (m *webhookManager) startKataRuntimeClassHandler(ctx context.Context) {
 		_, err := m.k8sClient.NodeV1().RuntimeClasses().Get(ctx, kata.RuntimeClassNameNonGPU, metav1.GetOptions{})
 
 		// Track K8s API call metrics
-		if metrics := m.metrics; metrics != nil {
-			metrics.TrackK8sAPICall("runtimeclass", err)
-		}
+		nvcametrics.FromContext(ctx).TrackK8sAPICall("runtimeclass", err)
 
 		if err == nil {
 			m.kataNonGPURTClassExists.Store(true)

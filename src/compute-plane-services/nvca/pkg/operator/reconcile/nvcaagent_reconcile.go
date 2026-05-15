@@ -872,6 +872,11 @@ func (bc *BackendK8sCache) setupNVCARBAC(ctx context.Context, nb *nvidiaiov1.NVC
 				Resources: []string{"miniservices", "miniservices/status"},
 				Verbs:     crudVerbs,
 			},
+			{
+				APIGroups: []string{"run.ai"},
+				Resources: []string{"kartas"},
+				Verbs:     readOnlyVerbs,
+			},
 		}
 
 		if slices.Contains(nb.Spec.ClusterConfig.Attributes, featureflag.AttrNVLinkOptimized.Key+"=true") {

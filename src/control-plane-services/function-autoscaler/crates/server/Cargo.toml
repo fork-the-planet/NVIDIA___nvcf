@@ -47,7 +47,15 @@ metrics = "0.24"
 metrics-process = "2.4.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 futures = "0.3.31"
-openssl = { version= "0.10.72", features= ["vendored"] }
+# `vendored` dropped. Under crate_universe the openssl-src bundled
+# source tree is not materialized at the path the openssl-sys build
+# script expects, and the build fails with
+# `openssl: No such file or directory`. Without the feature openssl-sys
+# links against system libssl; the MODULE.bazel crate.annotation
+# below provides OPENSSL_LIB_DIR / OPENSSL_INCLUDE_DIR so the build
+# script knows where to look. The bazel-ci image ships libssl-dev
+# at /usr, and the runtime distroless/cc base ships libssl at /usr/lib.
+openssl = { version = "0.10.72" }
 reqwest = { version = "0.12", features = ["json"] }
 reqwest-middleware = "0.4"
 reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_28"] }

@@ -99,7 +99,7 @@ RUN rm -rf ./vendor/github.com/NVIDIA
 # Stage 4: minimal runtime – built once per TARGETPLATFORM
 # ----------------------------------------------------------------------------
 # Latest version list is tracked in the internal hardened distroless sample project documentation.
-FROM nvcr.io/nvidia/distroless/go:v4.0.4
+FROM nvcr.io/nvidia/distroless/go:v4.0.5
 
 ARG TARGETARCH
 LABEL io.k8s.display-name="NVCF ClusterAgent Operator"

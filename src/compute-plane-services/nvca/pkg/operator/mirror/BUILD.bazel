@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "mirror",
+    srcs = [
+        "cmd.go",
+        "controller.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/operator/mirror",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@com_github_urfave_cli_v2//:cli",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/equality",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/util/sets",
+        "@io_k8s_apimachinery//pkg/util/wait",
+        "@io_k8s_client_go//informers",
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_client_go//rest",
+        "@io_k8s_client_go//tools/cache",
+        "@io_k8s_client_go//tools/clientcmd",
+        "@io_k8s_client_go//util/retry",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":mirror",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "mirror_test",
+    srcs = [
+        "cmd_test.go",
+        "controller_test.go",
+    ],
+    embed = [":mirror"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_apimachinery//pkg/util/wait",
+        "@io_k8s_client_go//kubernetes/fake",
+        "@io_k8s_client_go//testing",
+    ],
+)

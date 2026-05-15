@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "types",
+    srcs = [
+        "common_labels.go",
+        "gpu.go",
+        "miniservice_types.go",
+        "resource_types.go",
+        "types.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/types",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/apis/nvca/v2beta1",
+        "//pkg/featureflag",
+        "//pkg/nodefeatures/sharedcluster",
+        "//pkg/queue",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/function",
+        "@com_github_sirupsen_logrus//:logrus",
+        "@in_gopkg_inf_v0//:inf_v0",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/labels",
+        "@io_k8s_client_go//listers/core/v1:core",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":types",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "types_test",
+    srcs = [
+        "common_labels_test.go",
+        "gpu_test.go",
+        "miniservice_types_test.go",
+        "resource_types_test.go",
+        "types_test.go",
+    ],
+    embed = [":types"],
+    deps = [
+        "//pkg/apis/nvca/v2beta1",
+        "//pkg/featureflag",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/task",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//mock",
+        "@com_github_stretchr_testify//require",
+        "@in_gopkg_inf_v0//:inf_v0",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/labels",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+    ],
+)

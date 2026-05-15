@@ -1654,6 +1654,11 @@ func Test_setupNVCARBAC(t *testing.T) {
 				},
 				Verbs: []string{"get", "list", "watch", "create", "update", "delete", "patch"},
 			},
+			{
+				APIGroups: []string{"run.ai"},
+				Resources: []string{"kartas"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
 		},
 	}
 	gotCRole, err := clients.K8s.RbacV1().ClusterRoles().Get(ctx, nvcaoptypes.NVCAModuleName, metav1.GetOptions{})
@@ -2069,6 +2074,11 @@ func Test_setupNVCARBAC_ValidationPolicy(t *testing.T) {
 				Verbs: []string{"get", "list", "watch", "create", "update", "delete", "patch"},
 			},
 			{
+				APIGroups: []string{"run.ai"},
+				Resources: []string{"kartas"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
 				APIGroups: []string{"foo.com"},
 				Resources: []string{"foos"},
 				Verbs:     []string{"get", "list", "watch", "create", "update", "delete", "patch"},
@@ -2286,6 +2296,11 @@ func Test_NVLinkOptimized(t *testing.T) {
 				APIGroups: []string{"nvca.nvcf.nvidia.io"},
 				Resources: []string{"miniservices", "miniservices/status"},
 				Verbs:     []string{"get", "list", "watch", "create", "update", "delete", "patch"},
+			},
+			{
+				APIGroups: []string{"run.ai"},
+				Resources: []string{"kartas"},
+				Verbs:     []string{"get", "list", "watch"},
 			},
 			{
 				APIGroups: []string{"resource.nvidia.com"},

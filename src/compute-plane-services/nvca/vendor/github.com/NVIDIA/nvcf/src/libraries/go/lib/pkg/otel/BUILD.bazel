@@ -1,8 +1,9 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "otel",
     srcs = ["otel.go"],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otel",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otel",
     visibility = ["//visibility:public"],
     deps = [
@@ -12,18 +13,8 @@ go_library(
     ],
 )
 
-go_test(
-    name = "otel_test",
-    srcs = ["otel_test.go"],
-    embed = [":otel"],
-    deps = [
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-        "@io_opentelemetry_go_otel//:otel",
-        "@io_opentelemetry_go_otel//attribute",
-        "@io_opentelemetry_go_otel//codes",
-        "@io_opentelemetry_go_otel_sdk//trace",
-        "@io_opentelemetry_go_otel_sdk//trace/tracetest",
-        "@io_opentelemetry_go_otel_trace//:trace",
-    ],
+alias(
+    name = "go_default_library",
+    actual = ":otel",
+    visibility = ["//visibility:public"],
 )

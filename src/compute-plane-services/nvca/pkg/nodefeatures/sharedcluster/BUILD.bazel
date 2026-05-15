@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sharedcluster",
+    srcs = ["node_informer.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nodefeatures/sharedcluster",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@com_github_sirupsen_logrus//:logrus",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_client_go//tools/cache",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":sharedcluster",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "sharedcluster_test",
+    srcs = ["node_informer_test.go"],
+    embed = [":sharedcluster"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_client_go//informers",
+        "@io_k8s_client_go//kubernetes/fake",
+        "@io_k8s_client_go//tools/cache",
+    ],
+)

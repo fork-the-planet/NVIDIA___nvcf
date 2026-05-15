@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "nvcf",
+    srcs = [
+        "doc.go",
+        "generated.openapi.go",
+        "nvcfbackend_types.go",
+        "register.go",
+        "zz_generated.deepcopy.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/apis/nvcf/v1",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/featureflag",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_kube_openapi//pkg/common",
+        "@io_k8s_kube_openapi//pkg/validation/spec",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":nvcf",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "nvcf_test",
+    srcs = [
+        "cryo_config_test.go",
+        "nvcfbackend_types_test.go",
+    ],
+    embed = [":nvcf"],
+    deps = [
+        "//pkg/featureflag",
+        "@com_github_stretchr_testify//assert",
+    ],
+)

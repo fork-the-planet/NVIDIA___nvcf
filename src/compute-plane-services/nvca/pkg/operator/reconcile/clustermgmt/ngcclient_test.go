@@ -103,7 +103,7 @@ func TestGetCluster(t *testing.T) {
 	sisClusterErr := &atomic.Value{}
 	sisServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, r.Header.Get("Authorization"), "Bearer abcd-1234")
-		assert.Contains(t, r.URL.Path, "/v2/icms/clusters")
+		assert.Contains(t, r.URL.Path, "/v2/sis/clusters")
 
 		err := sisClusterErr.Load()
 		if err != nil {
@@ -244,7 +244,7 @@ func TestGetCluster_StageDefaultsAndGPUB64(t *testing.T) {
 
 	nb := cluster.NVCFBackend
 	// Stage defaults
-	assert.Equal(t, "https://stg.icms.nvcf.nvidia.com", nb.Spec.ICMSConfig.ICMSServiceURL)
+	assert.Equal(t, "https://stg.spot.gdn.nvidia.com", nb.Spec.ICMSConfig.ICMSServiceURL)
 	assert.Equal(t, "https://stage-oauth.example.test/token", nb.Spec.ICMSConfig.TokenURL)
 	assert.Equal(t, "https://stg.vault.nvidia.com:443", nb.Spec.VaultConfig.Address)
 
@@ -259,7 +259,7 @@ func TestGetCluster_MergeAttributes(t *testing.T) {
 	sisClusterResp := &atomic.Value{}
 	sisServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, r.Header.Get("Authorization"), "Bearer abcd-1234")
-		assert.Contains(t, r.URL.Path, "/v2/icms/clusters")
+		assert.Contains(t, r.URL.Path, "/v2/sis/clusters")
 
 		sisCluster := sisClusterResp.Load().(clusterDTO)
 		err := json.NewEncoder(w).Encode(sisCluster)

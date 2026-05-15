@@ -1,14 +1,9 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
-
-# Phase 1: protobuf toolchain is not wired in MODULE.bazel yet, so this
-# package builds the pre-generated nverrors.pb.go directly. When rules_proto
-# and protobuf are added, switch back to gazelle's proto_library +
-# go_proto_library + embed pattern (see git history).
-# gazelle:proto disable
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "errors",
     srcs = ["nverrors.pb.go"],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/nvkit/api/errors/v1",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/nvkit/api/errors/v1",
     visibility = ["//visibility:public"],
     deps = [
@@ -19,9 +14,8 @@ go_library(
     ],
 )
 
-go_test(
-    name = "errors_test",
-    srcs = ["nverrors_test.go"],
-    embed = [":errors"],
-    deps = ["@com_github_stretchr_testify//assert"],
+alias(
+    name = "go_default_library",
+    actual = ":errors",
+    visibility = ["//visibility:public"],
 )

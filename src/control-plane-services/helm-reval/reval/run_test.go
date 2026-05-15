@@ -43,8 +43,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/NVIDIA/nvcf/src/compute-plane-services/image-credential-helper/credhelper"
 	"github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common"
+	credhelper "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/imagecredential"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"

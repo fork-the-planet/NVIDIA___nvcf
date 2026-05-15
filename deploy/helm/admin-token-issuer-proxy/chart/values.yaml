@@ -42,6 +42,9 @@ adminIssuerProxy:
   #   - name: registry-credentials
   imagePullSecrets: []
 
+  # Namespace to deploy namespaced resources. Defaults to the release namespace.
+  namespace: ""
+
   # Override the chart name used in resource names. Leave empty to use the chart name.
   nameOverride: ""
 
@@ -216,4 +219,3 @@ adminIssuerProxy:
   #                   - admin-issuer-proxy
   #           topologyKey: kubernetes.io/hostname
   affinity: {}
-

@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "icmsservice",
+    srcs = [
+        "icmsclient.go",
+        "icmsservice.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/mock/icmsservice",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/mock/tokencache",
+        "//internal/mock/utils",
+        "//pkg/queue",
+        "//pkg/types",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@com_github_go_jose_go_jose_v3//jwt",
+        "@com_github_google_uuid//:uuid",
+        "@com_github_gorilla_handlers//:handlers",
+        "@com_github_gorilla_mux//:mux",
+        "@com_github_sirupsen_logrus//:logrus",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":icmsservice",
+    visibility = ["//:__subpackages__"],
+)

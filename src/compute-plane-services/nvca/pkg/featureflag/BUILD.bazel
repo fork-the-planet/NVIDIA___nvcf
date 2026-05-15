@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "featureflag",
+    srcs = [
+        "attribute.go",
+        "featureflag.go",
+        "fetcher.go",
+        "persistentstorage.go",
+        "sharedstorage.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/featureflag",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/apis/nvca/v1:nvca",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@com_github_urfave_cli_v2//:cli",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/resource",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":featureflag",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "featureflag_test",
+    srcs = [
+        "attribute_test.go",
+        "featureflag_test.go",
+        "fetcher_test.go",
+        "persistentstorage_test.go",
+        "sharedstorage_test.go",
+    ],
+    embed = [":featureflag"],
+    deps = [
+        "//pkg/apis/nvca/v1:nvca",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/resource",
+    ],
+)

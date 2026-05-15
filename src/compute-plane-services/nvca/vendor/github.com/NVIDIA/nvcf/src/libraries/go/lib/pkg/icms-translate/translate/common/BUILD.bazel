@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "common",
@@ -17,12 +17,13 @@ go_library(
         "manifests/fluent-bit.conf.tmpl",
         "manifests/parsers.conf",
     ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
     visibility = ["//visibility:public"],
     deps = [
-        "//src/libraries/go/lib/pkg/icms-translate/translate/util",
-        "//src/libraries/go/lib/pkg/otelconfig/backendconfig",
-        "//src/libraries/go/lib/pkg/otelconfig/config",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/util",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otelconfig/backendconfig",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otelconfig/config",
         "@cat_dario_mergo//:mergo",
         "@com_github_golang_jwt_jwt_v5//:jwt",
         "@com_github_google_go_containerregistry//pkg/name",
@@ -36,26 +37,8 @@ go_library(
     ],
 )
 
-go_test(
-    name = "common_test",
-    srcs = [
-        "auths_test.go",
-        "decode_test.go",
-        "env_test.go",
-        "ess_test.go",
-        "k8s_test.go",
-        "otel_fluentbit_test.go",
-        "otel_test.go",
-        "translator_test.go",
-        "types_test.go",
-    ],
-    embed = [":common"],
-    deps = [
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-        "@io_k8s_api//core/v1:core",
-        "@io_k8s_apimachinery//pkg/api/resource",
-        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
-        "@io_k8s_apimachinery//pkg/util/intstr",
-    ],
+alias(
+    name = "go_default_library",
+    actual = ":common",
+    visibility = ["//visibility:public"],
 )

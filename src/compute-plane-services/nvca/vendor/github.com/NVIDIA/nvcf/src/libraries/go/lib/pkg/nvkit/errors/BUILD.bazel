@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "errors",
@@ -6,10 +6,11 @@ go_library(
         "encryption_errors.go",
         "errors.go",
     ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/nvkit/errors",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/nvkit/errors",
     visibility = ["//visibility:public"],
     deps = [
-        "//src/libraries/go/lib/pkg/nvkit/api/errors/v1:errors",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/nvkit/api/errors/v1:errors",
         "@com_github_google_uuid//:uuid",
         "@com_github_grpc_ecosystem_grpc_gateway_v2//runtime",
         "@org_golang_google_genproto_googleapis_rpc//status",
@@ -18,20 +19,8 @@ go_library(
     ],
 )
 
-go_test(
-    name = "errors_test",
-    srcs = [
-        "encryption_errors_test.go",
-        "errors_test.go",
-    ],
-    embed = [":errors"],
-    deps = [
-        "//src/libraries/go/lib/pkg/nvkit/api/errors/v1:errors",
-        "@com_github_grpc_ecosystem_grpc_gateway_v2//runtime",
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-        "@org_golang_google_genproto_googleapis_rpc//status",
-        "@org_golang_google_grpc//codes",
-        "@org_golang_google_grpc//status",
-    ],
+alias(
+    name = "go_default_library",
+    actual = ":errors",
+    visibility = ["//visibility:public"],
 )

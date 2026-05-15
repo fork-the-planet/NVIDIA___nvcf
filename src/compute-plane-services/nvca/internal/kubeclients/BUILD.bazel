@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "kubeclients",
+    srcs = ["kubeclients.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/kubeclients",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//pkg/apis/nvca/v1alpha1",
+        "//pkg/client/clientset/versioned",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@com_github_nvidia_kai_scheduler//pkg/apis/scheduling/v2:scheduling",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/util/runtime",
+        "@io_k8s_client_go//discovery",
+        "@io_k8s_client_go//dynamic",
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_client_go//rest",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":kubeclients",
+    visibility = ["//:__subpackages__"],
+)

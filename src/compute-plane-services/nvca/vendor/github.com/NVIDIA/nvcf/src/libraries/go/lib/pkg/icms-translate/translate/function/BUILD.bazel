@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "function",
@@ -14,13 +14,14 @@ go_library(
         "types_legacy.go",
         "zz_generated.deepcopy.go",
     ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/function",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/function",
     visibility = ["//visibility:public"],
     deps = [
-        "//src/libraries/go/lib/pkg/icms-translate/translate/cache",
-        "//src/libraries/go/lib/pkg/icms-translate/translate/common",
-        "//src/libraries/go/lib/pkg/icms-translate/translate/util",
-        "//src/libraries/go/lib/pkg/otelconfig/backendconfig",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/cache",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/util",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otelconfig/backendconfig",
         "@com_github_google_shlex//:shlex",
         "@io_k8s_api//apps/v1:apps",
         "@io_k8s_api//batch/v1:batch",
@@ -32,21 +33,8 @@ go_library(
     ],
 )
 
-go_test(
-    name = "function_test",
-    srcs = [
-        "llm_test.go",
-        "lls_test.go",
-        "translate_tolerations_test.go",
-    ],
-    embed = [":function"],
-    deps = [
-        "//src/libraries/go/lib/pkg/icms-translate/translate/common",
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-        "@io_k8s_api//apps/v1:apps",
-        "@io_k8s_api//core/v1:core",
-        "@io_k8s_apimachinery//pkg/api/resource",
-        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
-    ],
+alias(
+    name = "go_default_library",
+    actual = ":function",
+    visibility = ["//visibility:public"],
 )

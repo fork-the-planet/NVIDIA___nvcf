@@ -40,7 +40,7 @@ pinned version reference is bumped accordingly.
 | `01_init_keyspace.up.sql` | Creates the keyspace with `NetworkTopologyStrategy` replication. Uses `{{ $replicaCount }}` template variable.                                                                                                     |
 | `02_init_roles.up.sql`    | Creates the application role, grants privileges, and sets the service login password via `${SERVICE_ROLE_PASSWORD}`.                                                                                               |
 | `03_init_tables.up.sql`   | Complete canonical schema — all UDTs, tables, and indexes at the pinned upstream version.                                                                                                                          |
-| `04_*`, `05_*`            | Incremental deltas for rolling upgrades. These add tables/columns that are not in `03_init_tables.up.sql` at the version that was applied on existing clusters. `ess_api/04_*` is a data seed (deployment-specific values). `sis_api/04_*` and `nvcf_api/04_*`-`05_*` are DDL deltas. |
+| `04_*`, `05_*`, `06_*`    | Incremental deltas for rolling upgrades. These add tables/columns that are not in `03_init_tables.up.sql` at the version that was applied on existing clusters. `ess_api/04_*` is a data seed (deployment-specific values). `sis_api/04_*`-`06_*` and `nvcf_api/04_*`-`05_*` are DDL deltas. |
 
 ---
 

@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "internal",
+    srcs = ["util.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/cmd/internal",
+    visibility = ["//cmd:__subpackages__"],
+    deps = [
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_client_go//rest",
+        "@io_k8s_client_go//tools/clientcmd",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":internal",
+    visibility = ["//cmd:__subpackages__"],
+)
+
+go_test(
+    name = "internal_test",
+    srcs = ["util_test.go"],
+    embed = [":internal"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_client_go//rest",
+        "@io_k8s_client_go//tools/clientcmd",
+    ],
+)

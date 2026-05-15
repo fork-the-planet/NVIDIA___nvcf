@@ -160,8 +160,9 @@ func (c *NGCManagedClient) GetCluster(ctx context.Context, clusterID string) (*C
 
 func (c *NGCManagedClient) getCluster(ctx context.Context, clusterID string) (*clusterDTO, error) {
 	log := core.GetLogger(ctx)
-	// Create the cluster retrieval URL using the legacy /v2/icms/clusters endpoint.
-	clusterReqURL, err := url.JoinPath(c.rootNGCAPIURL, "/v2/icms/clusters", clusterID)
+	// NGC-managed clusters use the /v2/sis/clusters endpoint.
+	// This path is served by the NGC API and has not been renamed to "icms" yet.
+	clusterReqURL, err := url.JoinPath(c.rootNGCAPIURL, "/v2/sis/clusters", clusterID)
 	if err != nil {
 		log.WithError(err).Errorf("failed to generate cluster retrieval URL with root %s", c.rootNGCAPIURL)
 		return nil, err
@@ -296,8 +297,10 @@ func withRootNVCFBackendMapper() clusterMapper {
 
 		// ---- Apply dynamic defaults previously handled by Helm ----
 		const (
-			icmsURLProd  = "https://icms.nvcf.nvidia.com"
-			icmsURLStage = "https://stg.icms.nvcf.nvidia.com"
+			// ICMS/SIS backend URLs. The backend still serves on the legacy "spot.gdn" hostnames.
+			// Do not rename until the backend has been updated to serve on the new hostnames.
+			icmsURLProd  = "https://spot.gdn.nvidia.com"
+			icmsURLStage = "https://stg.spot.gdn.nvidia.com"
 		)
 
 		// ICMSServiceURL

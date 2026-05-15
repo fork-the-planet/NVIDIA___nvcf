@@ -572,7 +572,7 @@ func (oss ObjectStatuses) OnlyTerminalDegraded() bool {
 	var isDegraded bool
 	for _, objStatus := range oss {
 		if objStatus.TerminalBad {
-			if objStatus.Status != podDegradedWorker {
+			if objStatus.Status != statusDegradedWorker {
 				return false
 			}
 			isDegraded = true
@@ -582,10 +582,16 @@ func (oss ObjectStatuses) OnlyTerminalDegraded() bool {
 }
 
 const (
+	// Set when an object is starting or initializing.
+	statusStarting = "starting"
+	// Set when an object is running.
+	statusRunning = "running"
 	// Set when an object is in an installed state.
 	statusSucceeded = "succeeded"
 	// Set when an object has unrecoverably failed for any reason.
 	statusFailed = "failed"
+	// Set when an object is degraded.
+	statusDegradedWorker = "degraded-worker"
 	// Set as object status reason when an object failed because of an event
 	// indicating a terminal error.
 	terminalErrorEventReason = "terminal error event(s)"
@@ -608,7 +614,6 @@ const (
 	podFailedContainerStuck     = "container-stuck"
 	podFailedInitContainerStuck = "init-" + podFailedContainerStuck
 	podFailedImagePullIssues    = "image-pull-issues"
-	podDegradedWorker           = "degraded-worker"
 )
 
 func getPodStatus(pod *corev1.Pod, k8sTimeConfig *nvcak8sutil.TimeConfig, schedulingTimeout time.Duration) ObjectStatus {
@@ -649,7 +654,7 @@ func getPodStatus(pod *corev1.Pod, k8sTimeConfig *nvcak8sutil.TimeConfig, schedu
 		}
 		if isScheduled {
 			return ObjectStatus{
-				Status:  "starting",
+				Status:  statusStarting,
 				Pending: true,
 			}
 		}
@@ -662,7 +667,7 @@ func getPodStatus(pod *corev1.Pod, k8sTimeConfig *nvcak8sutil.TimeConfig, schedu
 		// NVCF-125 Check PodReady & Not in Stuck Initializing state
 		if nvcak8sutil.IsPodReady(ps) {
 			return ObjectStatus{
-				Status: "running",
+				Status: statusRunning,
 			}
 		}
 		if stuck, reason := nvcak8sutil.IsPodStuckInitializing(pod, k8sTimeConfig); stuck {
@@ -674,13 +679,13 @@ func getPodStatus(pod *corev1.Pod, k8sTimeConfig *nvcak8sutil.TimeConfig, schedu
 		}
 		if degraded, reason := nvcak8sutil.IsPodDegraded(pod, k8sTimeConfig); degraded {
 			return ObjectStatus{
-				Status:      podDegradedWorker,
+				Status:      statusDegradedWorker,
 				Reason:      reason,
 				TerminalBad: true,
 			}
 		}
 		return ObjectStatus{
-			Status:  "starting",
+			Status:  statusStarting,
 			Pending: true,
 		}
 	case corev1.PodSucceeded:

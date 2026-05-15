@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "clustermgmt",
+    srcs = [
+        "configmapclient.go",
+        "helmclient.go",
+        "ngcclient.go",
+        "reconciler.go",
+        "selfmanagedclient.go",
+        "types.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/operator/reconcile/clustermgmt",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/apis/nvcf/v1:nvcf",
+        "//pkg/operator/types",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/http",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/secret",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_sigs_yaml//:yaml",
+        "@io_k8s_utils//ptr",
+        "@io_opentelemetry_go_contrib_instrumentation_net_http_otelhttp//:otelhttp",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":clustermgmt",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "clustermgmt_test",
+    srcs = [
+        "configmapclient_test.go",
+        "helmclient_test.go",
+        "ngcclient_test.go",
+        "reconciler_test.go",
+        "selfmanagedclient_test.go",
+        "types_test.go",
+    ],
+    embed = [":clustermgmt"],
+    deps = [
+        "//pkg/apis/nvcf/v1:nvcf",
+        "//pkg/operator/types",
+        "@com_github_google_uuid//:uuid",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+    ],
+)

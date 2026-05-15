@@ -44,149 +44,67 @@ func TestNewRunAIQueueHealthCheck(t *testing.T) {
 		expectedQName  string
 	}{
 		{
-			name: "healthy two-level hierarchy",
+			name: "healthy default queue hierarchy",
 			queues: []kaischedulingv2.Queue{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "parent",
-					},
-					Spec: kaischedulingv2.QueueSpec{
-						ParentQueue: "",
-						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "leaf",
-					},
-					Spec: kaischedulingv2.QueueSpec{
-						ParentQueue: "parent",
-						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-						},
-					},
-				},
+				validQueue("default-parent-queue", ""),
+				validQueue("default-queue", "default-parent-queue"),
 			},
 			expectedStatus: nvcatypes.HealthStatusHealthy,
 			expectedErrors: nil,
+			expectedQName:  "default-queue",
+		},
+		{
+			name: "healthy with extra queues",
+			queues: []kaischedulingv2.Queue{
+				validQueue("default-parent-queue", ""),
+				validQueue("default-queue", "default-parent-queue"),
+				validQueue("extra-queue", "extra-parent-queue"),
+				validQueue("extra-parent-queue", ""),
+			},
+			expectedStatus: nvcatypes.HealthStatusHealthy,
+			expectedErrors: nil,
+			expectedQName:  "default-queue",
+		},
+		{
+			name: "unhealthy - missing default queues",
+			queues: []kaischedulingv2.Queue{
+				validQueue("some-other-queue", ""),
+			},
+			expectedStatus: nvcatypes.HealthStatusUnhealthy,
+			expectedErrors: []string{"Expected the two default queues"},
 			expectedQName:  "",
 		},
 		{
-			name: "unhealthy - wrong queue count",
+			name:           "unhealthy - no queues at all",
+			queues:         []kaischedulingv2.Queue{},
+			expectedStatus: nvcatypes.HealthStatusUnhealthy,
+			expectedErrors: []string{"Expected the two default queues"},
+			expectedQName:  "",
+		},
+		{
+			name: "unhealthy - only default-parent-queue present",
 			queues: []kaischedulingv2.Queue{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "parent",
-					},
-					Spec: kaischedulingv2.QueueSpec{
-						ParentQueue: "",
-						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-						},
-					},
-				},
+				validQueue("default-parent-queue", ""),
 			},
 			expectedStatus: nvcatypes.HealthStatusUnhealthy,
-			expectedErrors: []string{"Two level Run.ai queue hierarchy violation"},
+			expectedErrors: []string{"Expected the two default queues"},
 			expectedQName:  "",
 		},
 		{
 			name: "unhealthy - CPU resource violation",
 			queues: []kaischedulingv2.Queue{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "parent",
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: "default-parent-queue"},
 					Spec: kaischedulingv2.QueueSpec{
 						ParentQueue: "",
 						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           100,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
+							CPU:    kaischedulingv2.QueueResource{Limit: 100, Quota: -1, OverQuotaWeight: 1},
+							GPU:    kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+							Memory: kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
 						},
 					},
 				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "leaf",
-					},
-					Spec: kaischedulingv2.QueueSpec{
-						ParentQueue: "parent",
-						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-						},
-					},
-				},
+				validQueue("default-queue", "default-parent-queue"),
 			},
 			expectedStatus: nvcatypes.HealthStatusUnhealthy,
 			expectedErrors: []string{"CPU resource violation for queue "},
@@ -196,55 +114,17 @@ func TestNewRunAIQueueHealthCheck(t *testing.T) {
 			name: "unhealthy - GPU resource violation",
 			queues: []kaischedulingv2.Queue{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "parent",
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: "default-parent-queue"},
 					Spec: kaischedulingv2.QueueSpec{
 						ParentQueue: "",
 						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           10,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
+							CPU:    kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+							GPU:    kaischedulingv2.QueueResource{Limit: 10, Quota: -1, OverQuotaWeight: 1},
+							Memory: kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
 						},
 					},
 				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "leaf",
-					},
-					Spec: kaischedulingv2.QueueSpec{
-						ParentQueue: "parent",
-						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-						},
-					},
-				},
+				validQueue("default-queue", "default-parent-queue"),
 			},
 			expectedStatus: nvcatypes.HealthStatusUnhealthy,
 			expectedErrors: []string{"GPU resource violation for queue "},
@@ -254,110 +134,34 @@ func TestNewRunAIQueueHealthCheck(t *testing.T) {
 			name: "unhealthy - Memory resource violation",
 			queues: []kaischedulingv2.Queue{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "parent",
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: "default-parent-queue"},
 					Spec: kaischedulingv2.QueueSpec{
 						ParentQueue: "",
 						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           1024,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
+							CPU:    kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+							GPU:    kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+							Memory: kaischedulingv2.QueueResource{Limit: 1024, Quota: -1, OverQuotaWeight: 1},
 						},
 					},
 				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "leaf",
-					},
-					Spec: kaischedulingv2.QueueSpec{
-						ParentQueue: "parent",
-						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-						},
-					},
-				},
+				validQueue("default-queue", "default-parent-queue"),
 			},
 			expectedStatus: nvcatypes.HealthStatusUnhealthy,
 			expectedErrors: []string{"Memory resource violation for queue "},
 			expectedQName:  "",
 		},
 		{
-			name: "unhealthy - no leaf queue",
+			name: "unhealthy - no leaf queue (both are root queues)",
 			queues: []kaischedulingv2.Queue{
+				validQueue("default-parent-queue", ""),
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "parent1",
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: "default-queue"},
 					Spec: kaischedulingv2.QueueSpec{
 						ParentQueue: "",
 						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "parent2",
-					},
-					Spec: kaischedulingv2.QueueSpec{
-						ParentQueue: "",
-						Resources: &kaischedulingv2.QueueResources{
-							CPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							GPU: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
-							Memory: kaischedulingv2.QueueResource{
-								Limit:           -1,
-								Quota:           -1,
-								OverQuotaWeight: 1,
-							},
+							CPU:    kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+							GPU:    kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+							Memory: kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
 						},
 					},
 				},
@@ -414,6 +218,8 @@ func TestNewRunAIQueueHealthCheck(t *testing.T) {
 			} else {
 				assert.Equal(t, nvcatypes.StatusLevelError, component.StatusLevel)
 			}
+
+			assert.Equal(t, tt.expectedQName, GetQName(), "leaf queue name mismatch")
 		})
 	}
 }
@@ -487,6 +293,21 @@ func (f *fakeCRDNotInstalledClient) List(ctx context.Context, list client.Object
 			Kind:  "Queue",
 		},
 		SearchedVersions: []string{"v2"},
+	}
+}
+
+// validQueue builds a Queue with all resources set to the expected healthy defaults.
+func validQueue(name, parentQueue string) kaischedulingv2.Queue {
+	return kaischedulingv2.Queue{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: kaischedulingv2.QueueSpec{
+			ParentQueue: parentQueue,
+			Resources: &kaischedulingv2.QueueResources{
+				CPU:    kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+				GPU:    kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+				Memory: kaischedulingv2.QueueResource{Limit: -1, Quota: -1, OverQuotaWeight: 1},
+			},
+		},
 	}
 }
 

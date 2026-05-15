@@ -3,13 +3,20 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "cache",
     srcs = ["translate_cache.go"],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/cache",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/cache",
     visibility = ["//visibility:public"],
     deps = [
-        "//src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
         "@io_k8s_api//batch/v1:batch",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/resource",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
     ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":cache",
+    visibility = ["//visibility:public"],
 )

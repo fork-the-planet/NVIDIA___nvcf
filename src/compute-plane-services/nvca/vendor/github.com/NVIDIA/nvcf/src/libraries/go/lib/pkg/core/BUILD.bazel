@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "core",
@@ -12,10 +12,11 @@ go_library(
         "queue.go",
         "ticker.go",
     ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
     visibility = ["//visibility:public"],
     deps = [
-        "//src/libraries/go/lib/pkg/version",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/version",
         "@com_github_felixge_httpsnoop//:httpsnoop",
         "@com_github_gorilla_mux//:mux",
         "@com_github_prometheus_client_golang//prometheus",
@@ -35,34 +36,8 @@ go_library(
     ],
 )
 
-go_test(
-    name = "core_test",
-    srcs = [
-        "context_test.go",
-        "event_test.go",
-        "eventstream_test.go",
-        "httpservice_additional_test.go",
-        "httpservice_test.go",
-        "kubeclients_test.go",
-        "kubeconfigurator_test.go",
-        "ticker_test.go",
-    ],
-    embed = [":core"],
-    deps = [
-        "//src/libraries/go/lib/pkg/version",
-        "@com_github_gorilla_mux//:mux",
-        "@com_github_prometheus_client_golang//prometheus",
-        "@com_github_sirupsen_logrus//:logrus",
-        "@com_github_sirupsen_logrus//hooks/test",
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-        "@io_k8s_api//core/v1:core",
-        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
-        "@io_k8s_client_go//kubernetes",
-        "@io_k8s_client_go//rest",
-        "@io_opentelemetry_go_otel//:otel",
-        "@io_opentelemetry_go_otel//attribute",
-        "@io_opentelemetry_go_otel_sdk//trace",
-        "@io_opentelemetry_go_otel_trace//:trace",
-    ],
+alias(
+    name = "go_default_library",
+    actual = ":core",
+    visibility = ["//visibility:public"],
 )

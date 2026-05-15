@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "fake",
+    srcs = [
+        "clientset_generated.go",
+        "doc.go",
+        "register.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/client/clientset/versioned/fake",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/apis/nvca/v1:nvca",
+        "//pkg/apis/nvca/v1alpha1",
+        "//pkg/apis/nvca/v2beta1",
+        "//pkg/apis/nvcf/v1:nvcf",
+        "//pkg/client/clientset/versioned",
+        "//pkg/client/clientset/versioned/typed/nvca/v1:nvca",
+        "//pkg/client/clientset/versioned/typed/nvca/v1/fake",
+        "//pkg/client/clientset/versioned/typed/nvca/v1alpha1",
+        "//pkg/client/clientset/versioned/typed/nvca/v1alpha1/fake",
+        "//pkg/client/clientset/versioned/typed/nvca/v2beta1",
+        "//pkg/client/clientset/versioned/typed/nvca/v2beta1/fake",
+        "//pkg/client/clientset/versioned/typed/nvcf/v1:nvcf",
+        "//pkg/client/clientset/versioned/typed/nvcf/v1/fake",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_apimachinery//pkg/runtime/serializer",
+        "@io_k8s_apimachinery//pkg/util/runtime",
+        "@io_k8s_apimachinery//pkg/watch",
+        "@io_k8s_client_go//discovery",
+        "@io_k8s_client_go//discovery/fake",
+        "@io_k8s_client_go//testing",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":fake",
+    visibility = ["//visibility:public"],
+)

@@ -17,14 +17,24 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ .Release.Name }}-migrations
+  namespace: {{ include "nvcf-openbao.namespace" . }}
   annotations:
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "1"
 spec:
   template:
+    {{- with .Values.openbao.hooks.migrations.podAnnotations }}
+    metadata:
+      annotations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
     spec:
       {{- with .Values.openbao.global.imagePullSecrets }}
       imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openbao.hooks.migrations.schedulingGates }}
+      schedulingGates:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       restartPolicy: OnFailure
@@ -61,6 +71,8 @@ spec:
             {{- with .Values.openbao.migrations.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          resources:
+            {{- toYaml .Values.openbao.hooks.migrations.resources | nindent 12 }}
       volumes:
         - name: {{ .Release.Name }}-root-token
           secret:

@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "util",
@@ -7,6 +7,7 @@ go_library(
         "encode.go",
         "iso8601_duration.go",
     ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/util",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/util",
     visibility = ["//visibility:public"],
     deps = [
@@ -19,12 +20,8 @@ go_library(
     ],
 )
 
-go_test(
-    name = "util_test",
-    srcs = ["iso8601_duration_test.go"],
-    embed = [":util"],
-    deps = [
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-    ],
+alias(
+    name = "go_default_library",
+    actual = ":util",
+    visibility = ["//visibility:public"],
 )

@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library")
+
+# Exported CRD manifests. envtest.go resolves crds/ via runtime.Caller(0),
+# which under rules_go (compiled with -trimpath) returns
+# "internal/envtest/envtest.go". Tests that consume :envtest must:
+#   data = ["//internal/envtest:crds"]
+#   rundir = "."
+# so the runfiles tree materializes internal/envtest/crds/*.yaml and the
+# test process CWDs to the workspace root.
+filegroup(
+    name = "crds",
+    srcs = glob(["crds/*.yaml"]),
+    visibility = ["//:__subpackages__"],
+)
+
+go_library(
+    name = "envtest",
+    srcs = ["envtest.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/envtest",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_client_go//rest",
+        "@io_k8s_sigs_controller_runtime//pkg/envtest",
+        "@io_k8s_sigs_controller_runtime//pkg/healthz",
+        "@io_k8s_sigs_controller_runtime//pkg/log",
+        "@io_k8s_sigs_controller_runtime//pkg/log/zap",
+        "@io_k8s_sigs_controller_runtime//pkg/manager",
+        "@io_k8s_sigs_controller_runtime//pkg/metrics/server",
+        "@io_k8s_sigs_controller_runtime//pkg/webhook",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":envtest",
+    visibility = ["//:__subpackages__"],
+)

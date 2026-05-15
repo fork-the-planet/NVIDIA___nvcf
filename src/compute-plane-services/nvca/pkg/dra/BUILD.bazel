@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "dra",
+    srcs = ["dra.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/dra",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_nvidia_k8s_dra_driver_gpu//api/nvidia.com/resource/v1beta1",
+        "@io_k8s_api//apps/v1:apps",
+        "@io_k8s_api//batch/v1:batch",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/util/sets",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":dra",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "dra_test",
+    srcs = ["dra_test.go"],
+    embed = [":dra"],
+    x_defs = {
+        "github.com/NVIDIA/k8s-dra-driver-gpu/internal/info.version": "v25.8.0",
+    },
+    deps = [
+        "@com_github_nvidia_k8s_dra_driver_gpu//api/nvidia.com/resource/v1beta1",
+        "@com_github_stretchr_testify//assert",
+        "@io_k8s_api//apps/v1:apps",
+        "@io_k8s_api//batch/v1:batch",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+    ],
+)

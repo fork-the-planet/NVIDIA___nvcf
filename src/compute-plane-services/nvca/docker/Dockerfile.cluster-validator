@@ -39,7 +39,7 @@ RUN set -eux; \
 # ------------------------------------------------------------------------------
 # Stage 3: minimal runtime image
 # ------------------------------------------------------------------------------
-FROM nvcr.io/nvidia/distroless/go:v4.0.4
+FROM nvcr.io/nvidia/distroless/go:v4.0.5
 
 ARG TARGETARCH
 LABEL io.k8s.display-name="NVCF Cluster Validator"

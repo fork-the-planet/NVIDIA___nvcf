@@ -69,17 +69,31 @@ func NewRunAIQueueHealthCheck(k8sClient client.Client) health.ComponentStatusGet
 			return hs, nil
 		}
 
-		// Only expecting 2 level hierarchy(parent, leaf)
-		if len(queueList.Items) != 2 {
+		const (
+			defaultParentQueue = "default-parent-queue"
+			defaultQueue       = "default-queue"
+			notFoundMessage    = "Expected the two default queues " + defaultParentQueue + " and " + defaultQueue +
+				", but either one or both were not found. " +
+				"See https://raw.githubusercontent.com/NVIDIA/KAI-Scheduler/refs/heads/main/docs/quickstart/default-queues.yaml " +
+				"for setting up right hierarchy"
+		)
+		var expectedQueues []kaischedulingv2.Queue
+		for _, queue := range queueList.Items {
+			switch queue.Name {
+			case defaultParentQueue, defaultQueue:
+				expectedQueues = append(expectedQueues, queue)
+			}
+		}
+
+		if len(expectedQueues) != 2 {
 			ch.Status = nvcatypes.HealthStatusUnhealthy
-			ch.Errors = append(ch.Errors,
-				"Two level Run.ai queue hierarchy violation. See https://raw.githubusercontent.com/NVIDIA/KAI-Scheduler/refs/heads/main/docs/quickstart/default-queues.yaml for setting up right hierarchy")
+			ch.Errors = append(ch.Errors, notFoundMessage)
 			ch.StatusLevel = nvcatypes.StatusLevelError
 			hs.Components[ComponentName] = ch
 			return hs, nil
 		}
 
-		for _, queue := range queueList.Items {
+		for _, queue := range expectedQueues {
 			if queue.Spec.Resources.CPU.Limit != -1 ||
 				queue.Spec.Resources.CPU.Quota != -1 || queue.Spec.Resources.CPU.OverQuotaWeight != 1 {
 				ch.Status = nvcatypes.HealthStatusUnhealthy

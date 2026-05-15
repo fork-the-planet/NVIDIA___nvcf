@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "config",
@@ -6,21 +6,17 @@ go_library(
         "render.go",
         "telemetries.go",
     ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otelconfig/config",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otelconfig/config",
     visibility = ["//visibility:public"],
     deps = [
-        "//src/libraries/go/lib/pkg/otelconfig/backendconfig",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otelconfig/backendconfig",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
 
-go_test(
-    name = "config_test",
-    srcs = ["render_test.go"],
-    embed = [":config"],
-    deps = [
-        "//src/libraries/go/lib/pkg/otelconfig/backendconfig",
-        "@com_github_stretchr_testify//assert",
-        "@in_gopkg_yaml_v3//:yaml_v3",
-    ],
+alias(
+    name = "go_default_library",
+    actual = ":config",
+    visibility = ["//visibility:public"],
 )

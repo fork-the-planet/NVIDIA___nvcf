@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "export-cluster-pubkeys_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/cmd/export-cluster-pubkeys",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//cmd/internal",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/version",
+        "@com_github_go_jose_go_jose_v3//:go-jose",
+        "@com_github_urfave_cli_v2//:cli",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+        "@io_k8s_client_go//rest",
+    ],
+)
+
+go_binary(
+    name = "export-cluster-pubkeys",
+    embed = [":export-cluster-pubkeys_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "export-cluster-pubkeys_test",
+    srcs = ["main_test.go"],
+    embed = [":export-cluster-pubkeys_lib"],
+    deps = [
+        "@com_github_go_jose_go_jose_v3//:go-jose",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_client_go//kubernetes/scheme",
+        "@io_k8s_client_go//rest",
+    ],
+)

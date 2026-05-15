@@ -123,6 +123,12 @@ func startControllerManagerForAgent(
 
 	log.Info("Starting MiniService controller")
 
+	kartas, err := mscontroller.GetKartaObjects(ctx, a.backendk8scache.clients)
+	if err != nil {
+		log.Error(err, "Failed to detect Karta resource")
+		return fmt.Errorf("detect karta resource: %w", err)
+	}
+
 	hrHTTPClient := cmnhttp.NewRetryableClient(ctx,
 		cmnhttp.WithAppVersionUserAgent(types.AppName),
 		cmnhttp.WithRequestHeader(types.HeaderNVClusterID, a.ClusterID),
@@ -144,6 +150,7 @@ func startControllerManagerForAgent(
 			ClusterRegion:              a.ClusterRegion,
 			ImageCredentialHelperImage: a.ImageCredentialHelperImage,
 			CustomAnnotations:          a.backendk8scache.customAnnotations,
+			Kartas:                     kartas,
 		},
 	); err != nil {
 		log.WithError(err).Error("Failed to create miniservice controller")

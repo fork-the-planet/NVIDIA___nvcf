@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# This is the module root for vendored nvcf-go. Set a fresh
+# gazelle:prefix here so generated BUILD.bazel files under this
+# subtree use the correct importpath (the parent root sets a different
+# prefix for nvca's own source).
+# gazelle:prefix github.com/NVIDIA/nvcf/src/libraries/go/lib
+# gazelle:proto disable_global

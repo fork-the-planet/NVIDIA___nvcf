@@ -95,7 +95,7 @@ RUN set -eux; \
 # ------------------------------------------------------------------------------
 
 # Latest version is tracked in the internal hardened distroless sample project documentation.
-FROM nvcr.io/nvidia/distroless/go:v4.0.4
+FROM nvcr.io/nvidia/distroless/go:v4.0.5
 LABEL io.k8s.display-name="NV Cluster Agent (DEBUG)"
 
 # The following build args are automatically populated by BuildKit.

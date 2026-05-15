@@ -32,11 +32,12 @@ import (
 	"k8s.io/klog/v2"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/metrics"
+	nvcametrics "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/metrics"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/util/cmdutil"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/util/k8sutil"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/featureflag"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nodefeatures/sharedcluster"
+	whmetrics "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/webhook/metrics"
 )
 
 func NewCobraCommand() *cobra.Command {
@@ -79,6 +80,13 @@ func NewCobraCommand() *cobra.Command {
 			if err := (&featureflag.AttrCLIFlag{}).Set(strings.Join(cfg.Cluster.Attributes, ",")); err != nil {
 				return fmt.Errorf("set attribute CLI flag for config: %v", err)
 			}
+
+			// Inject metrics into context.
+			ctx = nvcametrics.WithDefaultMetrics(ctx,
+				cfg.Cluster.NCAID, cfg.Cluster.Name, cfg.Cluster.GroupName, version.ReleaseString(),
+			)
+			ctx = whmetrics.WithDefaultMetrics(ctx)
+
 			// check if map is nil
 			if cfg.Webhook.DCGMAnnotations == nil {
 				cfg.Webhook.DCGMAnnotations = make(map[string]string)
@@ -106,7 +114,6 @@ func NewCobraCommand() *cobra.Command {
 				readTimeout:      5 * time.Second,
 				writeTimeout:     10 * time.Second,
 				attrFetcher:      featureflag.DefaultFetcher,
-				metrics:          metrics.FromContext(ctx),
 				addNodePublisher: sharedcluster.AddNodePublisher,
 			}
 

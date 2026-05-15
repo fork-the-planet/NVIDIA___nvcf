@@ -37,8 +37,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/NVIDIA/nvcf/src/compute-plane-services/image-credential-helper/credhelper"
 	"github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common"
+	credhelper "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/imagecredential"
 	"github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/zapotelspan"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

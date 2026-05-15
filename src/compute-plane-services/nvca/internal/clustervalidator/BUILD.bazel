@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "clustervalidator",
+    srcs = [
+        "checks.go",
+        "config.go",
+        "connectivity.go",
+        "enforcement.go",
+        "netpol.go",
+        "output.go",
+        "validator.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/clustervalidator",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@com_github_sirupsen_logrus//:logrus",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_api//networking/v1:networking",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/util/intstr",
+        "@io_k8s_client_go//discovery",
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_sigs_yaml//:yaml",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":clustervalidator",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "clustervalidator_test",
+    srcs = [
+        "checks_test.go",
+        "config_test.go",
+        "enforcement_test.go",
+        "netpol_test.go",
+        "output_test.go",
+        "validator_test.go",
+    ],
+    embed = [":clustervalidator"],
+    deps = [
+        "@com_github_sirupsen_logrus//:logrus",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_api//admissionregistration/v1:admissionregistration",
+        "@io_k8s_api//apps/v1:apps",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_api//networking/v1:networking",
+        "@io_k8s_api//storage/v1:storage",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/util/intstr",
+        "@io_k8s_client_go//kubernetes/fake",
+        "@io_k8s_client_go//testing",
+    ],
+)

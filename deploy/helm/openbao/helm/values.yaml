@@ -14,12 +14,36 @@
 # limitations under the License.
 
 openbao:
+  # Namespace to deploy wrapper chart resources. Defaults to the release namespace.
+  namespace: ""
+
+  hooks:
+    initializeCluster:
+      podAnnotations: {}
+      schedulingGates: []
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+    migrations:
+      podAnnotations: {}
+      schedulingGates: []
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
 
   migrations:
     image:
       # registry: must be supplied in additional values
       # repository: must be supplied in additional values
-      tag: 0.11.0
+      tag: 0.11.2
       pullPolicy: IfNotPresent
     issuerDiscovery:
       enabled: false
@@ -36,6 +60,14 @@ openbao:
         value: "ncp"  # Client identity for admin-issuer JWT signing
 
   server:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
     image:
       # registry: must be supplied in additional values
       # repository: must be supplied in additional values
@@ -149,6 +181,13 @@ openbao:
     extraContainers:
       - name: auto-unseal-sidecar
         # image: must be supplied in additional values
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
         volumeMounts:
           - name: openbao-server-unseal
             mountPath: /vault/userconfig/unseal
@@ -180,10 +219,17 @@ openbao:
     enabled: true
     port: 10250
     logLevel: info
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
     image:
       # registry: must be supplied in additional values
       # repository: must be supplied in additional values
-      tag: 1.6.0
+      tag: 1.7.4
       pullPolicy: IfNotPresent
     agentImage:
       # registry: must be supplied in additional values

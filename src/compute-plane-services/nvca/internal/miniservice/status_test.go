@@ -359,7 +359,7 @@ func Test_ObjectStatuses_terminalBehavior(t *testing.T) {
 			name: "multiple failures including non-degraded",
 			statuses: ObjectStatuses{
 				{Status: statusFailed, TerminalBad: true, Reason: "FailedMount"},
-				{Status: podDegradedWorker, TerminalBad: true, Reason: "ContainerCrashing"},
+				{Status: statusDegradedWorker, TerminalBad: true, Reason: "ContainerCrashing"},
 			},
 			expectedTerminal:     true,
 			expectedDegradedOnly: false,
@@ -367,8 +367,8 @@ func Test_ObjectStatuses_terminalBehavior(t *testing.T) {
 		{
 			name: "only degraded workers",
 			statuses: ObjectStatuses{
-				{Status: podDegradedWorker, TerminalBad: true, Reason: "ContainerCrashing"},
-				{Status: podDegradedWorker, TerminalBad: true, Reason: "ContainerCrashing"},
+				{Status: statusDegradedWorker, TerminalBad: true, Reason: "ContainerCrashing"},
+				{Status: statusDegradedWorker, TerminalBad: true, Reason: "ContainerCrashing"},
 			},
 			expectedTerminal:     true,
 			expectedDegradedOnly: true,
@@ -641,7 +641,7 @@ func Test_doTerminalTaskStatus(t *testing.T) {
 					},
 				},
 			},
-			statuses:                ObjectStatuses{{Status: podDegradedWorker, TerminalBad: true, Reason: "ContainerCrashing"}},
+			statuses:                ObjectStatuses{{Status: statusDegradedWorker, TerminalBad: true, Reason: "ContainerCrashing"}},
 			maxRuntimeDuration:      "PT1H",
 			maxQueuedDuration:       "PT1H",
 			currentTime:             baseTime.Add(10 * time.Minute),

@@ -9,15 +9,22 @@ go_library(
         "types.go",
         "zz_generated.deepcopy.go",
     ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/task",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/task",
     visibility = ["//visibility:public"],
     deps = [
-        "//src/libraries/go/lib/pkg/icms-translate/translate/cache",
-        "//src/libraries/go/lib/pkg/icms-translate/translate/common",
-        "//src/libraries/go/lib/pkg/icms-translate/translate/util",
-        "//src/libraries/go/lib/pkg/otelconfig/backendconfig",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/cache",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/util",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/otelconfig/backendconfig",
         "@com_github_google_shlex//:shlex",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
     ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":task",
+    visibility = ["//visibility:public"],
 )

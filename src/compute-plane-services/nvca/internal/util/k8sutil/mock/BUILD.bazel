@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "mock",
+    srcs = ["netpol.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/util/k8sutil/mock",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/util/k8sutil",
+        "@io_k8s_api//core/v1:core",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":mock",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "mock_test",
+    srcs = ["netpol_test.go"],
+    embed = [":mock"],
+    deps = [
+        "//internal/util/k8sutil",
+        "@com_github_stretchr_testify//assert",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+    ],
+)

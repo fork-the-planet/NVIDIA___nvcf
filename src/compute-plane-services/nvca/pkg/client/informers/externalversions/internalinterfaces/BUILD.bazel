@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "internalinterfaces",
+    srcs = ["factory_interfaces.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/client/informers/externalversions/internalinterfaces",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/client/clientset/versioned",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_client_go//tools/cache",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":internalinterfaces",
+    visibility = ["//visibility:public"],
+)

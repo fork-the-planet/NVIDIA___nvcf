@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "nats",
+    srcs = [
+        "client.go",
+        "client_psat.go",
+        "nats.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/queue/nats",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/auth",
+        "//pkg/queue",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@com_github_nats_io_nats_go//:nats_go",
+        "@com_github_nats_io_nats_go//jetstream",
+        "@com_github_nats_io_nkeys//:nkeys",
+        "@com_github_sirupsen_logrus//:logrus",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":nats",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "nats_test",
+    srcs = [
+        "client_psat_test.go",
+        "client_test.go",
+    ],
+    embed = [":nats"],
+    deps = [
+        "//internal/auth",
+        "//pkg/queue",
+        "@com_github_nats_io_nats_go//:nats_go",
+        "@com_github_nats_io_nats_server_v2//server",
+        "@com_github_nats_io_nats_server_v2//test",
+        "@com_github_nats_io_nkeys//:nkeys",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

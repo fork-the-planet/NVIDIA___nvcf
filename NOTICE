@@ -133,8 +133,21 @@ The following third-party licenses are included in this repository:
     src/compute-plane-services/nvca/vendor/github.com/go-logr/stdr/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/go-logr/zapr/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/go-openapi/jsonpointer/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/jsonpointer/NOTICE
     src/compute-plane-services/nvca/vendor/github.com/go-openapi/jsonreference/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/jsonreference/NOTICE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/cmdutils/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/conv/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/fileutils/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/jsonname/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/jsonutils/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/loading/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/mangling/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/netutils/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/stringutils/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/typeutils/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/go-openapi/swag/yamlutils/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/go-viper/mapstructure/v2/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/golang-jwt/jwt/v5/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/google/btree/LICENSE
@@ -153,13 +166,13 @@ The following third-party licenses are included in this repository:
     src/compute-plane-services/nvca/vendor/github.com/hashicorp/golang-lru/v2/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/imdario/mergo/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/inconshreveable/mousetrap/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/itchyny/gojq/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/itchyny/timefmt-go/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/jmespath/go-jmespath/LICENSE
-    src/compute-plane-services/nvca/vendor/github.com/josharian/intern/license.md
     src/compute-plane-services/nvca/vendor/github.com/json-iterator/go/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/klauspost/compress/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/klauspost/compress/s2/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/kylelemons/godebug/LICENSE
-    src/compute-plane-services/nvca/vendor/github.com/mailru/easyjson/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/Masterminds/semver/v3/LICENSE.txt
     src/compute-plane-services/nvca/vendor/github.com/Microsoft/go-winio/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/minio/highwayhash/LICENSE
@@ -191,8 +204,11 @@ The following third-party licenses are included in this repository:
     src/compute-plane-services/nvca/vendor/github.com/prometheus/common/NOTICE
     src/compute-plane-services/nvca/vendor/github.com/prometheus/procfs/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/prometheus/procfs/NOTICE
+    src/compute-plane-services/nvca/vendor/github.com/run-ai/karta/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/run-ai/karta/NOTICE
     src/compute-plane-services/nvca/vendor/github.com/russross/blackfriday/v2/LICENSE.txt
     src/compute-plane-services/nvca/vendor/github.com/sagikazarmark/locafero/LICENSE
+    src/compute-plane-services/nvca/vendor/github.com/samber/lo/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/sirupsen/logrus/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/sony/gobreaker/v2/LICENSE
     src/compute-plane-services/nvca/vendor/github.com/sourcegraph/conc/LICENSE
@@ -221,6 +237,7 @@ The following third-party licenses are included in this repository:
     src/compute-plane-services/nvca/vendor/go.opentelemetry.io/otel/sdk/LICENSE
     src/compute-plane-services/nvca/vendor/go.opentelemetry.io/otel/trace/LICENSE
     src/compute-plane-services/nvca/vendor/go.opentelemetry.io/proto/otlp/LICENSE
+    src/compute-plane-services/nvca/vendor/go.uber.org/mock/LICENSE
     src/compute-plane-services/nvca/vendor/go.uber.org/multierr/LICENSE.txt
     src/compute-plane-services/nvca/vendor/go.uber.org/zap/LICENSE
     src/compute-plane-services/nvca/vendor/go.yaml.in/yaml/v2/LICENSE

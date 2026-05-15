@@ -15,14 +15,39 @@
 
 ---
 cassandra:
+  # Namespace to deploy wrapper chart resources. Defaults to the release namespace.
+  namespace: ""
+
   global:
     imagePullSecrets: []
+
+  hooks:
+    initializeCluster:
+      podAnnotations: {}
+      schedulingGates: []
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+    migrations:
+      podAnnotations: {}
+      schedulingGates: []
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
 
   migrations:
     image:
       # registry: must be supplied in additional values
       # repository: must be supplied in additional values
-      tag: 0.6.1
+      tag: 0.6.3
       pullPolicy: Always
 
   image:
@@ -39,6 +64,13 @@ cassandra:
       # repository: must be supplied in additional values
       tag: 5.0.6-nv-1
       pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
 
   cluster:
     name: cassandra

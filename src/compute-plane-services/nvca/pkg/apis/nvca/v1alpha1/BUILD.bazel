@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "v1alpha1",
+    srcs = [
+        "doc.go",
+        "generated.openapi.go",
+        "miniservice_json.go",
+        "miniservice_status_types.go",
+        "miniservice_types.go",
+        "register.go",
+        "zz_generated.deepcopy.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/apis/nvca/v1alpha1",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/apis/nvca/internal/compat",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_kube_openapi//pkg/common",
+        "@io_k8s_kube_openapi//pkg/validation/spec",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":v1alpha1",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "v1alpha1_test",
+    srcs = ["miniservice_json_test.go"],
+    embed = [":v1alpha1"],
+    deps = [
+        "//pkg/apis/nvca/internal/compat",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

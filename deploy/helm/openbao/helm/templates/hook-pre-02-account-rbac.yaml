@@ -26,6 +26,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ .Release.Name }}-initialize-cluster
+  namespace: {{ include "nvcf-openbao.namespace" . }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
 ---
@@ -33,6 +34,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ .Release.Name }}-initialize-cluster
+  namespace: {{ include "nvcf-openbao.namespace" . }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
 rules:
@@ -48,16 +50,23 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
+  # scripts/deploy.sh check_sidecar_version() reads the StatefulSet spec to
+  # verify openbao and auto-unseal-sidecar container images match at runtime
+  # (complements the template-time guard in validate-sidecar-version.yaml)
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ .Release.Name }}-initialize-cluster
+  namespace: {{ include "nvcf-openbao.namespace" . }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
 subjects:
   - kind: ServiceAccount
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "nvcf-openbao.namespace" . }}
     name: {{ .Release.Name }}-initialize-cluster
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -69,11 +78,12 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ .Release.Name }}-openid-reader
+  namespace: {{ include "nvcf-openbao.namespace" . }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
 subjects:
   - kind: ServiceAccount
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "nvcf-openbao.namespace" . }}
     name: {{ .Release.Name }}-initialize-cluster
 roleRef:
   apiGroup: rbac.authorization.k8s.io

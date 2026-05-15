@@ -107,7 +107,7 @@ agent:
 	assert.ElementsMatch(t, []string{"attr1=true", "attr2=value2"}, nb.Spec.ClusterConfig.Attributes)
 
 	// Defaults applied (prod)
-	assert.Equal(t, "https://icms.nvcf.nvidia.com", nb.Spec.ICMSConfig.ICMSServiceURL)
+	assert.Equal(t, "https://spot.gdn.nvidia.com", nb.Spec.ICMSConfig.ICMSServiceURL)
 	assert.Equal(t, "https://oauth.example.test/token", nb.Spec.ICMSConfig.TokenURL)
 	assert.Equal(t, "https://stage-reval-oauth.example.test/token", nb.Spec.AgentConfig.HelmReValStageOAuthTokenURL)
 	assert.Equal(t, "https://stage-reval-oauth.example.test/.well-known/jwks.json", nb.Spec.AgentConfig.HelmReValStageOAuthPublicKeysetEndpoint)

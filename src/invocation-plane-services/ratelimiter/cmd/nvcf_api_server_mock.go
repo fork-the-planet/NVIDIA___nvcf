@@ -28,7 +28,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 
-	"github.com/NVIDIA/nvcf-go/pkg/nvkit/logs"
+	"github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/nvkit/logs"
 
 	"ratelimiter/nvcf/pb"
 )

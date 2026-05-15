@@ -28,3 +28,19 @@ pkg/**
 reval/**
 scripts/**
 test/**
+vendor/**
+
+# Bazel scaffold. Mirrored to GitHub so OSS users can `bazel build //...`
+# and `bazel test //...` against the same sources we build internally.
+# BUILD.bazel and *.bzl under cmd/, pkg/, vendor/, etc. are already
+# covered by the **-style allowlist rules above; the entries below cover
+# the top-level files that no glob otherwise matches.
+.bazelrc
+.bazelversion
+.bazelignore
+MODULE.bazel
+MODULE.bazel.lock
+BUILD.bazel
+rules/**
+platforms/**
+tools/workspace_status.sh

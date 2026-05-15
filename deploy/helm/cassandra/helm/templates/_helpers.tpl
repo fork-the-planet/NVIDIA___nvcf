@@ -41,6 +41,13 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
+Allow the release namespace to be overridden.
+*/}}
+{{- define "nvcf-cassandra.namespace" -}}
+{{- default .Release.Namespace .Values.cassandra.namespace -}}
+{{- end -}}
+
+{{/*
 Return the proper Docker Image Registry Secret Names for wrapper chart
 Supports both industry standard format and backward compatibility:
 - Industry standard: [{name: "secret1"}, {name: "secret2"}]

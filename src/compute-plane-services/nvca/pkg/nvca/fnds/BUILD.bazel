@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "fnds",
+    srcs = [
+        "eventwatcher.go",
+        "fakeclient.go",
+        "http.go",
+        "tokenfetcher.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nvca/fnds",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/auth",
+        "//internal/otel",
+        "//pkg/client/listers/nvca/v2beta1",
+        "//pkg/nvca/health",
+        "//pkg/types",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/fnds/common/core/types",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "@com_github_google_uuid//:uuid",
+        "@com_github_hashicorp_go_retryablehttp//:go-retryablehttp",
+        "@com_github_sirupsen_logrus//:logrus",
+        "@com_github_sony_gobreaker_v2//:gobreaker",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/labels",
+        "@io_k8s_apimachinery//pkg/selection",
+        "@io_k8s_client_go//listers/core/v1:core",
+        "@io_opentelemetry_go_contrib_instrumentation_net_http_httptrace_otelhttptrace//:otelhttptrace",
+        "@io_opentelemetry_go_contrib_instrumentation_net_http_otelhttp//:otelhttp",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel_trace//:trace",
+        "@org_golang_x_time//rate",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":fnds",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "fnds_test",
+    srcs = [
+        "eventwatcher_test.go",
+        "fakeclient_test.go",
+        "http_test.go",
+        "tokenfetcher_test.go",
+    ],
+    embed = [":fnds"],
+    deps = [
+        "//internal/auth",
+        "//pkg/apis/nvca/v2beta1",
+        "//pkg/client/listers/nvca/v2beta1",
+        "//pkg/types",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/fnds/common/core/types",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/function",
+        "@com_github_google_uuid//:uuid",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//mock",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/labels",
+        "@io_k8s_client_go//listers/core/v1:core",
+        "@org_golang_x_time//rate",
+    ],
+)

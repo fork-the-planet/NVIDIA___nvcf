@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "version",
@@ -6,19 +6,13 @@ go_library(
         "http.go",
         "version.go",
     ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/version",
     importpath = "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/version",
     visibility = ["//visibility:public"],
 )
 
-go_test(
-    name = "version_test",
-    srcs = [
-        "http_test.go",
-        "version_test.go",
-    ],
-    embed = [":version"],
-    deps = [
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-    ],
+alias(
+    name = "go_default_library",
+    actual = ":version",
+    visibility = ["//visibility:public"],
 )

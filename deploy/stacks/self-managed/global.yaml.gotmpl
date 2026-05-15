@@ -43,6 +43,7 @@ cassandra:
       registry: {{ .Values.global.image.registry }}
       repository: {{ .Values.global.image.repository }}/bitnami-cassandra
 
+{{- $openbaoServerTag := dig "openbao" "server" "image" "tag" "2.5.1-nv-1.2.1" .Values }}
 openbao:
   {{- if .Values.global.imagePullSecrets }}
   global:
@@ -86,6 +87,7 @@ openbao:
     image:
       registry: {{ .Values.global.image.registry }}
       repository: {{ .Values.global.image.repository }}/nvcf-openbao
+      tag: {{ $openbaoServerTag }}
     {{- if .Values.global.nodeSelectors.enabled }}
     nodeSelector:
       {{ .Values.global.nodeSelectors.vault.key }}: {{ .Values.global.nodeSelectors.vault.value }}
@@ -100,7 +102,7 @@ openbao:
     # YAML lists.
     extraContainers:
       - name: auto-unseal-sidecar
-        image: {{ .Values.global.image.registry }}/{{ .Values.global.image.repository }}/nvcf-openbao:2.2.2-nv-1
+        image: {{ .Values.global.image.registry }}/{{ .Values.global.image.repository }}/nvcf-openbao:{{ $openbaoServerTag }}
         volumeMounts:
           - name: openbao-server-unseal
             mountPath: /vault/userconfig/unseal
@@ -176,7 +178,7 @@ apikeys:
   {{- end }}
   image:
     registry: {{ .Values.global.image.registry }}
-    repository: {{ .Values.global.image.repository }}/nv-api-keys
+    repository: {{ .Values.global.image.repository }}/nvcf-api-keys-service
   {{- if .Values.global.nodeSelectors.enabled }}
   nodeSelector:
     {{ .Values.global.nodeSelectors.controlplane.key }}: {{ .Values.global.nodeSelectors.controlplane.value }}

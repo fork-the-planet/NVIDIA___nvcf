@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "encryption",
+    srcs = ["encrypt_modelcache.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nvca/encryption",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/kubeclients",
+        "//internal/metrics",
+        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
+        "@com_github_sirupsen_logrus//:logrus",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_api//storage/v1:storage",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":encryption",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "encryption_test",
+    srcs = ["encrypt_modelcache_test.go"],
+    embed = [":encryption"],
+    deps = [
+        "//internal/kubeclients",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//mock",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_client_go//kubernetes/fake",
+    ],
+)

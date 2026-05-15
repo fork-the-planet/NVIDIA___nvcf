@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "v1alpha1",
+    srcs = [
+        "doc.go",
+        "groupversion_info.go",
+        "instructions.go",
+        "structure.go",
+        "types.go",
+        "validation.go",
+        "zz_generated.deepcopy.go",
+    ],
+    importmap = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/vendor/github.com/run-ai/karta/pkg/api/runai/v1alpha1",
+    importpath = "github.com/run-ai/karta/pkg/api/runai/v1alpha1",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//vendor/github.com/run-ai/karta/pkg/jq",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_sigs_controller_runtime//pkg/scheme",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":v1alpha1",
+    visibility = ["//visibility:public"],
+)
