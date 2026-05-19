@@ -12,11 +12,11 @@ registries:
     namespace: 0833294136851237/nvcf-ncp-staging
 stack:
   name: nvcf-self-managed-stack
-  version: 0.6.0-rc.33
+  version: 0.6.0-rc.34
   registry: staging
   gitlab_project_id: 182049
   package_name: ncp-deploy
-  artifacts_file: artifacts-0.6.0-rc.33.txt
+  artifacts_file: artifacts-0.6.0-rc.34.txt
 artifacts:
   - name: admin-token-issuer-proxy
     type: image
@@ -182,6 +182,10 @@ artifacts:
     type: image
     registry: staging
     version: 1.561.0
+  - name: stargate-client
+    type: image
+    registry: staging
+    version: 0.2.0
 supplemental_artifacts:
   - name: nvcf-cli
     type: resource
