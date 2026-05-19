@@ -18,6 +18,7 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 
 	"nvcf-cli/internal/selfhosted"
 	"nvcf-cli/internal/selfhosted/controlplaneprofile"
+	"nvcf-cli/internal/selfhosted/reachability"
 )
 
 var (
@@ -60,6 +62,10 @@ var selfHostedComputePlaneRegisterCmd = &cobra.Command{
 	Short:        "Register a compute-plane cluster with a self-hosted control plane",
 	RunE:         runSelfHostedComputePlaneRegister,
 	SilenceUsage: true,
+}
+
+var computePlaneRegisterReachabilityCheck = func(ctx context.Context, req reachability.CheckRequest) error {
+	return reachability.Check(ctx, req)
 }
 
 func init() {
@@ -196,6 +202,17 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := computePlaneRegisterReachabilityCheck(c.Context(), reachability.CheckRequest{
+		TargetClusterName: computePlaneRegisterClusterName,
+		ICMSURL:           selected.Endpoints.ICMSURL,
+		ReValURL:          selected.Endpoints.ReValURL,
+		NATSURL:           selected.Endpoints.NATSURL,
+		SISHost:           validation.Profile.ControlPlane.Hosts.SIS,
+		ReValHost:         validation.Profile.ControlPlane.Hosts.ReVal,
+		ProbeHTTP:         shouldProbeComputeRegisterHTTP(selected.Name),
+	}); err != nil {
+		return err
+	}
 
 	oidcIssuer, jwks, identitySource, err := fetchClusterIdentity(c.Context(), computePlaneRegisterKubeContext)
 	if err != nil {
@@ -228,6 +245,13 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 	fmt.Fprintln(out, "sisMutation: skipped")
 	fmt.Fprintln(out, "valuesWrite: skipped")
 	return nil
+}
+
+func shouldProbeComputeRegisterHTTP(endpointScope selfhosted.ControlPlaneProfileEndpointScopeName) bool {
+	if endpointScope != selfhosted.EndpointScopeComputeReachable {
+		return false
+	}
+	return !strings.EqualFold(selfHostedEnv, "local")
 }
 
 func loadControlPlaneProfileForComputeRegister(path, clusterName string) (*controlplaneprofile.ValidationResult, selfhosted.ControlPlaneProfileEndpointScopeSelection, error) {

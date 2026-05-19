@@ -29,6 +29,7 @@ import (
 
 	"nvcf-cli/internal/selfhosted"
 	"nvcf-cli/internal/selfhosted/controlplaneprofile"
+	"nvcf-cli/internal/selfhosted/reachability"
 )
 
 func resetComputePlaneFlags(t *testing.T) {
@@ -41,6 +42,10 @@ func resetComputePlaneFlags(t *testing.T) {
 	prevRuntimeResolver := resolveSelfHostedHelmRuntimeMode
 	resolveSelfHostedHelmRuntimeMode = func(context.Context) (selfhosted.HelmRuntimeMode, error) {
 		return selfhosted.HelmRuntimeHelm3Legacy, nil
+	}
+	prevReachabilityCheck := computePlaneRegisterReachabilityCheck
+	computePlaneRegisterReachabilityCheck = func(context.Context, reachability.CheckRequest) error {
+		return nil
 	}
 	t.Cleanup(func() {
 		selfHostedEnv = "local"
@@ -58,6 +63,7 @@ func resetComputePlaneFlags(t *testing.T) {
 		computePlaneRegisterKubeContext = ""
 		computePlaneRegisterRegion = "us-west-1"
 		resolveSelfHostedHelmRuntimeMode = prevRuntimeResolver
+		computePlaneRegisterReachabilityCheck = prevReachabilityCheck
 	})
 }
 
@@ -207,6 +213,105 @@ func TestComputePlaneRegisterDryRunUsesInClusterScopeForControlPlaneCluster(t *t
 	assert.Contains(t, out, "endpointScope: in-cluster")
 	assert.Contains(t, out, "icmsURL: http://api.sis.svc.cluster.local:8080")
 	assert.Contains(t, out, "identitySource: psat")
+}
+
+func TestComputePlaneRegisterDryRunRunsReachabilityCheck(t *testing.T) {
+	resetComputePlaneFlags(t)
+
+	profileFile := writeTestControlPlaneProfile(t, "cp-cluster")
+
+	prevFetcher := fetchClusterIdentity
+	t.Cleanup(func() { fetchClusterIdentity = prevFetcher })
+	fetchClusterIdentity = func(context.Context, string) (string, string, string, error) {
+		return "https://k8s.example/issuer", `{"keys":[]}`, "psat", nil
+	}
+
+	var got reachability.CheckRequest
+	computePlaneRegisterReachabilityCheck = func(_ context.Context, req reachability.CheckRequest) error {
+		got = req
+		return nil
+	}
+
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	rootCmd.SetArgs([]string{
+		"self-hosted", "compute-plane", "register",
+		"--dry-run",
+		"--control-plane-profile", profileFile,
+		"--cluster-name", "gpu-a",
+	})
+
+	require.NoError(t, rootCmd.Execute())
+	assert.Equal(t, "gpu-a", got.TargetClusterName)
+	assert.Equal(t, "https://sis.example.test", got.ICMSURL)
+	assert.Equal(t, "https://reval.example.test", got.ReValURL)
+	assert.Equal(t, "tls://nats.example.test:4222", got.NATSURL)
+	assert.Equal(t, "sis.example.test", got.SISHost)
+	assert.Equal(t, "reval.example.test", got.ReValHost)
+	assert.False(t, got.ProbeHTTP)
+}
+
+func TestComputePlaneRegisterDryRunProbesHTTPForNonLocalComputeReachable(t *testing.T) {
+	resetComputePlaneFlags(t)
+	selfHostedEnv = "prd"
+
+	profileFile := writeTestControlPlaneProfile(t, "cp-cluster")
+
+	prevFetcher := fetchClusterIdentity
+	t.Cleanup(func() { fetchClusterIdentity = prevFetcher })
+	fetchClusterIdentity = func(context.Context, string) (string, string, string, error) {
+		return "https://k8s.example/issuer", `{"keys":[]}`, "psat", nil
+	}
+
+	var got reachability.CheckRequest
+	computePlaneRegisterReachabilityCheck = func(_ context.Context, req reachability.CheckRequest) error {
+		got = req
+		return nil
+	}
+
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	rootCmd.SetArgs([]string{
+		"self-hosted", "compute-plane", "register",
+		"--dry-run",
+		"--control-plane-profile", profileFile,
+		"--cluster-name", "gpu-a",
+	})
+
+	require.NoError(t, rootCmd.Execute())
+	assert.True(t, got.ProbeHTTP)
+}
+
+func TestComputePlaneRegisterDryRunStopsOnReachabilityFailure(t *testing.T) {
+	resetComputePlaneFlags(t)
+
+	profileFile := writeTestControlPlaneProfile(t, "cp-cluster")
+
+	fetchCalls := 0
+	prevFetcher := fetchClusterIdentity
+	t.Cleanup(func() { fetchClusterIdentity = prevFetcher })
+	fetchClusterIdentity = func(context.Context, string) (string, string, string, error) {
+		fetchCalls++
+		return "", "", "", nil
+	}
+
+	computePlaneRegisterReachabilityCheck = func(context.Context, reachability.CheckRequest) error {
+		return assert.AnError
+	}
+
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	rootCmd.SetArgs([]string{
+		"self-hosted", "compute-plane", "register",
+		"--dry-run",
+		"--control-plane-profile", profileFile,
+		"--cluster-name", "gpu-a",
+	})
+
+	err := rootCmd.Execute()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, assert.AnError)
+	assert.Equal(t, 0, fetchCalls, "identity discovery must not run after reachability failure")
 }
 
 func TestComputePlaneRegisterWithoutDryRunIsNotImplementedYet(t *testing.T) {
