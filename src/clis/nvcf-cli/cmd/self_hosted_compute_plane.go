@@ -1,0 +1,162 @@
+/*
+SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package cmd
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
+
+	"nvcf-cli/internal/selfhosted"
+)
+
+var (
+	computePlaneInstallValues      string
+	computePlaneInstallKubeContext string
+	computePlaneInstallClusterName string
+	computePlaneInstallNCAID       string
+)
+
+var selfHostedComputePlaneCmd = &cobra.Command{
+	Use:          "compute-plane",
+	Short:        "Manage self-hosted compute-plane clusters",
+	SilenceUsage: true,
+}
+
+var selfHostedComputePlaneInstallCmd = &cobra.Command{
+	Use:          "install",
+	Short:        "Install the compute-plane NVCA operator from a values file",
+	RunE:         runSelfHostedComputePlaneInstall,
+	SilenceUsage: true,
+}
+
+func init() {
+	selfHostedCmd.AddCommand(selfHostedComputePlaneCmd)
+	selfHostedComputePlaneCmd.AddCommand(selfHostedComputePlaneInstallCmd)
+	selfHostedComputePlaneInstallCmd.Flags().StringVar(&computePlaneInstallValues, "values", "", "nvca-operator values file to install")
+	selfHostedComputePlaneInstallCmd.Flags().StringVar(&computePlaneInstallKubeContext, "kube-context", "", "kubeconfig context for the compute-plane cluster")
+	selfHostedComputePlaneInstallCmd.Flags().StringVar(&computePlaneInstallClusterName, "cluster-name", "", "Cluster name override when the values file does not set clusterName")
+	selfHostedComputePlaneInstallCmd.Flags().StringVar(&computePlaneInstallNCAID, "nca-id", "nvcf-default", "NCA ID override when the values file does not set ncaID")
+}
+
+func runSelfHostedComputePlaneInstall(c *cobra.Command, _ []string) error {
+	if computePlaneInstallValues == "" {
+		return fmt.Errorf("--values is required")
+	}
+
+	valuesPath, err := filepath.Abs(computePlaneInstallValues)
+	if err != nil {
+		return fmt.Errorf("resolving values path: %w", err)
+	}
+	metadata, err := readNVCAValuesMetadata(valuesPath)
+	if err != nil {
+		return err
+	}
+	clusterName := firstNonEmpty(computePlaneInstallClusterName, metadata.ClusterName, inferClusterNameFromValuesPath(valuesPath))
+	if clusterName == "" {
+		return fmt.Errorf("cluster name is required: set clusterName in the values file or pass --cluster-name")
+	}
+	ncaID := firstNonEmpty(metadata.NCAID, computePlaneInstallNCAID)
+
+	resolved, err := selfhosted.ResolveStack(c.Context(), selfhosted.StackOptions{
+		Source:        selfHostedStack,
+		BuiltInOCIRef: builtInStackOCI(),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.ErrOrStderr(), ">>> Resolving stack: %s\n", stackDescriptor(resolved))
+
+	helmRuntimeMode, err := resolveSelfHostedHelmRuntimeMode(c.Context())
+	if err != nil {
+		return fmt.Errorf("resolving helm runtime: %w", err)
+	}
+
+	helmfileFile, selector := computePlaneTarget(resolved.Path)
+	return selfhosted.Render(selfhosted.RenderOptions{
+		StackPath:       resolved.Path,
+		HelmfileFile:    helmfileFile,
+		Env:             selfHostedEnv,
+		Selector:        selector,
+		Apply:           !selfHostedNoApply,
+		KubeContext:     computePlaneInstallKubeContext,
+		HelmRuntimeMode: helmRuntimeMode,
+		Stdout:          c.OutOrStdout(),
+		Stderr:          c.ErrOrStderr(),
+		Ctx:             c.Context(),
+		ExtraEnv:        computePlaneInstallEnv(valuesPath, clusterName, ncaID),
+	})
+}
+
+type nvcaValuesMetadata struct {
+	ClusterName string
+	NCAID       string
+}
+
+func readNVCAValuesMetadata(path string) (nvcaValuesMetadata, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nvcaValuesMetadata{}, fmt.Errorf("reading values file: %w", err)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(body, &values); err != nil {
+		return nvcaValuesMetadata{}, fmt.Errorf("parsing values file: %w", err)
+	}
+	return nvcaValuesMetadata{
+		ClusterName: stringMapValue(values, "clusterName"),
+		NCAID:       firstNonEmpty(stringMapValue(values, "ncaID"), stringMapValue(values, "ncaId")),
+	}, nil
+}
+
+func stringMapValue(values map[string]any, key string) string {
+	if values == nil {
+		return ""
+	}
+	v, ok := values[key]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+func inferClusterNameFromValuesPath(path string) string {
+	base := filepath.Base(path)
+	for _, suffix := range []string{"-nvca-values.yaml", "-nvca-values.yml", "-register-values.yaml", "-register-values.yml", ".yaml", ".yml"} {
+		if strings.HasSuffix(base, suffix) {
+			return strings.TrimSuffix(base, suffix)
+		}
+	}
+	return ""
+}
+
+func computePlaneInstallEnv(valuesPath, clusterName, ncaID string) []string {
+	return []string{
+		"NVCF_NVCA_VALUES_FILE=" + valuesPath,
+		"HELMFILE_INCLUDE_WORKER_LAYER=true",
+		"CLUSTER_NAME=" + clusterName,
+		"NCA_ID=" + ncaID,
+	}
+}
