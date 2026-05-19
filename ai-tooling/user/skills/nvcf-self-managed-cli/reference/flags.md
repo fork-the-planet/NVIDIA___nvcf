@@ -68,9 +68,11 @@
 | `--inference-port PORT` | Container inference port | — |
 | `--function-type DEFAULT\|STREAMING\|LLM` | Function type | `DEFAULT` |
 | `--models NAME:VERSION:URI` | Standard model artifact; repeatable | — |
-| `--llm-model SPEC` | LLM model config; format `name=<model>,uris=<uri>|<uri>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>`; repeatable | — |
+| `--llm-model SPEC` | LLM model config; format `name=<model>,uris=<uri>|<uri>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>`; repeatable | - |
 
-In JSON, LLM functions set `functionType: "LLM"` and model routing metadata under `models[].llmConfig`. `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
+In JSON, LLM functions set `functionType: "LLM"` and model routing metadata under `models[].llmConfig`. `llmConfig.uris` declares the OpenAI-compatible upstream paths exposed by the model. Current supported paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`. `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
+
+LLM invocation requests use `model: "<function-id>/<model-name>"`. The function ID selects the NVCF function, and the model name is forwarded upstream. Chat completions and Responses API requests can use `x-multi-turn-session-id` for session stickiness; embeddings requests do not.
 
 ## `function deploy create`-specific
 

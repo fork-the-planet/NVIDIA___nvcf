@@ -6,11 +6,11 @@ This page provides documentation for the NVCF Self-hosted CLI, a command-line in
 
 The NVCF Self-hosted CLI provides:
 
-- **Automatic Token Generation**: Generate admin tokens and API keys via direct API calls
-- **Smart State Management**: Persistent workflow context eliminates manual ID copying
-- **Multi-Environment Support**: Separate configurations for dev/staging/production
-- **gRPC Invocation**: Native support for gRPC function invocation
-- **Shell Completion**: Autocompletion for bash, zsh, fish, and PowerShell
+- Automatic Token Generation: Generate admin tokens and API keys via direct API calls
+- Smart State Management: Persistent workflow context eliminates manual ID copying
+- Multi-Environment Support: Separate configurations for dev/staging/production
+- gRPC Invocation: Native support for gRPC function invocation
+- Shell Completion: Autocompletion for bash, zsh, fish, and PowerShell
 
 <Note>
 The CLI is available as a container image from NGC. See [self-hosted-artifact-manifest](./manifest.md) for the full artifact path.
@@ -45,9 +45,9 @@ cp .nvcf-cli.yaml.template .nvcf-cli.yaml
 
 Configuration files are searched in this order:
 
-1. **Explicit path** via `--config` flag (highest priority)
-2. **Current directory**: `./.nvcf-cli.yaml`
-3. **Home directory**: `~/.nvcf-cli.yaml`
+1. Explicit path via `--config` flag (highest priority)
+2. Current directory: `./.nvcf-cli.yaml`
+3. Home directory: `~/.nvcf-cli.yaml`
 
 <Tip>
 Place your `.nvcf-cli.yaml` in the directory where you run the CLI for project-specific configuration, or in your home directory for global configuration.
@@ -227,7 +227,7 @@ service without hostname matching.
 
 #### Production Setup: DNS and HTTPS
 
-The Host header configuration above is designed for **testing and development**. For **production deployments**, configure proper DNS and TLS to eliminate the need for Host header overrides.
+The Host header configuration above is designed for testing and development. For production deployments, configure proper DNS and TLS to eliminate the need for Host header overrides.
 
 With proper DNS and HTTPS configured:
 
@@ -310,8 +310,8 @@ For immediate testing, you can use `load_tester_supreme` from `nvcf-onprem` (see
 
 The CLI supports two types of authentication tokens:
 
-- **Admin Token (NVCF_TOKEN)**: For function management (create, deploy, update, delete)
-- **API Key (NVCF_API_KEY)**: For user operations (invoke, list, queue status)
+- Admin Token (NVCF_TOKEN): For function management (create, deploy, update, delete)
+- API Key (NVCF_API_KEY): For user operations (invoke, list, queue status)
 
 ### Generate Admin Token
 
@@ -423,7 +423,7 @@ For a single cluster, omit both context flags.
 
 ### Function Management Commands
 
-**Create Function**
+#### Create Function
 
 ```bash
 # Create from JSON file
@@ -533,7 +533,7 @@ LLM functions use `functionType: "LLM"` and define model routing metadata under 
 For LLM models, `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
 Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`.
 
-**Deploy Function**
+#### Deploy Function
 
 The `function deploy` command group manages deployments with the following subcommands:
 
@@ -616,7 +616,7 @@ Example deployment JSON:
 }
 ```
 
-**List and Get Functions**
+#### List and Get Functions
 
 ```bash
 # List all functions
@@ -640,7 +640,7 @@ Example deployment JSON:
   --json
 ```
 
-**Update Function**
+#### Update Function
 
 ```bash
 # Update function tags
@@ -656,7 +656,7 @@ Example deployment JSON:
   --input-file metadata-update.json
 ```
 
-**Invoke Function**
+#### Invoke Function
 
 ```bash
 # Invoke using saved context
@@ -697,6 +697,8 @@ curl -sS -X POST "https://llm.invocation.<domain>/v1/embeddings" \
   -d '{"model":"<function-id>/dummy-model","input":"NVCF embeddings check"}'
 ```
 
+For LLM Gateway endpoint behavior, routing, and session stickiness details, see [LLM Gateway](./llm-gateway.md).
+
 For raw HTTP invocation, HTTP streaming, gRPC metadata, and invocation error
 behavior, see [Generic HTTP Function Invocation](./generic-http-function-invocation.md)
 and [gRPC Function Invocation](./grpc-function-invocation.md).
@@ -713,7 +715,7 @@ Additional `function invoke` flags:
 | `--poll-duration` | Invocation hold-open duration in seconds (default: 5) |
 | `--input-file` | JSON file with invocation configuration |
 
-**Queue Management**
+#### Queue Management
 
 ```bash
 # Get queue status for a function
@@ -723,7 +725,7 @@ Additional `function invoke` flags:
 ./nvcf-cli function queue position <request-id>
 ```
 
-**Delete Function**
+#### Delete Function
 
 ```bash
 # Delete current function from state
@@ -789,7 +791,7 @@ Manage container registry credentials for function images and Helm charts. For c
 
 ### Authentication Errors
 
-**401 Unauthorized on function creation:**
+401 Unauthorized on function creation:
 
 ```bash
 # Regenerate admin token
@@ -800,7 +802,7 @@ Manage container registry credentials for function images and Helm charts. For c
 # Look for: "Using FUNCTION TOKEN for POST"
 ```
 
-**403 Forbidden on invocation:**
+403 Forbidden on invocation:
 
 ```bash
 # Regenerate API key
@@ -840,7 +842,7 @@ Manage container registry credentials for function images and Helm charts. For c
 | --- | --- | --- |
 | `function create` | `NVCF_TOKEN` | Admin token required |
 | `function deploy create` | `NVCF_TOKEN` | Falls back to API key |
-| `function delete` | `NVCF_TOKEN` | **No fallback** - admin only |
+| `function delete` | `NVCF_TOKEN` | No fallback - admin only |
 | `function invoke` | `NVCF_API_KEY` | Falls back to admin token |
 | `function list` | `NVCF_API_KEY` | Falls back to admin token |
 

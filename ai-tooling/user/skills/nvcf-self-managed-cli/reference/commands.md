@@ -37,14 +37,14 @@ Full subcommand list. Always pair with [flags.md](flags.md) for global flags and
 
 | Command | Purpose | Notes |
 |---|---|---|
-| `function create --input-file=FILE` | Create function metadata | Returns Function ID + Version ID; LLM functions use `functionType: "LLM"` and `models[].llmConfig` |
+| `function create --input-file=FILE` | Create function metadata | Returns Function ID + Version ID; LLM functions use `functionType: "LLM"` and `models[].llmConfig.uris` for `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` |
 | `function list` / `function list-ids` | List functions / IDs only | |
 | `function get --function-id=ID --version-id=VID` | Function metadata | |
 | `function deploy create --input-file=FILE` | Schedule a deployment | Blocks until ACTIVE (default 900s) |
 | `function deploy get --function-id=ID --version-id=VID [--json]` | Deployment status | `functionStatus: ACTIVE\|DEPLOYING\|ERROR\|FAILED` |
 | `function deploy update --input-file=FILE` | Modify a deployment in place | |
 | `function deploy remove --function-id=ID --version-id=VID` | Stop a deployment, keep function record | |
-| `function invoke --input-file=FILE` | Call the function | Requires API key (not admin token) |
+| `function invoke --input-file=FILE` | Call a regular function | Requires API key (not admin token); LLM functions are invoked through `llm.invocation.<domain>` with `model: "<function-id>/<model-name>"` |
 | `function delete --function-id=ID --version-id=VID` | Remove function + deployment | **DESTRUCTIVE: confirm with user** |
 
 ## Auth

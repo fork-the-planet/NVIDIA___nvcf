@@ -48,7 +48,7 @@ For an OpenAI-compatible LLM function, set `functionType: "LLM"` and put route m
     {
       "name": "dummy-model",
       "llmConfig": {
-        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
         "tokenRateLimit": "1000-M"
       }
@@ -66,10 +66,20 @@ nvcf-cli function create \
   --inference-url=/ \
   --inference-port=8000 \
   --function-type=LLM \
-  --llm-model='name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M'
+  --llm-model='name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M'
 ```
 
 Use the same deploy step below after the LLM function is created.
+
+LLM Gateway routes requests by the OpenAI `model` value. Use `<function-id>/<model-name>`: the function ID selects the NVCF function, and the model name is forwarded to the upstream container through `stargate-client`.
+
+Supported LLM paths:
+
+| Path | Notes |
+| --- | --- |
+| `/v1/chat/completions` | Supports streaming and session stickiness. |
+| `/v1/responses` | Native Responses proxy path; relays SSE for streaming clients and returns terminal JSON for non-streaming clients. Supports session stickiness. |
+| `/v1/embeddings` | Accepts string or string-array `input`; input must be non-empty and may contain at most 2048 entries. No session stickiness. |
 
 ## 2. Function DEPLOY
 
@@ -142,6 +152,30 @@ curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
 ```
 
 The OpenAI `model` value must be `<function-id>/<model-name>` so the gateway can select the function and model.
+
+Responses API example:
+
+```sh
+curl -sS -X POST "https://llm.invocation.<domain>/v1/responses" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<fn_id>/dummy-model",
+    "input": "Write a one sentence summary of NVCF."
+  }'
+```
+
+Embeddings example:
+
+```sh
+curl -sS -X POST "https://llm.invocation.<domain>/v1/embeddings" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<fn_id>/dummy-model",
+    "input": "NVCF embeddings check"
+  }'
+```
 
 If status is `errored`, query ICMS for the deployment's pod logs (kubectl on the compute-plane cluster) and surface to the user.
 

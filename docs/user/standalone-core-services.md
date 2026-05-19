@@ -469,7 +469,7 @@ installed in the `nvcf` namespace with the `helm-reval` chart.
 
 | **Chart** | `helm-reval` |
 | --- | --- |
-| **Version** | `1.3.4` |
+| **Version** | `1.3.5` |
 | **Namespace** | `nvcf` |
 | **Depends on** | Infrastructure only |
 
@@ -501,7 +501,7 @@ Replace `<REGISTRY>` and `<REPOSITORY>` with your registry settings.
 ```bash
 helm upgrade --install reval \
   oci://${REGISTRY}/${REPOSITORY}/helm-reval \
-  --version 1.3.4 \
+  --version 1.3.5 \
   --namespace nvcf \
   --wait --timeout 10m \
   -f reval-values.yaml

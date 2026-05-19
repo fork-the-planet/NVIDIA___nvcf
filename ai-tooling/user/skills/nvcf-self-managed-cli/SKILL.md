@@ -11,7 +11,7 @@ description: |
   install nvcf, uninstall nvcf, tear down nvcf, remove nvcf, deploy nvcf, register
   cluster, deregister cluster, NVCFBackend, control plane, compute plane, NCP, NVCA,
   function deploy, function invoke, GPU function, LLM function, OpenAI-compatible
-  invocation, chat completions, cluster register, cluster rotate, cluster delete,
+  invocation, chat completions, Responses API, embeddings, cluster register, cluster rotate, cluster delete,
   helmfile, helmfile destroy, helm uninstall, icms, api-keys, cluster ID, JWKS rotation.
 allowed-tools: Bash, Read, AskUserQuestion
 argument-hint: "[install|status|check|deploy-function|register-cluster|teardown] [args]"
@@ -104,6 +104,16 @@ nvcf-cli self-hosted uninstall --no-apply --compute-plane --cluster-name=ncp-loc
 | `nvcf-cli function deploy create --input-file=<json>` | Schedule a deployment of a created function | Waits for ACTIVE before returning (timeout 900s) |
 | `nvcf-cli function invoke --input-file=<json>` | Invoke a deployed function | Requires API key (not admin token) |
 | `nvcf-cli function delete --function-id=ID --version-id=VID` | Remove a function and its deployment | **Confirm with user.** |
+
+## LLM function type
+
+Use `functionType: "LLM"` for OpenAI-compatible models served through the self-managed LLM Gateway. LLM functions must define at least one `models[]` entry with `name` and `llmConfig.uris`; the supported upstream paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`.
+
+Invocation uses the LLM route, for example `https://llm.invocation.<domain>/v1/chat/completions`. The OpenAI `model` value must be `<function-id>/<model-name>`; the function ID is the routing key and the model name is forwarded upstream.
+
+For `/v1/responses`, the gateway proxies the native Responses path upstream, relays SSE to streaming clients, and aggregates the terminal JSON response for non-streaming clients. For `/v1/embeddings`, input may be a string or string array, must be non-empty, and may contain at most 2048 entries.
+
+Session stickiness uses `x-multi-turn-session-id` for chat completions and Responses API requests only. Embeddings requests do not use stickiness.
 
 ## Common workflows
 

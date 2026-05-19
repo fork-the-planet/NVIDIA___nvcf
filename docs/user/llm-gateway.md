@@ -1,0 +1,166 @@
+# LLM Gateway
+
+The LLM Gateway handles OpenAI-compatible invocation for NVCF LLM functions in self-managed deployments. Use LLM functions when the workload exposes OpenAI-compatible model routes and NVCF should route requests by function and model.
+
+Clients call the LLM invocation hostname:
+
+```bash
+https://llm.invocation.<domain>
+```
+
+Requests use the OpenAI `model` field in this format:
+
+```text
+<function-id>/<model-name>
+```
+
+The gateway uses `<function-id>` as the routing key for NVCF authorization and backend selection. It forwards `<model-name>` to the upstream model server.
+
+## Request Flow
+
+The LLM Gateway path has these runtime components:
+
+1. Client sends an OpenAI-compatible request to `llm.invocation.<domain>`.
+2. LLM API Gateway extracts the routing key from the `model` field, validates authorization, applies request and token rate limits, and validates endpoint-specific request fields.
+3. LLM API Gateway forwards the request to LLM request router with routing metadata such as request ID, routing key, model name, routing method, token estimate, and cache affinity key when present.
+4. LLM request router selects a healthy backend for the requested function and model.
+5. The `stargate-client` sidecar on the selected workload forwards the request to the user container through the configured inference port.
+6. The user container handles the OpenAI-compatible route and returns the response through the same path.
+
+The function container must expose the declared OpenAI-compatible paths on its inference port. Use `inferenceUrl: "/"` for LLM functions unless the container needs a different base path.
+
+## Function Configuration
+
+Set `functionType` to `LLM` and define model routing metadata under `models[].llmConfig`.
+
+```json
+{
+  "name": "sample-llm-function",
+  "containerImage": "nvcr.io/example/openai-compatible:latest",
+  "inferenceUrl": "/",
+  "inferencePort": 8000,
+  "functionType": "LLM",
+  "models": [
+    {
+      "name": "dummy-model",
+      "llmConfig": {
+        "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-M"
+      }
+    }
+  ]
+}
+```
+
+`llmConfig.uris` declares the OpenAI-compatible paths the model supports. Supported LLM paths are:
+
+| Path | Behavior |
+| --- | --- |
+| `/v1/chat/completions` | Supports streaming and non-streaming chat completion requests. |
+| `/v1/responses` | Supports native Responses API requests. Streaming clients receive server-sent events (SSE). Non-streaming clients receive the terminal Responses JSON object. |
+| `/v1/embeddings` | Supports embeddings requests with string or string array input. |
+
+`llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
+
+`llmConfig.tokenRateLimit` applies a per-model token limit using the same rate limit format as function-level limits.
+
+## Endpoint Behavior
+
+### Chat Completions
+
+Use `/v1/chat/completions` for OpenAI-compatible chat requests:
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<function-id>/dummy-model",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a one sentence summary of NVCF."
+      }
+    ]
+  }'
+```
+
+When `stream` is `true`, the gateway relays server-sent events. When `stream` is false or omitted, the gateway returns the final JSON response from the upstream service.
+
+### Responses
+
+Use `/v1/responses` for native Responses API requests:
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/responses" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<function-id>/dummy-model",
+    "input": "Write a one sentence summary of NVCF.",
+    "stream": false
+  }'
+```
+
+The gateway requires the routed model to declare `/v1/responses` in `llmConfig.uris` when model specs are available. The gateway proxies native Responses requests upstream instead of converting them to chat completions.
+
+For upstream compatibility, the gateway sends native Responses requests to the router as streaming requests. If the client requested streaming, the gateway relays SSE. If the client requested a non-streaming response, the gateway consumes the upstream SSE stream and returns the terminal Responses JSON object.
+
+### Embeddings
+
+Use `/v1/embeddings` for OpenAI-compatible embeddings requests:
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/embeddings" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<function-id>/dummy-model",
+    "input": "NVCF embeddings check"
+  }'
+```
+
+The gateway accepts `input` as a string or an array of strings. Empty input is rejected. The request can include up to 2048 input entries.
+
+Embeddings requests do not use session stickiness.
+
+## Model Routing And Upstream Paths
+
+The client-facing `model` value must include a routing key and model name:
+
+```text
+<function-id>/<model-name>
+```
+
+The gateway uses `<function-id>` to authorize the request and select the NVCF function deployment. It rewrites the upstream model to `<model-name>` before forwarding the request.
+
+The configured `llmConfig.uris` must match the paths served by the container. For example, a model that declares `/v1/responses` must have a container backend that can answer `POST /v1/responses`.
+
+## Session Stickiness
+
+The LLM Gateway supports sticky routing for multi-turn OpenAI-compatible requests on `/v1/chat/completions` and `/v1/responses`.
+
+Sticky routing is not supported on `/v1/embeddings`.
+
+To keep later requests routed to the same backend, send the `x-multi-turn-session-id` response header value back as the `x-multi-turn-session-id` request header on the next request.
+
+The gateway chooses the sticky routing key in this order:
+
+| Endpoint | Precedence |
+| --- | --- |
+| `/v1/responses` | `prompt_cache_key`, `conversation.id`, `x-multi-turn-session-id`, input hash fallback |
+| `/v1/chat/completions` | `x-multi-turn-session-id`, messages hash fallback |
+
+For Responses API follow-up calls, `previous_response_id` does not override the sticky routing key. Continue sending `prompt_cache_key`, `conversation.id`, or the returned `x-multi-turn-session-id` header when the next request needs the same backend affinity.
+
+Sticky routing only affects backend selection when the LLM request router is configured with a cache-affinity-aware routing method for the target model. Clients should only use `x-multi-turn-session-id`. The gateway derives and forwards the internal `x-cache-affinity-key`; clients should not send that header.
+
+## Operational Notes
+
+- The LLM invocation route is served through `llm.invocation.<domain>`.
+- The LLM API Gateway chart and LLM request router chart are installed as self-managed stack components.
+- The Gateway Routes chart creates the external HTTPRoute for LLM invocation.
+- Token rate limits are evaluated per model when `llmConfig.tokenRateLimit` is set.
+- The LLM request router and `stargate-client` images must be from a stack release that includes the endpoint support documented here.
