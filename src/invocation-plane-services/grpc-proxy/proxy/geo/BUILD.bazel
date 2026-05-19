@@ -72,7 +72,17 @@ go_test(
         "TESTCONTAINERS_RYUK_DISABLED",
     ],
     local = True,
-    tags = ["requires-docker"],
+    # external: testcontainers spins up the localstack Docker container,
+    # so the test's effective inputs (Docker daemon, localstack image
+    # tag) live outside Bazel's hermetic action hash. `local = True`
+    # forces local-only execution but does NOT bypass result caching;
+    # the `external` tag is what stops nvcfbarn from pinning a green
+    # forever. requires-docker is kept so callers can filter out
+    # docker-needing tests with --test_tag_filters=-requires-docker.
+    tags = [
+        "external",
+        "requires-docker",
+    ],
     deps = [
         "@com_github_aws_aws_sdk_go_v2//aws",
         "@com_github_aws_aws_sdk_go_v2_config//:config",

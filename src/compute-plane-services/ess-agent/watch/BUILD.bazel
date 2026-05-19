@@ -38,6 +38,11 @@ go_test(
         "watcher_test.go",
     ],
     embed = [":watch"],
+    # Integration test. TestMain spawns a real `vault` binary; tests
+    # panic with "vault not found on $PATH" without it. See the
+    # comment on //dependency:dependency_test for details and how
+    # to run locally with binaries on PATH.
+    tags = ["manual"],
     deps = [
         "//api",
         "//config",

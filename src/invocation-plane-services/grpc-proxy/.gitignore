@@ -20,3 +20,5 @@ vault
 local/certs
 proto
 bazel-*
+.bazel-cache/
+.tls/

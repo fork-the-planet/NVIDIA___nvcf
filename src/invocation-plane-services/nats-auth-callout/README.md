@@ -20,7 +20,7 @@ bazel test //... --flaky_test_attempts=3
 bazel build //cmd/nvcf-nats-auth-callout-service:image_index
 
 # Push to the internal NGC registries (kaze / nv-ngc-devops / ncp-dev).
-bazel run //cmd/nvcf-nats-auth-callout-service:image_push
+bazel run //cmd/nvcf-nats-auth-callout-service:image_push_kaze
 bazel run //cmd/nvcf-nats-auth-callout-service:image_push_devops
 bazel run //cmd/nvcf-nats-auth-callout-service:image_push_ncp_dev
 

@@ -111,7 +111,14 @@ go_test(
     embed = [":storage"],
     env_inherit = ["KUBEBUILDER_ASSETS"],
     rundir = ".",
-    tags = ["requires-kubebuilder"],
+    # external: envtest spins up kube-apiserver + etcd from binaries
+    # outside Bazel's hermetic input set. A green run gets cached
+    # forever even if the test logic regresses; force fresh execution
+    # on every pipeline. requires-kubebuilder is descriptive grouping.
+    tags = [
+        "external",
+        "requires-kubebuilder",
+    ],
     x_defs = {
         "github.com/NVIDIA/k8s-dra-driver-gpu/internal/info.version": "v25.8.0",
     },

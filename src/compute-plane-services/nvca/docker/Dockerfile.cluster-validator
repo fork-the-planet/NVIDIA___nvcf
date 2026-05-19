@@ -4,7 +4,7 @@
 # ------------------------------------------------------------------------------
 # Stage 1: common builder base (runs only on BUILDPLATFORM)
 # ------------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26.2-bookworm AS builder-base
+FROM --platform=$BUILDPLATFORM golang:1.26.3-bookworm AS builder-base
 
 ARG NVCF_GOMAXPROCS=4
 ARG TARGETARCHS="amd64 arm64"
@@ -39,7 +39,7 @@ RUN set -eux; \
 # ------------------------------------------------------------------------------
 # Stage 3: minimal runtime image
 # ------------------------------------------------------------------------------
-FROM nvcr.io/nvidia/distroless/go:v4.0.5
+FROM nvcr.io/nvidia/distroless/go:v4.0.6
 
 ARG TARGETARCH
 LABEL io.k8s.display-name="NVCF Cluster Validator"

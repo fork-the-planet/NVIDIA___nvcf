@@ -184,6 +184,9 @@ apikeys:
     {{ .Values.global.nodeSelectors.controlplane.key }}: {{ .Values.global.nodeSelectors.controlplane.value }}
   {{- end }}
 
+{{- $apiEnvOverrides := dig "api" "env" dict .Values }}
+{{- $llmRouterClientImageDefault := printf "%s/%s/stargate-client:0.2.0" .Values.global.image.registry .Values.global.image.repository }}
+{{- $llmRouterClientImage := dig "NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE" $llmRouterClientImageDefault $apiEnvOverrides }}
 api:
   fullnameOverride: nvcf-api
   {{- if .Values.global.imagePullSecrets }}
@@ -240,6 +243,7 @@ api:
     NVCF_NATS_REGION_PLACEMENT_TAG: "dc"
     NVCF_SIDECARS_HOSTNAME: {{ .Values.global.image.registry }}
     NVCF_SIDECARS_REPOSITORY: {{ .Values.global.image.repository }}
+    NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE: {{ $llmRouterClientImage | quote }}
     # Observability
     MANAGEMENT_TRACING_ENABLED: {{ .Values.global.observability.tracing.enabled | quote }}
 
@@ -478,6 +482,7 @@ llmRequestRouter:
       {{- end }}
 
 nvcfGatewayRoutes:
+  {{- $natsRouteEnabled := dig "ingress" "gatewayApi" "routes" "nats" "enabled" false .Values }}
   domain: "{{ .Values.global.domain }}"
   gateways:
     shared:
@@ -486,6 +491,12 @@ nvcfGatewayRoutes:
     grpc:
       name: {{ required "ingress.gatewayApi.gateways.grpc.name is required" .Values.ingress.gatewayApi.gateways.grpc.name }}
       namespace: {{ required "ingress.gatewayApi.gateways.grpc.namespace is required" .Values.ingress.gatewayApi.gateways.grpc.namespace }}
+    {{- if $natsRouteEnabled }}
+    nats:
+      name: {{ required "ingress.gatewayApi.gateways.nats.name is required when ingress.gatewayApi.routes.nats.enabled is true" .Values.ingress.gatewayApi.gateways.nats.name }}
+      namespace: {{ required "ingress.gatewayApi.gateways.nats.namespace is required when ingress.gatewayApi.routes.nats.enabled is true" .Values.ingress.gatewayApi.gateways.nats.namespace }}
+      listenerName: {{ dig "ingress" "gatewayApi" "gateways" "nats" "listenerName" "nats" .Values }}
+    {{- end }}
   routes:
     nvcfApi:
       routeAnnotations:
@@ -510,5 +521,9 @@ nvcfGatewayRoutes:
     grpc:
       routeAnnotations:
         {{ dig "ingress" "gatewayApi" "routes" "grpc" "routeAnnotations" dict .Values | toYaml | nindent 8 | trim }}
+    nats:
+      enabled: {{ $natsRouteEnabled }}
+      routeAnnotations:
+        {{ dig "ingress" "gatewayApi" "routes" "nats" "routeAnnotations" dict .Values | toYaml | nindent 8 | trim }}
   podMonitors:
     enabled: {{ .Values.global.observability.metrics.enabled }}

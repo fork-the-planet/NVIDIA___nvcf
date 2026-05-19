@@ -24,7 +24,7 @@ RUN goreleaser release --snapshot --clean --parallelism "${NVCF_GOMAXPROCS}" --f
 RUN rm -rf ./vendor/github.com/NVIDIA
 
 # Latest version is tracked in the internal hardened distroless sample project documentation.
-FROM nvcr.io/nvidia/distroless/go:v4.0.5
+FROM nvcr.io/nvidia/distroless/go:v4.0.6
 LABEL io.k8s.display-name="NV Cluster Agent tools"
 
 COPY --from=builder /go/egx/_output/dist/ /usr/dist/

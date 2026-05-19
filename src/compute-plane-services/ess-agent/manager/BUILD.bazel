@@ -45,6 +45,10 @@ go_test(
         "runner_test.go",
     ],
     embed = [":manager"],
+    # Integration test. Uses consul-sdk testutil which spawns real
+    # `consul` and `vault` subprocesses; fails without those on PATH.
+    # See //dependency:dependency_test for the full rationale.
+    tags = ["manual"],
     deps = [
         "//child",
         "//config",

@@ -125,6 +125,9 @@ ingress:
         routeAnnotations: {}
       grpc:
         routeAnnotations: {}
+      nats:
+        enabled: false
+        routeAnnotations: {}
     gateways:
       shared:
         name: "" # must be set by the environment
@@ -132,3 +135,7 @@ ingress:
       grpc:
         name: "" # must be set by the environment
         namespace: "" # must be set by the environment
+      nats:
+        name: "" # must be set by the environment when routes.nats.enabled=true
+        namespace: "" # must be set by the environment when routes.nats.enabled=true
+        listenerName: nats

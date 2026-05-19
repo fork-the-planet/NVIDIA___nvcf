@@ -2,7 +2,7 @@
 # ------------------------------------------------------------------------------
 # Common builder stage (executes ONLY on the build platform)
 # ------------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26.2-bookworm AS builder-base
+FROM --platform=$BUILDPLATFORM golang:1.26.3-bookworm AS builder-base
 
 # ---- Build configuration -----------------------------------------------------
 ARG EGX_VERSION
@@ -90,7 +90,7 @@ RUN set -eux; \
 # ------------------------------------------------------------------------------
 
 # Latest version is tracked in the internal hardened distroless sample project documentation.
-FROM nvcr.io/nvidia/distroless/go:v4.0.5
+FROM nvcr.io/nvidia/distroless/go:v4.0.6
 LABEL io.k8s.display-name="NV Cluster Agent"
 
 # The following build args are automatically populated by BuildKit.

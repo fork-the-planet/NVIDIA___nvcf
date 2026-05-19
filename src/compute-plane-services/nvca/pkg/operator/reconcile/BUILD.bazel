@@ -147,6 +147,14 @@ go_test(
         "testdata/netpols.yaml",
         "testdata/netpols_with_ddcs.yaml",
     ],
+    # external: exercises operator reconcile paths against vault-aware
+    # auth config, webhooks, and rendered helm netpols whose effective
+    # behavior depends on inputs Bazel does not capture in the action
+    # hash. Cached greens have pinned this target through real
+    # regressions (GHA fresh run on bazel-ci:0.4.0 surfaced multiple
+    # failures that GitLab kept reporting as `(cached) PASSED`). Force
+    # fresh execution.
+    tags = ["external"],
     deps = [
         "//pkg/apis/nvca/v2beta1",
         "//pkg/apis/nvcf/v1:nvcf",

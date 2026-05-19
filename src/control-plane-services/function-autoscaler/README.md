@@ -5,7 +5,7 @@ A high-performance, distributed autoscaling service for NVIDIA Cloud Functions (
 ## Build with Bazel
 
 CI runs `bazel test //...` and publishes the image via
-`bazel run //nvidia-internal:image_push` (plus the `_devops` and
+`bazel run //nvidia-internal:image_push_kaze` (plus the `_devops` and
 `_ncp_dev` variants for the alternate NGC registries). Tracks the
 canonical Phase B scaffold from nvcf-invocation-service !313.
 
@@ -27,10 +27,10 @@ bazel build //crates/server:image_index
 bazel run //crates/server:image_load
 
 # Push the multi-arch image to the three internal NGC registries.
-# Push targets live under //nvidia-internal:image_push* (see
+# Push targets live under //nvidia-internal:image_push_kaze* (see
 # nvidia-internal/BUILD.bazel); the registry coordinates are
 # NVIDIA-internal and intentionally kept out of the public mirror.
-bazel run //nvidia-internal:image_push
+bazel run //nvidia-internal:image_push_kaze
 bazel run //nvidia-internal:image_push_devops
 bazel run //nvidia-internal:image_push_ncp_dev
 

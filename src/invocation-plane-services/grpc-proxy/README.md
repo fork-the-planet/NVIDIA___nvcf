@@ -34,9 +34,11 @@ bazel test //... --flaky_test_attempts=3
 bazel build //:image_index
 
 # Push to the internal NGC registries (kaze / nv-ngc-devops / ncp-dev).
-bazel run //:image_push
-bazel run //:image_push_devops
-bazel run //:image_push_ncp_dev
+# Targets live under //nvidia-internal:image_push_<destination> per the
+# catalog in nvidia-internal/destinations.bzl.
+bazel run //nvidia-internal:image_push_kaze
+bazel run //nvidia-internal:image_push_devops
+bazel run //nvidia-internal:image_push_ncp_dev
 
 # Regenerate per-package BUILD files after Go source changes.
 bazel run //:gazelle
@@ -439,7 +441,7 @@ bazel build //:image_index
 
 # Push the image to the registry. Requires nvcr.io credentials in
 # ~/.docker/config.json (`docker login nvcr.io -u \$oauthtoken ...`).
-bazel run --stamp //:image_push
+bazel run --stamp //nvidia-internal:image_push_kaze
 
 # Regenerate BUILD files after adding a Go file or import.
 bazel run //:gazelle

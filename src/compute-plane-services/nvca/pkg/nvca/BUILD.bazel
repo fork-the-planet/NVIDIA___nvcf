@@ -14,7 +14,6 @@ go_library(
         "backendk8scache_gxcache.go",
         "bart_setup_prod.go",
         "cli.go",
-        "cli_new.go",
         "computebackend.go",
         "gpumonitor.go",
         "icms_client.go",
@@ -155,7 +154,6 @@ go_test(
         "agent_updates_test.go",
         "backendk8scache_gxcache_test.go",
         "backendk8scache_test.go",
-        "cli_new_test.go",
         "cli_test.go",
         "encrypt_modelcache_test.go",
         "gpumonitor_test.go",
@@ -187,7 +185,13 @@ go_test(
         "testdata/terminationmsg_good.json",
     ],
     env_inherit = ["KUBEBUILDER_ASSETS"],
-    tags = ["requires-kubebuilder"],
+    # external: envtest spins up kube-apiserver + etcd from binaries
+    # outside Bazel's hermetic input set. See the comment on
+    # //pkg/storage:storage_test for the full rationale.
+    tags = [
+        "external",
+        "requires-kubebuilder",
+    ],
     x_defs = {
         "github.com/NVIDIA/k8s-dra-driver-gpu/internal/info.version": "v25.8.0",
     },

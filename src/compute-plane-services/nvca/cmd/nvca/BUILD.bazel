@@ -10,12 +10,9 @@ go_library(
     importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/cmd/nvca",
     visibility = ["//visibility:private"],
     deps = [
-        "//cmd/internal",
         "//pkg/nvca",
         "//pkg/nvca/errors",
         "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core",
-        "//vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/version",
-        "@com_github_urfave_cli_v2//:cli",
     ],
 )
 

@@ -88,6 +88,17 @@ go_test(
         "vault_write_test.go",
     ],
     embed = [":dependency"],
+    # Integration test. TestMain spawns real `consul`, `vault`, and
+    # `nomad` binaries; in environments without those on PATH the
+    # test hangs and times out (315s wall in GitHub Actions on the
+    # public NVCF mirror, where the bazel-ci toolchain image
+    # intentionally does not ship the HashiCorp binaries due to BSL
+    # licensing on post-Aug-2023 releases). Marked manual so
+    # `bazel test //...` skips it. Run explicitly with the binaries
+    # available, e.g.
+    #   bazel test //dependency:dependency_test
+    # on a host that has consul + vault + nomad on PATH.
+    tags = ["manual"],
     deps = [
         "//api",
         "//renderer",
