@@ -206,6 +206,20 @@ func TestResolveRegisterEndpointValues_LocalSplitUsesControlPlaneExternalEndpoin
 	assert.Equal(t, "nats://nats.nvcf-control-plane.test:4222", got.NATSURL)
 }
 
+func TestResolveNVCAEndpointValues_LocalSingleUsesInClusterEndpoints(t *testing.T) {
+	got := resolveNVCAEndpointValues(
+		"local",
+		"",
+		"",
+		"http://sis.localhost:8080",
+		"",
+	)
+
+	assert.Equal(t, "http://api.sis.svc.cluster.local:8080", got.ICMSServiceURL)
+	assert.Equal(t, "http://reval.nvcf.svc.cluster.local:8080", got.ReValServiceURL)
+	assert.Equal(t, "nats://nats.nats-system.svc.cluster.local:4222", got.NATSURL)
+}
+
 func TestResolveRegisterEndpointValues_LocalSplitKeepsExplicitExternalDomain(t *testing.T) {
 	got := resolveRegisterEndpointValues(
 		"local",

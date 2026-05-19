@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -451,8 +450,17 @@ type registerValuesYAML struct {
 // register-values files written by older `up` runs against an existing cluster
 // that hasn't been re-registered yet, so honoring both keeps the read forgiving.
 func readRegisterValuesYAML(stackPath, clusterName string) (*registerValuesYAML, error) {
-	path := filepath.Join(stackPath, "out", clusterName+"-register-values.yaml")
-	body, err := os.ReadFile(path)
+	var body []byte
+	var err error
+	for _, path := range []string{nvcaValuesPath(stackPath, clusterName), legacyRegisterValuesPath(stackPath, clusterName)} {
+		body, err = os.ReadFile(path)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

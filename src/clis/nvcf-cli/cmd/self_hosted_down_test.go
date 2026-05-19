@@ -249,6 +249,18 @@ printf '%s\n' "$PWD|$*|CLUSTER_NAME=${CLUSTER_NAME}" >> "$NVCF_TEST_HELMFILE_LOG
 	return logPath
 }
 
+func TestReadRegisterValuesYAML_ReadsNVCAValuesBeforeLegacyRegisterValues(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "out"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "out", "gpu-a-register-values.yaml"), []byte("clusterID: legacy-id\nclusterGroupID: legacy-group\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "out", "gpu-a-nvca-values.yaml"), []byte("clusterID: new-id\nclusterGroupID: new-group\n"), 0o644))
+
+	got, err := readRegisterValuesYAML(dir, "gpu-a")
+	require.NoError(t, err)
+	assert.Equal(t, "new-id", got.ClusterID)
+	assert.Equal(t, "new-group", got.ClusterGroupID)
+}
+
 func makeDownStack(t *testing.T) string {
 	t.Helper()
 

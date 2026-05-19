@@ -273,6 +273,11 @@ func TestSelfHostedUp_PlainEmitsPhaseLines(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(profileBody), "kind: ControlPlaneProfile")
 	assert.Contains(t, string(profileBody), "clusterName: test")
+	registerValues, err := os.ReadFile(filepath.Join(stackDir, "out", "test-register-values.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(registerValues), "icmsServiceURL: http://api.sis.svc.cluster.local:8080")
+	assert.Contains(t, string(registerValues), "revalServiceURL: http://reval.nvcf.svc.cluster.local:8080")
+	assert.Contains(t, string(registerValues), "natsURL: nats://nats.nats-system.svc.cluster.local:4222")
 }
 
 // TestUp_PlanOnly_NoHelmfileInvocation runs the orchestrator with --plan-only

@@ -562,7 +562,7 @@ func (r *selfHostedUpRun) createClusterRegistration(stackPath string, p6Start ti
 }
 
 func (r *selfHostedUpRun) writeRegistrationValues(stackPath, icmsURL string, registration upClusterRegistration, p6Start time.Time) error {
-	endpoints := resolveRegisterEndpointValues(selfHostedEnv, selfHostedControlPlaneContext, selfHostedComputePlaneContext, icmsURL, selfHostedNATSURL)
+	endpoints := resolveNVCAEndpointValues(selfHostedEnv, selfHostedControlPlaneContext, selfHostedComputePlaneContext, icmsURL, selfHostedNATSURL)
 	if err := writeRegisterValuesYAML(registerValuesWriteRequest{
 		StackPath:      stackPath,
 		ClusterName:    upClusterName,
@@ -577,6 +577,11 @@ func (r *selfHostedUpRun) writeRegistrationValues(stackPath, icmsURL string, reg
 		r.emitFailure(selfhosted.Failure{Phase: selfhosted.PhaseRegister, Err: wrapped}, p6Start)
 		return wrapped
 	}
+	_ = r.sink.Emit(r.ctx, progress.LastProgress{
+		Num:    6,
+		Detail: "Wrote NVCA values: " + nvcaValuesPath(stackPath, upClusterName),
+		At:     time.Now().UTC(),
+	})
 	return nil
 }
 
@@ -598,7 +603,7 @@ func (r *selfHostedUpRun) applyComputePlane(stackPath string, registration upClu
 		Stdout:          r.helmfileStdout,
 		Stderr:          r.helmfileStderr,
 		Ctx:             r.ctx,
-		ExtraEnv:        registration.computePlaneEnv(),
+		ExtraEnv:        append(registration.computePlaneEnv(), "NVCF_NVCA_VALUES_FILE="+nvcaValuesPath(stackPath, upClusterName)),
 	})
 	stopWatcher(cancelWatcher, watcherDone)
 	if err != nil {
@@ -1426,6 +1431,7 @@ func writeRegisterValuesYAML(req registerValuesWriteRequest) error {
 		return fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
 	vals := helmValues{
+		ClusterName:    req.ClusterName,
 		ClusterID:      req.ClusterID,
 		ClusterGroupID: req.ClusterGroupID,
 		NcaID:          req.NCAID,
@@ -1436,9 +1442,18 @@ func writeRegisterValuesYAML(req registerValuesWriteRequest) error {
 	if err != nil {
 		return fmt.Errorf("marshal register values: %w", err)
 	}
-	path := filepath.Join(outDir, req.ClusterName+"-register-values.yaml")
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	for _, path := range []string{legacyRegisterValuesPath(req.StackPath, req.ClusterName), nvcaValuesPath(req.StackPath, req.ClusterName)} {
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
 	}
 	return nil
+}
+
+func legacyRegisterValuesPath(stackPath, clusterName string) string {
+	return filepath.Join(stackPath, "out", clusterName+"-register-values.yaml")
+}
+
+func nvcaValuesPath(stackPath, clusterName string) string {
+	return filepath.Join(stackPath, "out", clusterName+"-nvca-values.yaml")
 }

@@ -186,7 +186,7 @@ func runSelfHostedInstall(c *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(c.ErrOrStderr(), ">>> Cluster registered: clusterId=%s clusterGroupId=%s\n", resp.ClusterID, resp.ClusterGroupID)
 
-	endpoints := resolveRegisterEndpointValues(selfHostedEnv, selfHostedControlPlaneContext, selfHostedComputePlaneContext, icmsURL, selfHostedNATSURL)
+	endpoints := resolveNVCAEndpointValues(selfHostedEnv, selfHostedControlPlaneContext, selfHostedComputePlaneContext, icmsURL, selfHostedNATSURL)
 	if err := writeRegisterValuesYAML(registerValuesWriteRequest{
 		StackPath:      resolved.Path,
 		ClusterName:    installClusterName,

@@ -538,6 +538,7 @@ func registeredClusterIDs(resp *client.RegisterClusterResponse) (clusterGroupID,
 // only knob (PSAT vs SPIRE) and the chart's `selfManaged:` block already
 // houses other self-managed-specific fields like `nvcaVersion`.
 type helmValues struct {
+	ClusterName    string            `yaml:"clusterName,omitempty"`
 	ClusterID      string            `yaml:"clusterID"`
 	ClusterGroupID string            `yaml:"clusterGroupID"`
 	NcaID          string            `yaml:"ncaID"`

@@ -64,6 +64,7 @@ func resetComputePlaneFlags(t *testing.T) {
 		computePlaneRegisterClusterName = ""
 		computePlaneRegisterKubeContext = ""
 		computePlaneRegisterRegion = "us-west-1"
+		computePlaneRegisterOutput = ""
 		resolveSelfHostedHelmRuntimeMode = prevRuntimeResolver
 		computePlaneRegisterReachabilityCheck = prevReachabilityCheck
 	})
@@ -72,7 +73,8 @@ func resetComputePlaneFlags(t *testing.T) {
 func TestComputePlaneInstallRequiresValues(t *testing.T) {
 	resetComputePlaneFlags(t)
 
-	rootCmd.SetOut(&bytes.Buffer{})
+	var stdout bytes.Buffer
+	rootCmd.SetOut(&stdout)
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{
 		"self-hosted", "compute-plane", "install",
@@ -234,7 +236,8 @@ func TestComputePlaneRegisterDryRunRunsReachabilityCheck(t *testing.T) {
 		return nil
 	}
 
-	rootCmd.SetOut(&bytes.Buffer{})
+	var stdout bytes.Buffer
+	rootCmd.SetOut(&stdout)
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{
 		"self-hosted", "compute-plane", "register",
@@ -319,6 +322,7 @@ func TestComputePlaneRegisterDryRunStopsOnReachabilityFailure(t *testing.T) {
 func TestComputePlaneRegisterCallsSISAfterValidation(t *testing.T) {
 	resetComputePlaneFlags(t)
 
+	stackDir := writeComputePlaneStack(t)
 	profileFile := writeTestControlPlaneProfile(t, "cp-cluster")
 
 	prevFetcher := fetchClusterIdentity
@@ -348,6 +352,7 @@ func TestComputePlaneRegisterCallsSISAfterValidation(t *testing.T) {
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{
 		"self-hosted", "--icms-url", "https://sis-admin.example.test", "compute-plane", "register",
+		"--stack", stackDir,
 		"--control-plane-profile", profileFile,
 		"--cluster-name", "gpu-a",
 		"--kube-context", "gpu-context",
@@ -370,7 +375,96 @@ func TestComputePlaneRegisterCallsSISAfterValidation(t *testing.T) {
 	assert.Contains(t, out, "clusterID: cluster-id")
 	assert.Contains(t, out, "clusterGroupID: group-id")
 	assert.Contains(t, out, "sisMutation: completed")
-	assert.Contains(t, out, "valuesWrite: skipped")
+	assert.Contains(t, out, "valuesWrite: completed")
+}
+
+func TestComputePlaneRegisterWritesNVCAValuesAndHandoffCommands(t *testing.T) {
+	resetComputePlaneFlags(t)
+
+	stackDir := filepath.Join(t.TempDir(), "stack with space")
+	writeComputePlaneStackAt(t, stackDir)
+	profileFile := writeTestControlPlaneProfile(t, "cp-cluster")
+
+	prevFetcher := fetchClusterIdentity
+	t.Cleanup(func() { fetchClusterIdentity = prevFetcher })
+	fetchClusterIdentity = func(context.Context, string) (string, string, string, error) {
+		return "https://k8s.example/issuer", `{"keys":[{"kid":"key-1"}]}`, "psat", nil
+	}
+
+	fakeCC := &fakeClusterClient{resp: &selfhosted.RegisterResponse{ClusterID: "cluster-id", ClusterGroupID: "group-id"}}
+	prevClientFactory := newClusterClientForSelfHosted
+	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
+	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) {
+		return fakeCC, nil
+	}
+
+	var stdout bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetErr(&bytes.Buffer{})
+	rootCmd.SetArgs([]string{
+		"self-hosted", "compute-plane", "register",
+		"--stack", stackDir,
+		"--control-plane-profile", profileFile,
+		"--cluster-name", "gpu-a",
+		"--kube-context", "gpu-context",
+		"--region", "eu-west-1",
+	})
+
+	require.NoError(t, rootCmd.Execute())
+
+	valuesPath := filepath.Join(stackDir, "out", "gpu-a-nvca-values.yaml")
+	body, err := os.ReadFile(valuesPath)
+	require.NoError(t, err)
+	values := string(body)
+	assert.Contains(t, values, "clusterName: gpu-a")
+	assert.Contains(t, values, "clusterID: cluster-id")
+	assert.Contains(t, values, "clusterGroupID: group-id")
+	assert.Contains(t, values, "ncaID: nvcf-default")
+	assert.Contains(t, values, "region: eu-west-1")
+	assert.Contains(t, values, "icmsServiceURL: https://sis.example.test")
+	assert.Contains(t, values, "revalServiceURL: https://reval.example.test")
+	assert.Contains(t, values, "natsURL: tls://nats.example.test:4222")
+
+	out := stdout.String()
+	assert.Contains(t, out, "valuesPath: "+valuesPath)
+	assert.Contains(t, out, "helm upgrade --install nvca-operator nvcf/helm-nvca-operator --version 1.11.1")
+	assert.Contains(t, out, "--values "+shellQuote(valuesPath))
+	assert.Contains(t, out, shellCommand("nvcf", "self-hosted", "compute-plane", "install", "--stack", stackDir, "--values", valuesPath, "--kube-context", "gpu-context"))
+}
+
+func TestComputePlaneRegisterUsesDefaultStackForValuesHandoff(t *testing.T) {
+	resetComputePlaneFlags(t)
+
+	stackDir := writeComputePlaneStack(t)
+	t.Setenv("NVCF_CLI_DEFAULT_STACK", stackDir)
+	profileFile := writeTestControlPlaneProfile(t, "cp-cluster")
+
+	prevFetcher := fetchClusterIdentity
+	t.Cleanup(func() { fetchClusterIdentity = prevFetcher })
+	fetchClusterIdentity = func(context.Context, string) (string, string, string, error) {
+		return "https://k8s.example/issuer", `{"keys":[]}`, "psat", nil
+	}
+
+	fakeCC := &fakeClusterClient{resp: &selfhosted.RegisterResponse{ClusterID: "cluster-id", ClusterGroupID: "group-id"}}
+	prevClientFactory := newClusterClientForSelfHosted
+	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
+	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) {
+		return fakeCC, nil
+	}
+
+	var stdout bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetErr(&bytes.Buffer{})
+	rootCmd.SetArgs([]string{
+		"self-hosted", "compute-plane", "register",
+		"--control-plane-profile", profileFile,
+		"--cluster-name", "gpu-a",
+	})
+
+	require.NoError(t, rootCmd.Execute())
+	valuesPath := filepath.Join(stackDir, "out", "gpu-a-nvca-values.yaml")
+	assert.FileExists(t, valuesPath)
+	assert.NotContains(t, stdout.String(), "--stack")
 }
 
 func TestComputePlaneRegisterStopsBeforeSISOnReachabilityFailure(t *testing.T) {
@@ -458,4 +552,21 @@ func writeTestControlPlaneProfile(t *testing.T, controlPlaneCluster string) stri
 		},
 	}))
 	return path
+}
+
+func writeComputePlaneStack(t *testing.T) string {
+	t.Helper()
+	return writeComputePlaneStackAt(t, t.TempDir())
+}
+
+func writeComputePlaneStackAt(t *testing.T, stackDir string) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(stackDir, "helmfile.d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stackDir, "helmfile-nvca-operator.yaml.gotmpl"), []byte(`
+releases:
+  - name: nvca-operator
+    chart: nvcf/helm-nvca-operator
+    version: 1.11.1
+`), 0o644))
+	return stackDir
 }

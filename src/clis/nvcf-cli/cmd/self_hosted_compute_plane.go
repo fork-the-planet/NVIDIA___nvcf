@@ -30,6 +30,7 @@ import (
 	"nvcf-cli/internal/client"
 	"nvcf-cli/internal/selfhosted"
 	"nvcf-cli/internal/selfhosted/controlplaneprofile"
+	"nvcf-cli/internal/selfhosted/nvca"
 	"nvcf-cli/internal/selfhosted/reachability"
 )
 
@@ -43,6 +44,7 @@ var (
 	computePlaneRegisterClusterName string
 	computePlaneRegisterKubeContext string
 	computePlaneRegisterRegion      string
+	computePlaneRegisterOutput      string
 )
 
 var selfHostedComputePlaneCmd = &cobra.Command{
@@ -83,6 +85,7 @@ func init() {
 	selfHostedComputePlaneRegisterCmd.Flags().StringVar(&computePlaneRegisterClusterName, "cluster-name", "", "Compute-plane cluster name")
 	selfHostedComputePlaneRegisterCmd.Flags().StringVar(&computePlaneRegisterKubeContext, "kube-context", "", "kubeconfig context for the compute-plane cluster")
 	selfHostedComputePlaneRegisterCmd.Flags().StringVar(&computePlaneRegisterRegion, "region", "us-west-1", "Compute-plane cluster region")
+	selfHostedComputePlaneRegisterCmd.Flags().StringVar(&computePlaneRegisterOutput, "output", "", "Output path for generated nvca-operator values")
 }
 
 func runSelfHostedComputePlaneInstall(c *cobra.Command, _ []string) error {
@@ -228,8 +231,13 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 	}
 
 	cp := validation.Profile.ControlPlane
+	var handoff *computePlaneRegisterHandoff
 	var registration *selfhosted.RegisterResponse
 	if !computePlaneRegisterDryRun {
+		handoff, err = prepareComputePlaneRegisterHandoff(c, computePlaneRegisterClusterName)
+		if err != nil {
+			return err
+		}
 		cc, err := newClusterClientForSelfHosted(registrationICMSURL)
 		if err != nil {
 			return fmt.Errorf("constructing cluster client: %w", err)
@@ -245,6 +253,9 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 		})
 		if err != nil {
 			return fmt.Errorf("cluster register: %w", err)
+		}
+		if err := writeComputePlaneNVCAValues(handoff.ValuesPath, computePlaneRegisterClusterName, cp.NCAID, computePlaneRegisterRegion, identitySource, registration, selected.Endpoints); err != nil {
+			return err
 		}
 	}
 
@@ -265,10 +276,24 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "clusterID: %s\n", registration.ClusterID)
 		fmt.Fprintf(out, "clusterGroupID: %s\n", registration.ClusterGroupID)
 		fmt.Fprintln(out, "sisMutation: completed")
+		fmt.Fprintf(out, "valuesPath: %s\n", handoff.ValuesPath)
+		fmt.Fprintln(out, "valuesWrite: completed")
+		fmt.Fprintln(out, "helmCommand:")
+		fmt.Fprintf(out, "  %s\n", shellCommand("helm", "upgrade", "--install", "nvca-operator", handoff.Chart, "--version", handoff.Version, "--namespace", "nvca-operator", "--create-namespace", "--values", handoff.ValuesPath))
+		fmt.Fprintln(out, "computePlaneInstallCommand:")
+		installArgs := []string{"nvcf", "self-hosted", "compute-plane", "install"}
+		if handoff.StackArg != "" {
+			installArgs = append(installArgs, "--stack", handoff.StackArg)
+		}
+		installArgs = append(installArgs, "--values", handoff.ValuesPath)
+		if computePlaneRegisterKubeContext != "" {
+			installArgs = append(installArgs, "--kube-context", computePlaneRegisterKubeContext)
+		}
+		fmt.Fprintf(out, "  %s\n", shellCommand(installArgs...))
 	} else {
 		fmt.Fprintln(out, "sisMutation: skipped")
+		fmt.Fprintln(out, "valuesWrite: skipped")
 	}
-	fmt.Fprintln(out, "valuesWrite: skipped")
 	return nil
 }
 
@@ -316,4 +341,113 @@ func loadControlPlaneProfileForComputeRegister(path, clusterName string) (*contr
 		return nil, selfhosted.ControlPlaneProfileEndpointScopeSelection{}, err
 	}
 	return validation, selected, nil
+}
+
+type computePlaneRegisterHandoff struct {
+	StackArg   string
+	StackPath  string
+	ValuesPath string
+	Chart      string
+	Version    string
+}
+
+func prepareComputePlaneRegisterHandoff(c *cobra.Command, clusterName string) (*computePlaneRegisterHandoff, error) {
+	resolved, err := selfhosted.ResolveStack(c.Context(), selfhosted.StackOptions{
+		Source:        selfHostedStack,
+		BuiltInOCIRef: builtInStackOCI(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	valuesPath := computePlaneRegisterOutput
+	if valuesPath == "" {
+		valuesPath = filepath.Join(resolved.Path, "out", clusterName+"-nvca-values.yaml")
+	} else {
+		valuesPath, err = filepath.Abs(valuesPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolving output path: %w", err)
+		}
+	}
+	chart, version, err := computePlaneChartFromStack(resolved.Path)
+	if err != nil {
+		return nil, err
+	}
+	return &computePlaneRegisterHandoff{
+		StackArg:   selfHostedStack,
+		StackPath:  resolved.Path,
+		ValuesPath: valuesPath,
+		Chart:      chart,
+		Version:    version,
+	}, nil
+}
+
+func writeComputePlaneNVCAValues(path, clusterName, ncaID, region, identitySource string, registration *selfhosted.RegisterResponse, endpoints controlplaneprofile.EndpointScope) error {
+	return nvca.WriteFile(path, nvca.Values{
+		ClusterName:    clusterName,
+		ClusterID:      registration.ClusterID,
+		ClusterGroupID: registration.ClusterGroupID,
+		NCAID:          ncaID,
+		Region:         region,
+		SelfManaged: nvca.SelfManagedValues{
+			IdentitySource:  identitySource,
+			ICMSServiceURL:  endpoints.ICMSURL,
+			ReValServiceURL: endpoints.ReValURL,
+			NATSURL:         endpoints.NATSURL,
+		},
+	})
+}
+
+func computePlaneChartFromStack(stackPath string) (string, string, error) {
+	for _, rel := range []string{"helmfile-nvca-operator.yaml.gotmpl", "helmfile.d/04-worker.yaml.gotmpl"} {
+		path := filepath.Join(stackPath, rel)
+		body, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", "", fmt.Errorf("reading compute-plane helmfile: %w", err)
+		}
+		chart, version := parseComputePlaneChart(string(body))
+		if chart != "" && version != "" {
+			return chart, version, nil
+		}
+	}
+	return "", "", fmt.Errorf("compute-plane chart reference not found in stack")
+}
+
+func parseComputePlaneChart(body string) (string, string) {
+	var chart, version string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "chart:") && chart == "":
+			chart = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "chart:")), "\"'")
+		case strings.HasPrefix(line, "version:") && version == "":
+			version = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "version:")), "\"'")
+		}
+	}
+	return chart, version
+}
+
+func shellCommand(args ...string) string {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(arg string) string {
+	if arg == "" {
+		return "''"
+	}
+	if strings.IndexFunc(arg, func(r rune) bool {
+		return !(r == '-' || r == '_' || r == '.' || r == '/' || r == ':' || r == '@' || r == '=' ||
+			(r >= '0' && r <= '9') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= 'a' && r <= 'z'))
+	}) == -1 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
 }

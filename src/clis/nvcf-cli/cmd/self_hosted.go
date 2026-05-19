@@ -77,6 +77,9 @@ const (
 	localControlPlaneDomainDefault = "nvcf-control-plane.test"
 	localControlPlaneHTTPPort      = "8080"
 	localControlPlaneNATSPort      = "4222"
+	localInClusterICMSURL          = "http://api.sis.svc.cluster.local:8080"
+	localInClusterReValURL         = "http://reval.nvcf.svc.cluster.local:8080"
+	localInClusterNATSURL          = "nats://nats.nats-system.svc.cluster.local:4222"
 )
 
 func init() {
@@ -274,6 +277,21 @@ func resolveRegisterEndpointValues(env, controlCtx, computeCtx, icmsURL, natsURL
 		ReValServiceURL: deriveSiblingHTTPServiceURL(icmsURL, "reval"),
 		NATSURL:         resolveNATSURL(natsURLOverride, icmsURL),
 	}
+}
+
+func resolveNVCAEndpointValues(env, controlCtx, computeCtx, icmsURL, natsURLOverride string) registerEndpointValues {
+	if strings.EqualFold(env, "local") && kubectx.SelectMode(controlCtx, computeCtx) == kubectx.ModeSingle {
+		natsURL := localInClusterNATSURL
+		if natsURLOverride != "" || os.Getenv("NVCF_NATS_URL") != "" {
+			natsURL = resolveNATSURL(natsURLOverride, localInClusterICMSURL)
+		}
+		return registerEndpointValues{
+			ICMSServiceURL:  localInClusterICMSURL,
+			ReValServiceURL: localInClusterReValURL,
+			NATSURL:         natsURL,
+		}
+	}
+	return resolveRegisterEndpointValues(env, controlCtx, computeCtx, icmsURL, natsURLOverride)
 }
 
 func localSplitHTTPServiceURL(rawURL, service string) string {

@@ -218,9 +218,9 @@ func TestSelfHostedInstall_ComputePlane_RegistersAndRenders(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(registerValues), "clusterID: id-A")
 	assert.Contains(t, string(registerValues), "clusterGroupID: grp-A")
-	assert.Contains(t, string(registerValues), "icmsServiceURL: http://sis.localhost:8080")
-	assert.Contains(t, string(registerValues), "revalServiceURL: http://reval.localhost:8080")
-	assert.Contains(t, string(registerValues), "natsURL: nats://nats.localhost:4222")
+	assert.Contains(t, string(registerValues), "icmsServiceURL: http://api.sis.svc.cluster.local:8080")
+	assert.Contains(t, string(registerValues), "revalServiceURL: http://reval.nvcf.svc.cluster.local:8080")
+	assert.Contains(t, string(registerValues), "natsURL: nats://nats.nats-system.svc.cluster.local:4222")
 }
 
 func TestSelfHostedInstall_ComputePlane_LocalSplitWritesExternalControlPlaneEndpoints(t *testing.T) {
