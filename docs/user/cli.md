@@ -457,7 +457,7 @@ For a single cluster, omit both context flags.
   --inference-url "/" \
   --inference-port 8000 \
   --function-type LLM \
-  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M"
 ```
 
 All `function create` flags:
@@ -521,7 +521,7 @@ LLM functions use `functionType: "LLM"` and define model routing metadata under 
     {
       "name": "dummy-model",
       "llmConfig": {
-        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
         "tokenRateLimit": "1000-M"
       }
@@ -531,6 +531,7 @@ LLM functions use `functionType: "LLM"` and define model routing metadata under 
 ```
 
 For LLM models, `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
+Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`.
 
 **Deploy Function**
 
@@ -688,6 +689,13 @@ curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
 ```
 
 Use the OpenAI `model` value `<function-id>/<model-name>` for LLM invocation requests.
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/embeddings" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<function-id>/dummy-model","input":"NVCF embeddings check"}'
+```
 
 For raw HTTP invocation, HTTP streaming, gRPC metadata, and invocation error
 behavior, see [Generic HTTP Function Invocation](./generic-http-function-invocation.md)

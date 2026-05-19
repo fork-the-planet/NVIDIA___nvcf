@@ -135,8 +135,15 @@ func newRateLimiter(cfg *config.Config, e *echo.Echo) (ratelimit.RateLimiter, er
 		return nil, fmt.Errorf("start olric node: %w", err)
 	}
 
+	olricCollector, err := telemetry.NewOlricCollector(node.Client, node.SelfAddr)
+	if err != nil {
+		util.ShutdownOlricNode(ctx, node, cfg.Olric.ShutdownTimeout)
+		return nil, fmt.Errorf("start olric metrics collector: %w", err)
+	}
+
 	syncRuntime, err := ratelimitsync.NewPublisherRuntime(cfg)
 	if err != nil {
+		olricCollector.Stop()
 		util.ShutdownOlricNode(ctx, node, cfg.Olric.ShutdownTimeout)
 		return nil, err
 	}
@@ -147,18 +154,22 @@ func newRateLimiter(cfg *config.Config, e *echo.Echo) (ratelimit.RateLimiter, er
 		ratelimit.WithSynchronizer(syncRuntime.Synchronizer),
 	)
 	if err != nil {
+		olricCollector.Stop()
 		syncRuntime.Stop()
 		util.ShutdownOlricNode(ctx, node, cfg.Olric.ShutdownTimeout)
 		return nil, err
 	}
 
 	if err := syncRuntime.Start(); err != nil {
+		olricCollector.Stop()
 		syncRuntime.Stop()
 		util.ShutdownOlricNode(ctx, node, cfg.Olric.ShutdownTimeout)
 		return nil, err
 	}
 
 	e.Server.RegisterOnShutdown(func() {
+		olricCollector.Stop()
+
 		// The sync synchronizer's Stop() blocks on the publisher loop draining
 		// its in-flight publish goroutines; bound it so a stuck remote cannot
 		// delay the gateway's shutdown indefinitely. We reuse the Olric

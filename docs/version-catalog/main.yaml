@@ -12,11 +12,11 @@ registries:
     namespace: 0833294136851237/nvcf-ncp-staging
 stack:
   name: nvcf-self-managed-stack
-  version: 0.6.0-rc.29
+  version: 0.6.0-rc.32
   registry: staging
   gitlab_project_id: 182049
   package_name: ncp-deploy
-  artifacts_file: artifacts-0.6.0-rc.29.txt
+  artifacts_file: artifacts-0.6.0-rc.32.txt
 artifacts:
   - name: admin-token-issuer-proxy
     type: image
@@ -25,7 +25,7 @@ artifacts:
   - name: alpine-k8s
     type: image
     registry: staging
-    version: 1.30.12
+    version: 1.30.14
   - name: bitnami-cassandra
     type: image
     registry: staging
@@ -141,7 +141,7 @@ artifacts:
   - name: nvcf-gateway-routes
     type: chart
     registry: staging
-    version: 1.11.0
+    version: 1.12.0
   - name: nvcf-grpc-proxy
     type: image
     registry: staging
@@ -207,7 +207,7 @@ supplemental_artifacts:
     type: image
     registry: staging
     repository_name: stargate
-    version: 0.3.0
+    version: 0.4.0
   - name: nvcf_worker_utils
     type: image
     registry: staging

@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "telemetry",
     srcs = [
         "metrics.go",
+        "olric_collector.go",
         "runtime.go",
         "telemetry.go",
     ],
@@ -26,12 +27,14 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/must",
+        "@com_github_olric_data_olric//:olric",
+        "@com_github_olric_data_olric//stats",
         "@com_github_rs_zerolog//:zerolog",
         "@com_github_rs_zerolog//log",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel//propagation",
-        "@io_opentelemetry_go_otel//semconv/v1.37.0:v1_37_0",
+        "@io_opentelemetry_go_otel//semconv/v1.40.0:v1_40_0",
         "@io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetricgrpc//:otlpmetricgrpc",
         "@io_opentelemetry_go_otel_exporters_otlp_otlptrace_otlptracegrpc//:otlptracegrpc",
         "@io_opentelemetry_go_otel_exporters_stdout_stdouttrace//:stdouttrace",
@@ -47,4 +50,19 @@ alias(
     name = "go_default_library",
     actual = ":telemetry",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "telemetry_test",
+    srcs = ["olric_collector_test.go"],
+    deps = [
+        ":telemetry",
+        "@com_github_olric_data_olric//:olric",
+        "@com_github_olric_data_olric//stats",
+        "@com_github_stretchr_testify//require",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel_metric//noop",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+    ],
 )

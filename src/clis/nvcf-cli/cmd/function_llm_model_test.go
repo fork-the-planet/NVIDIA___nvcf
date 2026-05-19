@@ -32,7 +32,7 @@ func TestCreateConfigParsesLLMConfigFromJSON(t *testing.T) {
 		"models": [{
 			"name": "dummy-model",
 			"llmConfig": {
-				"uris": ["/v1/chat/completions", "/v1/responses"],
+				"uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
 				"routingMethod": "round_robin",
 				"tokenRateLimit": "1000-M"
 			}
@@ -49,9 +49,7 @@ func TestCreateConfigParsesLLMConfigFromJSON(t *testing.T) {
 	if model.LLMConfig == nil {
 		t.Fatal("llmConfig is nil")
 	}
-	if got := model.LLMConfig.URIs; len(got) != 2 || got[0] != "/v1/chat/completions" || got[1] != "/v1/responses" {
-		t.Fatalf("uris = %#v, want chat/responses", got)
-	}
+	assertStringSlice(t, model.LLMConfig.URIs, []string{"/v1/chat/completions", "/v1/responses", "/v1/embeddings"})
 	if got := stringValue(model.LLMConfig.RoutingMethod); got != "round_robin" {
 		t.Fatalf("routingMethod = %q, want round_robin", got)
 	}
@@ -63,7 +61,7 @@ func TestCreateConfigParsesLLMConfigFromJSON(t *testing.T) {
 func TestParseLLMModelString(t *testing.T) {
 	t.Parallel()
 
-	model, err := parseLLMModelString("name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=power_of_two,tokenRateLimit=1000-M")
+	model, err := parseLLMModelString("name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=power_of_two,tokenRateLimit=1000-M")
 	if err != nil {
 		t.Fatalf("parse llm model: %v", err)
 	}
@@ -74,9 +72,7 @@ func TestParseLLMModelString(t *testing.T) {
 	if model.LLMConfig == nil {
 		t.Fatal("llmConfig is nil")
 	}
-	if got := model.LLMConfig.URIs; len(got) != 2 || got[0] != "/v1/chat/completions" || got[1] != "/v1/responses" {
-		t.Fatalf("uris = %#v, want chat/responses", got)
-	}
+	assertStringSlice(t, model.LLMConfig.URIs, []string{"/v1/chat/completions", "/v1/responses", "/v1/embeddings"})
 	if got := stringValue(model.LLMConfig.RoutingMethod); got != "power_of_two" {
 		t.Fatalf("routingMethod = %q, want power_of_two", got)
 	}
@@ -99,7 +95,7 @@ func TestLoadCreateConfigAppendsLLMModelFlag(t *testing.T) {
 
 	cmd := &cobra.Command{}
 	cmd.Flags().StringArray("llm-model", nil, "")
-	if err := cmd.Flags().Set("llm-model", "name=dummy-model,uris=/v1/chat/completions,routingMethod=round_robin"); err != nil {
+	if err := cmd.Flags().Set("llm-model", "name=dummy-model,uris=/v1/chat/completions|/v1/embeddings,routingMethod=round_robin"); err != nil {
 		t.Fatalf("set llm-model flag: %v", err)
 	}
 	createFlags = struct {
@@ -141,7 +137,7 @@ func TestLoadCreateConfigAppendsLLMModelFlag(t *testing.T) {
 		metricsTelemetryId string
 		tracesTelemetryId  string
 	}{
-		llmModels: []string{"name=dummy-model,uris=/v1/chat/completions,routingMethod=round_robin"},
+		llmModels: []string{"name=dummy-model,uris=/v1/chat/completions|/v1/embeddings,routingMethod=round_robin"},
 	}
 
 	config, err := loadCreateConfig(cmd)
@@ -159,6 +155,7 @@ func TestLoadCreateConfigAppendsLLMModelFlag(t *testing.T) {
 	if got := stringValue(model.LLMConfig.RoutingMethod); got != "round_robin" {
 		t.Fatalf("routingMethod = %q, want round_robin", got)
 	}
+	assertStringSlice(t, model.LLMConfig.URIs, []string{"/v1/chat/completions", "/v1/embeddings"})
 }
 
 func stringValue(value *string) string {
@@ -166,4 +163,17 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func assertStringSlice(t *testing.T, got []string, want []string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("uris = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("uris = %#v, want %#v", got, want)
+		}
+	}
 }

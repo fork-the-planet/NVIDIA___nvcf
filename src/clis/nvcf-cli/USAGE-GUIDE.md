@@ -751,7 +751,7 @@ curl -X POST https://api.nvcf.nvidia.com/v2/nvcf/accounts/nvcf-default/registry-
   --inference-port 8000 \
   --inference-url / \
   --function-type LLM \
-  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M"
 ```
 
 **Secrets Format:**
@@ -802,7 +802,7 @@ curl -X POST https://api.nvcf.nvidia.com/v2/nvcf/accounts/nvcf-default/registry-
     {
       "name": "dummy-model",
       "llmConfig": {
-        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
         "tokenRateLimit": "1000-M"
       }
@@ -814,6 +814,7 @@ curl -X POST https://api.nvcf.nvidia.com/v2/nvcf/accounts/nvcf-default/registry-
 For LLM models, `llmConfig.routingMethod` accepts the API/auth spellings
 `round_robin`, `power_of_two`, or `random`. The CLI validates these values
 before sending the create request.
+Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`.
 
 ### 5. List Functions
 
@@ -957,6 +958,13 @@ curl -sS -X POST "https://llm.invocation.${INVOCATION_DOMAIN}/v1/chat/completion
 ```
 
 Use the OpenAI `model` value `${FUNCTION_ID}/${MODEL_NAME}` for LLM invocation requests.
+
+```bash
+curl -sS -X POST "https://llm.invocation.${INVOCATION_DOMAIN}/v1/embeddings" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"${FUNCTION_ID}/${MODEL_NAME}\",\"input\":\"NVCF embeddings check\"}"
+```
 
 #### Sample Invocation JSON (`examples/invoke-function.json`)
 ```json

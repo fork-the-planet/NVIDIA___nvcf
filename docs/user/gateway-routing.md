@@ -309,7 +309,7 @@ These routes attach to the Gateway you prepared in [Gateway quickstart](./gatewa
 | API Keys | `api-keys.<domain>` | 80 | Token generation and API key management |
 | NVCF API | `api.<domain>` | 80 | Function management (create, deploy, delete) |
 | Invocation | `invocation.<domain>`, `*.invocation.<domain>` | 80 | Function invocation (wildcard for dynamic routing) |
-| LLM Invocation | `llm.invocation.<domain>` | 80 | OpenAI-compatible LLM invocation routes such as `/v1/chat/completions` |
+| LLM Invocation | `llm.invocation.<domain>` | 80 | OpenAI-compatible LLM invocation routes such as `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` |
 | gRPC | N/A (TCP routing, no hostname matching) | 10081 | gRPC function invocations |
 
 <Note>
@@ -318,7 +318,7 @@ The `<domain>` is your Gateway's load balancer address (e.g., `a1b2c3d4.us-west-
 </Note>
 
 <Tip>
-When the LLM invocation route is enabled, send OpenAI-compatible requests to `https://llm.invocation.<domain>/v1/chat/completions` and set `model` to `<function-id>/<model-name>`.
+When the LLM invocation route is enabled, send OpenAI-compatible requests to supported paths under `https://llm.invocation.<domain>/v1/...` and set `model` to `<function-id>/<model-name>`.
 
 </Tip>
 

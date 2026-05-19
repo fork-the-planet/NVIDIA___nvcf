@@ -609,7 +609,7 @@ export NVCF_TOKEN="nvapi-your-function-creation-token"
   --inference-url "/" \
   --inference-port 8000 \
   --function-type "LLM" \
-  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M"
 ```
 
 **Required flags:**
@@ -643,7 +643,7 @@ export NVCF_TOKEN="nvapi-your-function-creation-token"
     {
       "name": "dummy-model",
       "llmConfig": {
-        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
         "tokenRateLimit": "1000-M"
       }
@@ -660,6 +660,7 @@ export NVCF_TOKEN="nvapi-your-function-creation-token"
 key/value fields. Separate multiple URIs with `|`. Valid routing
 methods are `round_robin`, `power_of_two`, and `random`; the CLI validates and
 sends these API/auth spellings in the create request.
+Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`.
 
 #### **Deploy a Function** *Uses `NVCF_TOKEN` (with `NVCF_API_KEY` fallback)*
 
@@ -813,6 +814,13 @@ curl -sS -X POST "https://llm.invocation.${INVOCATION_DOMAIN}/v1/chat/completion
 ```
 
 The OpenAI `model` value must use `${FUNCTION_ID}/${MODEL_NAME}`.
+
+```bash
+curl -sS -X POST "https://llm.invocation.${INVOCATION_DOMAIN}/v1/embeddings" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"${FUNCTION_ID}/${MODEL_NAME}\",\"input\":\"NVCF embeddings check\"}"
+```
 
 **New Features:**
 - **Smart Context**: Uses saved function ID/version automatically

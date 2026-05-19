@@ -32,7 +32,7 @@ Use an LLM function when the deployed workload exposes OpenAI-compatible model r
     {
       "name": "dummy-model",
       "llmConfig": {
-        "uris": ["/v1/chat/completions", "/v1/responses"],
+        "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
         "tokenRateLimit": "1000-M"
       }
@@ -50,10 +50,10 @@ The same configuration can be provided with CLI flags:
   --inference-url "/" \
   --inference-port 8000 \
   --function-type LLM \
-  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M"
 ```
 
-`llmConfig.uris` lists the OpenAI-compatible paths handled by the model. `routingMethod` accepts `round_robin`, `power_of_two`, or `random`. `tokenRateLimit` uses the same rate limit format as function-level rate limits.
+`llmConfig.uris` lists the OpenAI-compatible paths handled by the model. Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`. `routingMethod` accepts `round_robin`, `power_of_two`, or `random`. `tokenRateLimit` uses the same rate limit format as function-level rate limits.
 
 After deployment, invoke chat completions through the LLM invocation route:
 
@@ -74,6 +74,18 @@ curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
 ```
 
 The OpenAI `model` value uses the format `<function-id>/<model-name>` so the gateway can select the target function and model.
+
+Embeddings use the same model format:
+
+```bash
+curl -sS -X POST "https://llm.invocation.<domain>/v1/embeddings" \
+  -H "Authorization: Bearer ${NVCF_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<function-id>/dummy-model",
+    "input": "NVCF embeddings check"
+  }'
+```
 
 ### Session Stickiness
 

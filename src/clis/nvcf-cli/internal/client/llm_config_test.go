@@ -29,7 +29,7 @@ func TestArtifactDtoMarshalsLLMConfig(t *testing.T) {
 	payload, err := json.Marshal(ArtifactDto{
 		Name: "dummy-model",
 		LLMConfig: &LLMConfigDto{
-			URIs:           []string{"/v1/chat/completions"},
+			URIs:           []string{"/v1/chat/completions", "/v1/responses", "/v1/embeddings"},
 			RoutingMethod:  stringPtr("round_robin"),
 			TokenRateLimit: stringPtr("1000-M"),
 		},
@@ -42,7 +42,7 @@ func TestArtifactDtoMarshalsLLMConfig(t *testing.T) {
 	for _, want := range []string{
 		`"name":"dummy-model"`,
 		`"llmConfig"`,
-		`"uris":["/v1/chat/completions"]`,
+		`"uris":["/v1/chat/completions","/v1/responses","/v1/embeddings"]`,
 		`"routingMethod":"round_robin"`,
 		`"tokenRateLimit":"1000-M"`,
 	} {

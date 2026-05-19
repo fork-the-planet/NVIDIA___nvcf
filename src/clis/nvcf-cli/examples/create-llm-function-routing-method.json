@@ -16,7 +16,7 @@
     {
       "name": "dummy-model",
       "llmConfig": {
-        "uris": ["/v1/chat/completions"],
+        "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
         "tokenRateLimit": "1000-M"
       }

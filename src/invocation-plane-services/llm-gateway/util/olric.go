@@ -42,6 +42,7 @@ type OlricNode struct {
 	DB       *olric.Olric
 	Client   *olric.EmbeddedClient
 	DMap     olric.DMap
+	SelfAddr string
 	Shutdown func(ctx context.Context) error
 }
 
@@ -55,9 +56,60 @@ type OlricNode struct {
 // returned Shutdown function to stop it.
 func NewOlricNode(ctx context.Context, cfg config.OlricConfig) (*OlricNode, error) {
 	log := telemetry.Logger(ctx)
+	oc, discoveryMode, startupTimeout, shutdownTimeout, err := newOlricConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 
+	ready := make(chan struct{})
+	oc.Started = func() {
+		close(ready)
+	}
+
+	db, err := olric.New(oc)
+	if err != nil {
+		return nil, fmt.Errorf("create olric node: %w", err)
+	}
+
+	if err := waitForOlricReady(ctx, db, ready, startupTimeout, shutdownTimeout); err != nil {
+		return nil, err
+	}
+
+	log.Info().
+		Str("bind_addr", oc.BindAddr).
+		Int("bind_port", oc.BindPort).
+		Str("peers", strings.Join(oc.Peers, ",")).
+		Str("discovery", discoveryMode).
+		Msg("olric node ready")
+
+	client := db.NewEmbeddedClient()
+
+	dm, err := newOlricDMap(ctx, db, client, cfg.DMapName, shutdownTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	return &OlricNode{
+		DB:       db,
+		Client:   client,
+		DMap:     dm,
+		SelfAddr: resolveOlricSelfAddr(ctx, client, oc),
+		Shutdown: newOlricShutdownFunc(client, db),
+	}, nil
+}
+
+func newOlricConfig(cfg config.OlricConfig) (*olricconfig.Config, string, time.Duration, time.Duration, error) {
 	oc := olricconfig.New(defaultEnv(cfg.Environment))
+	applyOlricConfigOverrides(oc, cfg)
 
+	discoveryMode, err := configureDiscovery(oc, cfg)
+	if err != nil {
+		return nil, "", 0, 0, fmt.Errorf("configure olric discovery: %w", err)
+	}
+	return oc, discoveryMode, olricStartupTimeout(cfg), olricShutdownTimeout(cfg), nil
+}
+
+func applyOlricConfigOverrides(oc *olricconfig.Config, cfg config.OlricConfig) {
 	if cfg.BindAddr != "" {
 		oc.BindAddr = cfg.BindAddr
 	}
@@ -70,10 +122,6 @@ func NewOlricNode(ctx context.Context, cfg config.OlricConfig) (*OlricNode, erro
 	if cfg.MemberlistBindPort != 0 {
 		oc.MemberlistConfig.BindPort = cfg.MemberlistBindPort
 		oc.MemberlistConfig.AdvertisePort = cfg.MemberlistBindPort
-	}
-	discoveryMode, err := configureDiscovery(oc, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("configure olric discovery: %w", err)
 	}
 	if cfg.ReplicaCount > 0 {
 		oc.ReplicaCount = cfg.ReplicaCount
@@ -90,31 +138,29 @@ func NewOlricNode(ctx context.Context, cfg config.OlricConfig) (*OlricNode, erro
 	if cfg.LogLevel != "" {
 		oc.LogLevel = cfg.LogLevel
 	}
+}
 
-	startupTimeout := cfg.StartupTimeout
-	if startupTimeout <= 0 {
-		startupTimeout = 15 * time.Second
+func olricStartupTimeout(cfg config.OlricConfig) time.Duration {
+	if cfg.StartupTimeout > 0 {
+		return cfg.StartupTimeout
 	}
-	shutdownTimeout := cfg.ShutdownTimeout
-	if shutdownTimeout <= 0 {
-		shutdownTimeout = DefaultOlricShutdownTimeout
-	}
+	return 15 * time.Second
+}
 
-	ready := make(chan struct{})
-	oc.Started = func() {
-		close(ready)
+func olricShutdownTimeout(cfg config.OlricConfig) time.Duration {
+	if cfg.ShutdownTimeout > 0 {
+		return cfg.ShutdownTimeout
 	}
+	return DefaultOlricShutdownTimeout
+}
 
-	db, err := olric.New(oc)
-	if err != nil {
-		return nil, fmt.Errorf("create olric node: %w", err)
-	}
-
-	// Buffered so Start() can always deliver its terminal error without
-	// blocking on a reader. We read from startErr on the startup-failure and
-	// timeout paths; on the happy path the goroutine holds the error until
-	// db.Shutdown unblocks Start, which is fine - the buffered channel
-	// prevents a goroutine leak.
+func waitForOlricReady(
+	ctx context.Context,
+	db *olric.Olric,
+	ready <-chan struct{},
+	startupTimeout time.Duration,
+	shutdownTimeout time.Duration,
+) error {
 	startErr := make(chan error, 1)
 	go func() {
 		startErr <- db.Start()
@@ -122,26 +168,25 @@ func NewOlricNode(ctx context.Context, cfg config.OlricConfig) (*OlricNode, erro
 
 	select {
 	case <-ready:
+		return nil
 	case err := <-startErr:
 		if err == nil {
 			err = fmt.Errorf("olric start returned before node became ready")
 		}
-		return nil, fmt.Errorf("start olric node: %w", err)
+		return fmt.Errorf("start olric node: %w", err)
 	case <-time.After(startupTimeout):
 		shutdownNode(ctx, db, shutdownTimeout)
-		return nil, fmt.Errorf("olric node did not become ready within %s", startupTimeout)
+		return fmt.Errorf("olric node did not become ready within %s", startupTimeout)
 	}
+}
 
-	log.Info().
-		Str("bind_addr", oc.BindAddr).
-		Int("bind_port", oc.BindPort).
-		Str("peers", strings.Join(oc.Peers, ",")).
-		Str("discovery", discoveryMode).
-		Msg("olric node ready")
-
-	client := db.NewEmbeddedClient()
-
-	dmapName := cfg.DMapName
+func newOlricDMap(
+	ctx context.Context,
+	db *olric.Olric,
+	client *olric.EmbeddedClient,
+	dmapName string,
+	shutdownTimeout time.Duration,
+) (olric.DMap, error) {
 	if dmapName == "" {
 		dmapName = "rate-limit"
 	}
@@ -150,19 +195,28 @@ func NewOlricNode(ctx context.Context, cfg config.OlricConfig) (*OlricNode, erro
 		shutdownNode(ctx, db, shutdownTimeout)
 		return nil, fmt.Errorf("create olric dmap %q: %w", dmapName, err)
 	}
+	return dm, nil
+}
 
-	return &OlricNode{
-		DB:     db,
-		Client: client,
-		DMap:   dm,
-		Shutdown: func(shutdownCtx context.Context) error {
-			shutdownLog := telemetry.Logger(shutdownCtx)
-			if err := client.Close(shutdownCtx); err != nil {
-				shutdownLog.Warn().Err(err).Msg("failed to close olric embedded client")
-			}
-			return db.Shutdown(shutdownCtx)
-		},
-	}, nil
+func resolveOlricSelfAddr(ctx context.Context, client *olric.EmbeddedClient, oc *olricconfig.Config) string {
+	selfAddr := fmt.Sprintf("%s:%d", oc.BindAddr, oc.BindPort)
+	bootstrapStats, err := client.Stats(ctx, selfAddr)
+	if err != nil {
+		telemetry.Logger(ctx).Warn().Err(err).Str("fallback_addr", selfAddr).
+			Msg("failed to resolve olric member name from bootstrap stats")
+		return selfAddr
+	}
+	return bootstrapStats.Member.Name
+}
+
+func newOlricShutdownFunc(client *olric.EmbeddedClient, db *olric.Olric) func(context.Context) error {
+	return func(shutdownCtx context.Context) error {
+		shutdownLog := telemetry.Logger(shutdownCtx)
+		if err := client.Close(shutdownCtx); err != nil {
+			shutdownLog.Warn().Err(err).Msg("failed to close olric embedded client")
+		}
+		return db.Shutdown(shutdownCtx)
+	}
 }
 
 // ShutdownOlricNode stops an Olric node with a bounded deadline, logging any

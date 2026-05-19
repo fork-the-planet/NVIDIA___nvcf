@@ -51,7 +51,7 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 			isHelm:     false,
 			validate: func(t *testing.T, c corev1.Container) {
 				assert.Equal(t, LLMWorkerContainerName, c.Name)
-				assert.Equal(t, llmRouterClientImageDefault, c.Image)
+				assert.Equal(t, "nvcr.io/0651155215864979/ncp-dev/stargate-client:0.4.0", c.Image)
 				assert.Equal(t, corev1.PullIfNotPresent, c.ImagePullPolicy)
 
 				assert.Contains(t, c.Args, "--upstream-http-base-url=http://127.0.0.1:8080")
@@ -82,11 +82,11 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 			name: "helm mode with service name",
 			ls:   &LaunchSpecification{},
 			allEnvSet: map[string]string{
-				"STARGATE_ADDRESS":                "stargate.example.com:443",
-				"INFERENCE_PORT":                  "8080",
+				"STARGATE_ADDRESS":                  "stargate.example.com:443",
+				"INFERENCE_PORT":                    "8080",
 				"HELM_CHART_INFERENCE_SERVICE_NAME": "my-inference-svc",
 			},
-			tcfg: TranslateConfig{},
+			tcfg:       TranslateConfig{},
 			instanceID: "inst-789",
 			isHelm:     true,
 			validate: func(t *testing.T, c corev1.Container) {
@@ -97,11 +97,11 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 			name: "helm mode with namespace",
 			ls:   &LaunchSpecification{},
 			allEnvSet: map[string]string{
-				"STARGATE_ADDRESS":                "stargate.example.com:443",
-				"INFERENCE_PORT":                  "8080",
+				"STARGATE_ADDRESS":                  "stargate.example.com:443",
+				"INFERENCE_PORT":                    "8080",
 				"HELM_CHART_INFERENCE_SERVICE_NAME": "my-inference-svc",
 			},
-			tcfg: TranslateConfig{},
+			tcfg:       TranslateConfig{},
 			instanceID: "inst-789",
 			isHelm:     true,
 			validate: func(t *testing.T, c corev1.Container) {
@@ -278,7 +278,7 @@ func TestNewLLMCredentialManagerContainer(t *testing.T) {
 			name: "default credential manager image",
 			allEnvSet: map[string]string{
 				"NVCF_WORKER_TOKEN":   "test-token",
-				"NVCF_FQDN_GRPC":     "grpc.example.com",
+				"NVCF_FQDN_GRPC":      "grpc.example.com",
 				"FUNCTION_ID":         "func-123",
 				"FUNCTION_VERSION_ID": "ver-456",
 				"NCA_ID":              "nca-789",
@@ -304,7 +304,7 @@ func TestNewLLMCredentialManagerContainer(t *testing.T) {
 			name: "env vars are propagated",
 			allEnvSet: map[string]string{
 				"NVCF_WORKER_TOKEN":   "my-token",
-				"NVCF_FQDN_GRPC":     "grpc.test.com",
+				"NVCF_FQDN_GRPC":      "grpc.test.com",
 				"FUNCTION_ID":         "f-001",
 				"FUNCTION_VERSION_ID": "fv-002",
 				"NCA_ID":              "n-003",
