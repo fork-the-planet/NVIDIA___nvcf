@@ -24,6 +24,8 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common"
 )
 
 func TestNewLLMRouterClientContainer(t *testing.T) {
@@ -51,7 +53,8 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 			isHelm:     false,
 			validate: func(t *testing.T, c corev1.Container) {
 				assert.Equal(t, LLMWorkerContainerName, c.Name)
-				assert.Equal(t, "nvcr.io/0651155215864979/ncp-dev/stargate-client:0.4.0", c.Image)
+				assert.Equal(t, "nvcr.io/0651155215864979/ncp-dev/stargate-client:0.4.0", llmRouterClientImageDefault)
+				assert.Equal(t, llmRouterClientImageDefault, c.Image)
 				assert.Equal(t, corev1.PullIfNotPresent, c.ImagePullPolicy)
 
 				assert.Contains(t, c.Args, "--upstream-http-base-url=http://127.0.0.1:8080")
@@ -79,7 +82,7 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 			},
 		},
 		{
-			name: "helm mode with service name",
+			name: "helm mode without namespace uses service name",
 			ls:   &LaunchSpecification{},
 			allEnvSet: map[string]string{
 				"STARGATE_ADDRESS":                  "stargate.example.com:443",
@@ -90,7 +93,7 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 			instanceID: "inst-789",
 			isHelm:     true,
 			validate: func(t *testing.T, c corev1.Container) {
-				assert.Contains(t, c.Args, "--upstream-http-base-url=http://my-inference-svc..svc.cluster.local:8080")
+				assert.Contains(t, c.Args, "--upstream-http-base-url=http://my-inference-svc:8080")
 			},
 		},
 		{
@@ -101,11 +104,15 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 				"INFERENCE_PORT":                    "8080",
 				"HELM_CHART_INFERENCE_SERVICE_NAME": "my-inference-svc",
 			},
-			tcfg:       TranslateConfig{},
+			tcfg: TranslateConfig{
+				TranslateConfig: common.TranslateConfig{
+					Namespace: "my-namespace",
+				},
+			},
 			instanceID: "inst-789",
 			isHelm:     true,
 			validate: func(t *testing.T, c corev1.Container) {
-				assert.Contains(t, c.Args, "--upstream-http-base-url=http://my-inference-svc..svc.cluster.local:8080")
+				assert.Contains(t, c.Args, "--upstream-http-base-url=http://my-inference-svc.my-namespace.svc.cluster.local:8080")
 			},
 		},
 		{

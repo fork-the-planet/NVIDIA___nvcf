@@ -81,7 +81,11 @@ func newLLMRouterClientContainer(
 	svcPort := allEnvSet["INFERENCE_PORT"]
 	if isHelm {
 		svcName := allEnvSet["HELM_CHART_INFERENCE_SERVICE_NAME"]
-		upstreamHttpBaseUrl = fmt.Sprintf("http://%s.%s.svc.cluster.local:%s", svcName, tcfg.Namespace, svcPort)
+		if tcfg.Namespace == "" {
+			upstreamHttpBaseUrl = fmt.Sprintf("http://%s:%s", svcName, svcPort)
+		} else {
+			upstreamHttpBaseUrl = fmt.Sprintf("http://%s.%s.svc.cluster.local:%s", svcName, tcfg.Namespace, svcPort)
+		}
 	} else {
 		upstreamHttpBaseUrl = fmt.Sprintf("http://127.0.0.1:%s", svcPort)
 	}
