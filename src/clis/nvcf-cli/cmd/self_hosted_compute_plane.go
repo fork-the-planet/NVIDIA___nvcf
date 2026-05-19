@@ -27,13 +27,19 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"nvcf-cli/internal/selfhosted"
+	"nvcf-cli/internal/selfhosted/controlplaneprofile"
 )
 
 var (
-	computePlaneInstallValues      string
-	computePlaneInstallKubeContext string
-	computePlaneInstallClusterName string
-	computePlaneInstallNCAID       string
+	computePlaneInstallValues       string
+	computePlaneInstallKubeContext  string
+	computePlaneInstallClusterName  string
+	computePlaneInstallNCAID        string
+	computePlaneRegisterDryRun      bool
+	computePlaneRegisterProfile     string
+	computePlaneRegisterClusterName string
+	computePlaneRegisterKubeContext string
+	computePlaneRegisterRegion      string
 )
 
 var selfHostedComputePlaneCmd = &cobra.Command{
@@ -49,13 +55,27 @@ var selfHostedComputePlaneInstallCmd = &cobra.Command{
 	SilenceUsage: true,
 }
 
+var selfHostedComputePlaneRegisterCmd = &cobra.Command{
+	Use:          "register",
+	Short:        "Register a compute-plane cluster with a self-hosted control plane",
+	RunE:         runSelfHostedComputePlaneRegister,
+	SilenceUsage: true,
+}
+
 func init() {
 	selfHostedCmd.AddCommand(selfHostedComputePlaneCmd)
 	selfHostedComputePlaneCmd.AddCommand(selfHostedComputePlaneInstallCmd)
+	selfHostedComputePlaneCmd.AddCommand(selfHostedComputePlaneRegisterCmd)
 	selfHostedComputePlaneInstallCmd.Flags().StringVar(&computePlaneInstallValues, "values", "", "nvca-operator values file to install")
 	selfHostedComputePlaneInstallCmd.Flags().StringVar(&computePlaneInstallKubeContext, "kube-context", "", "kubeconfig context for the compute-plane cluster")
 	selfHostedComputePlaneInstallCmd.Flags().StringVar(&computePlaneInstallClusterName, "cluster-name", "", "Cluster name override when the values file does not set clusterName")
 	selfHostedComputePlaneInstallCmd.Flags().StringVar(&computePlaneInstallNCAID, "nca-id", "nvcf-default", "NCA ID override when the values file does not set ncaID")
+
+	selfHostedComputePlaneRegisterCmd.Flags().BoolVar(&computePlaneRegisterDryRun, "dry-run", false, "Validate registration inputs without mutating SIS or writing values")
+	selfHostedComputePlaneRegisterCmd.Flags().StringVar(&computePlaneRegisterProfile, "control-plane-profile", "", "Control-plane profile file")
+	selfHostedComputePlaneRegisterCmd.Flags().StringVar(&computePlaneRegisterClusterName, "cluster-name", "", "Compute-plane cluster name")
+	selfHostedComputePlaneRegisterCmd.Flags().StringVar(&computePlaneRegisterKubeContext, "kube-context", "", "kubeconfig context for the compute-plane cluster")
+	selfHostedComputePlaneRegisterCmd.Flags().StringVar(&computePlaneRegisterRegion, "region", "us-west-1", "Compute-plane cluster region")
 }
 
 func runSelfHostedComputePlaneInstall(c *cobra.Command, _ []string) error {
@@ -159,4 +179,75 @@ func computePlaneInstallEnv(valuesPath, clusterName, ncaID string) []string {
 		"CLUSTER_NAME=" + clusterName,
 		"NCA_ID=" + ncaID,
 	}
+}
+
+func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
+	if !computePlaneRegisterDryRun {
+		return fmt.Errorf("compute-plane register only --dry-run is supported in this phase")
+	}
+	if computePlaneRegisterProfile == "" {
+		return fmt.Errorf("--control-plane-profile is required")
+	}
+	if computePlaneRegisterClusterName == "" {
+		return fmt.Errorf("--cluster-name is required")
+	}
+
+	validation, selected, err := loadControlPlaneProfileForComputeRegister(computePlaneRegisterProfile, computePlaneRegisterClusterName)
+	if err != nil {
+		return err
+	}
+
+	oidcIssuer, jwks, identitySource, err := fetchClusterIdentity(c.Context(), computePlaneRegisterKubeContext)
+	if err != nil {
+		return fmt.Errorf("discovering target cluster identity: %w", err)
+	}
+	if strings.TrimSpace(oidcIssuer) == "" {
+		return fmt.Errorf("discovering target cluster identity: OIDC issuer is empty")
+	}
+	if strings.TrimSpace(jwks) == "" {
+		return fmt.Errorf("discovering target cluster identity: JWKS is empty")
+	}
+	if identitySource == "" {
+		identitySource = "psat"
+	}
+
+	cp := validation.Profile.ControlPlane
+	out := c.OutOrStdout()
+	fmt.Fprintln(out, "dryRun: true")
+	fmt.Fprintf(out, "clusterName: %s\n", computePlaneRegisterClusterName)
+	fmt.Fprintf(out, "controlPlaneClusterName: %s\n", cp.ClusterName)
+	fmt.Fprintf(out, "ncaID: %s\n", cp.NCAID)
+	fmt.Fprintf(out, "region: %s\n", computePlaneRegisterRegion)
+	fmt.Fprintf(out, "kubeContext: %s\n", computePlaneRegisterKubeContext)
+	fmt.Fprintf(out, "endpointScope: %s\n", selected.Name)
+	fmt.Fprintf(out, "icmsURL: %s\n", selected.Endpoints.ICMSURL)
+	fmt.Fprintf(out, "revalURL: %s\n", selected.Endpoints.ReValURL)
+	fmt.Fprintf(out, "natsURL: %s\n", selected.Endpoints.NATSURL)
+	fmt.Fprintf(out, "oidcIssuer: %s\n", oidcIssuer)
+	fmt.Fprintf(out, "identitySource: %s\n", identitySource)
+	fmt.Fprintln(out, "sisMutation: skipped")
+	fmt.Fprintln(out, "valuesWrite: skipped")
+	return nil
+}
+
+func loadControlPlaneProfileForComputeRegister(path, clusterName string) (*controlplaneprofile.ValidationResult, selfhosted.ControlPlaneProfileEndpointScopeSelection, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, selfhosted.ControlPlaneProfileEndpointScopeSelection{}, fmt.Errorf("reading control-plane profile: %w", err)
+	}
+	validation, err := controlplaneprofile.ParseAndValidate(body, controlplaneprofile.ValidateOptions{Require: controlplaneprofile.RequireAny})
+	if err != nil {
+		return nil, selfhosted.ControlPlaneProfileEndpointScopeSelection{}, err
+	}
+	selected, err := selfhosted.SelectControlPlaneProfileEndpointScope(validation.Profile, clusterName)
+	if err != nil {
+		return nil, selfhosted.ControlPlaneProfileEndpointScopeSelection{}, err
+	}
+	validation, err = controlplaneprofile.ParseAndValidate(body, controlplaneprofile.ValidateOptions{
+		Require: selfhosted.ControlPlaneProfileRequireModeForEndpointScope(selected.Name),
+	})
+	if err != nil {
+		return nil, selfhosted.ControlPlaneProfileEndpointScopeSelection{}, err
+	}
+	return validation, selected, nil
 }

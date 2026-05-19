@@ -37,16 +37,29 @@ var newClusterClientForSelfHosted = func(icmsURL string) (selfhosted.ClusterClie
 	return selfhosted.NewClusterClient(icmsURL)
 }
 
+// loadClusterIdentityConfig is a package-level seam so unit tests can verify
+// the kubectl-facing config without depending on process-global Viper state.
+var loadClusterIdentityConfig = client.LoadConfigWithoutAuth
+
+func clusterIdentityConfig(kctx string) (*client.Config, error) {
+	cfg, err := loadClusterIdentityConfig()
+	if err != nil {
+		return nil, fmt.Errorf("loading config for JWKS fetch: %w", err)
+	}
+	cfg.KubeContext = kctx
+	return cfg, nil
+}
+
 // fetchClusterIdentity is a package-level seam so unit tests can inject a fake
 // JWKS fetcher without invoking kubectl. It delegates to fetchClusterJWKS in
-// cmd/cluster_registration.go (same package) using a zero-value kubeconfig.
+// cmd/cluster_registration.go (same package) using the loaded CLI config.
 // kctx selects the kubeconfig context; empty string uses the current-context
 // (single-cluster mode). M+9.E will pass non-empty values for split-cluster.
 // Returns (oidcIssuer, jwks, identitySource, error).
 var fetchClusterIdentity = func(ctx context.Context, kctx string) (issuer string, jwks string, identitySource string, err error) {
-	cfg, err := client.LoadConfig()
+	cfg, err := clusterIdentityConfig(kctx)
 	if err != nil {
-		return "", "", "", fmt.Errorf("loading config for JWKS fetch: %w", err)
+		return "", "", "", err
 	}
 	return fetchClusterJWKS(cfg, "")
 }

@@ -23,10 +23,23 @@ import (
 	"strings"
 
 	"nvcf-cli/internal/client"
+	"nvcf-cli/internal/selfhosted/controlplaneprofile"
 
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+type ControlPlaneProfileEndpointScopeName string
+
+const (
+	EndpointScopeInCluster        ControlPlaneProfileEndpointScopeName = "in-cluster"
+	EndpointScopeComputeReachable ControlPlaneProfileEndpointScopeName = "compute-reachable"
+)
+
+type ControlPlaneProfileEndpointScopeSelection struct {
+	Name      ControlPlaneProfileEndpointScopeName
+	Endpoints controlplaneprofile.EndpointScope
+}
 
 // RegisterRequest carries the fields needed to register a cluster with SIS.
 // NCAID defaults to the config's ClientID when empty.
@@ -49,6 +62,29 @@ type RegisterRequest struct {
 type RegisterResponse struct {
 	ClusterID      string
 	ClusterGroupID string
+}
+
+func SelectControlPlaneProfileEndpointScope(doc controlplaneprofile.ControlPlaneProfile, targetClusterName string) (ControlPlaneProfileEndpointScopeSelection, error) {
+	if strings.TrimSpace(targetClusterName) == "" {
+		return ControlPlaneProfileEndpointScopeSelection{}, fmt.Errorf("cluster name is required")
+	}
+	if targetClusterName == doc.ControlPlane.ClusterName {
+		return ControlPlaneProfileEndpointScopeSelection{
+			Name:      EndpointScopeInCluster,
+			Endpoints: doc.ControlPlane.Endpoints.InCluster,
+		}, nil
+	}
+	return ControlPlaneProfileEndpointScopeSelection{
+		Name:      EndpointScopeComputeReachable,
+		Endpoints: doc.ControlPlane.Endpoints.ComputeReachable,
+	}, nil
+}
+
+func ControlPlaneProfileRequireModeForEndpointScope(scope ControlPlaneProfileEndpointScopeName) controlplaneprofile.RequireMode {
+	if scope == EndpointScopeInCluster {
+		return controlplaneprofile.RequireInCluster
+	}
+	return controlplaneprofile.RequireComputeReachable
 }
 
 // ClusterClient abstracts the existing nvcf-cli cluster register call.

@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"nvcf-cli/internal/client"
 	"nvcf-cli/internal/selfhosted"
 	"nvcf-cli/internal/selfhosted/auth"
 	"nvcf-cli/internal/selfhosted/controlplaneprofile"
@@ -266,6 +267,24 @@ func TestSelfHostedInstall_ComputePlane_LocalSplitWritesExternalControlPlaneEndp
 	assert.NotContains(t, got, "reval.localhost")
 	assert.NotContains(t, got, "nats.localhost")
 	assert.NotContains(t, got, ".svc.cluster.local")
+}
+
+func TestClusterIdentityConfigPreservesLoadedKubeconfigPath(t *testing.T) {
+	prevLoader := loadClusterIdentityConfig
+	t.Cleanup(func() { loadClusterIdentityConfig = prevLoader })
+	loadClusterIdentityConfig = func() (*client.Config, error) {
+		return &client.Config{
+			KubeconfigPath: "/tmp/custom-kubeconfig",
+			KubeContext:    "old-context",
+			BaseHTTPURL:    "http://api.example",
+		}, nil
+	}
+
+	cfg, err := clusterIdentityConfig("admin@gpu1")
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/custom-kubeconfig", cfg.KubeconfigPath)
+	assert.Equal(t, "admin@gpu1", cfg.KubeContext)
+	assert.Equal(t, "http://api.example", cfg.BaseHTTPURL)
 }
 
 func TestComputePlaneTarget_BundledStack(t *testing.T) {

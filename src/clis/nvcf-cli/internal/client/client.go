@@ -84,6 +84,7 @@ type Config struct {
 	// Cluster mode configuration
 	ClusterMode    bool           // Enable cluster mode (uses kubectl instead of direct HTTP)
 	KubeconfigPath string         // Path to kubeconfig file for cluster access
+	KubeContext    string         // kubeconfig context for cluster access
 	ClusterConfig  *ClusterConfig // Cluster-specific configuration
 }
 

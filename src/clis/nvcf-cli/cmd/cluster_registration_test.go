@@ -601,6 +601,13 @@ func TestBuildKubectlCommand(t *testing.T) {
 		assert.True(t, found, "kubeconfig flag not found in command args: %v", cmd.Args)
 	})
 
+	t.Run("includes kube context when specified", func(t *testing.T) {
+		config := &client.Config{KubeContext: "k3d-compute"}
+		cmd := buildKubectlCommand(config, []string{"get", "--raw", "/openid/v1/jwks"})
+		assert.Contains(t, cmd.Args, "--context")
+		assert.Contains(t, cmd.Args, "k3d-compute")
+	})
+
 	t.Run("preserves all arguments", func(t *testing.T) {
 		config := &client.Config{}
 		args := []string{"get", "svc", "-A", "-l", "app=spire-oidc", "-o", "jsonpath={.items}"}

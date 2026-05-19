@@ -32,6 +32,7 @@ go_library(
     visibility = ["//src/clis/nvcf-cli:__subpackages__"],
     deps = [
         "//src/clis/nvcf-cli/internal/client",
+        "//src/clis/nvcf-cli/internal/selfhosted/controlplaneprofile",
         "//src/clis/nvcf-cli/internal/selfhosted/helmruntime",
         "//src/clis/nvcf-cli/internal/selfhosted/progress",
         "@com_github_masterminds_semver_v3//:semver",
@@ -60,6 +61,7 @@ go_test(
     embed = [":selfhosted"],
     deps = [
         "//src/clis/nvcf-cli/internal/client",
+        "//src/clis/nvcf-cli/internal/selfhosted/controlplaneprofile",
         "//src/clis/nvcf-cli/internal/selfhosted/progress",
         "@com_github_masterminds_semver_v3//:semver",
         "@com_github_stretchr_testify//assert",

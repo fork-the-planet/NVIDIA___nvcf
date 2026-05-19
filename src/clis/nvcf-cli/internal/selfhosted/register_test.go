@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"nvcf-cli/internal/client"
+	"nvcf-cli/internal/selfhosted/controlplaneprofile"
 
 	"k8s.io/client-go/rest"
 )
@@ -39,6 +40,55 @@ type fakeClusterClient struct {
 	registerCalls int
 	resp          *RegisterResponse
 	err           error
+}
+
+func TestSelectControlPlaneProfileEndpointScope_ComputeReachableForDifferentCluster(t *testing.T) {
+	doc := testRegisterProfile("control-plane")
+
+	got, err := SelectControlPlaneProfileEndpointScope(doc, "gpu-a")
+	require.NoError(t, err)
+
+	assert.Equal(t, EndpointScopeComputeReachable, got.Name)
+	assert.Equal(t, "https://sis.example.test", got.Endpoints.ICMSURL)
+}
+
+func TestSelectControlPlaneProfileEndpointScope_InClusterForControlPlaneCluster(t *testing.T) {
+	doc := testRegisterProfile("control-plane")
+
+	got, err := SelectControlPlaneProfileEndpointScope(doc, "control-plane")
+	require.NoError(t, err)
+
+	assert.Equal(t, EndpointScopeInCluster, got.Name)
+	assert.Equal(t, "http://api.sis.svc.cluster.local:8080", got.Endpoints.ICMSURL)
+}
+
+func TestSelectControlPlaneProfileEndpointScope_RequiresClusterName(t *testing.T) {
+	_, err := SelectControlPlaneProfileEndpointScope(testRegisterProfile("control-plane"), "")
+	assert.ErrorContains(t, err, "cluster name is required")
+}
+
+func testRegisterProfile(controlPlaneCluster string) controlplaneprofile.ControlPlaneProfile {
+	return controlplaneprofile.ControlPlaneProfile{
+		APIVersion: controlplaneprofile.APIVersion,
+		Kind:       controlplaneprofile.Kind,
+		ControlPlane: controlplaneprofile.ControlPlane{
+			ClusterName: controlPlaneCluster,
+			NCAID:       "nvcf-default",
+			Region:      "us-west-1",
+			Endpoints: controlplaneprofile.Endpoints{
+				InCluster: controlplaneprofile.EndpointScope{
+					ICMSURL:  "http://api.sis.svc.cluster.local:8080",
+					ReValURL: "http://reval.nvcf.svc.cluster.local:8080",
+					NATSURL:  "nats://nats.nats-system.svc.cluster.local:4222",
+				},
+				ComputeReachable: controlplaneprofile.EndpointScope{
+					ICMSURL:  "https://sis.example.test",
+					ReValURL: "https://reval.example.test",
+					NATSURL:  "tls://nats.example.test:4222",
+				},
+			},
+		},
+	}
 }
 
 func (f *fakeClusterClient) RegisterCluster(_ context.Context, in RegisterRequest) (*RegisterResponse, error) {

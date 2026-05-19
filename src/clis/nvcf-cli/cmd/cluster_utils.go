@@ -46,6 +46,9 @@ func buildKubectlCommand(config *client.Config, args []string) *exec.Cmd {
 	if config.KubeconfigPath != "" {
 		cmd.Args = append(cmd.Args[:1], append([]string{"--kubeconfig", config.KubeconfigPath}, cmd.Args[1:]...)...)
 	}
+	if config.KubeContext != "" {
+		cmd.Args = append(cmd.Args[:1], append([]string{"--context", config.KubeContext}, cmd.Args[1:]...)...)
+	}
 
 	if config.Debug {
 		logging.Debug("Executing kubectl command: %s", strings.Join(cmd.Args, " "))
