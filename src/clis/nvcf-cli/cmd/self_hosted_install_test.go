@@ -223,6 +223,43 @@ func TestSelfHostedInstall_ComputePlane_RegistersAndRenders(t *testing.T) {
 	assert.Contains(t, string(registerValues), "natsURL: nats://nats.nats-system.svc.cluster.local:4222")
 }
 
+func TestSelfHostedInstall_ComputePlane_AppliesByDefault(t *testing.T) {
+	resetInstallFlags(t)
+	prevClientFactory := newClusterClientForSelfHosted
+	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
+	fakeCC := &fakeClusterClient{resp: &selfhosted.RegisterResponse{ClusterID: "id-A", ClusterGroupID: "grp-A"}}
+	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) { return fakeCC, nil }
+
+	prevFetcher := fetchClusterIdentity
+	t.Cleanup(func() { fetchClusterIdentity = prevFetcher })
+	fetchClusterIdentity = func(context.Context, string) (string, string, string, error) {
+		return "https://k8s.example/.well-known/oidc", `{"keys":[]}`, "psat", nil
+	}
+
+	stackDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(stackDir, "helmfile.d"), 0o755))
+	// Fake helmfile echoes the verb passed as its last arg so the test can assert
+	// that 'apply' (not 'template') ran when --no-apply is omitted.
+	fakeBin := filepath.Join(t.TempDir(), "helmfile")
+	require.NoError(t, os.WriteFile(fakeBin,
+		[]byte("#!/bin/sh\nlast=\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf 'verb=%s\\n' \"$last\"\n"),
+		0o755))
+	t.Setenv("PATH", filepath.Dir(fakeBin)+":"+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetArgs([]string{
+		"self-hosted", "install", "--compute-plane", "--cluster-name=ncp-A",
+		"--stack", stackDir,
+		"--icms-url=http://sis.localhost:8080",
+		// no --no-apply
+	})
+	require.NoError(t, rootCmd.Execute())
+
+	assert.Equal(t, 1, fakeCC.registerCalls)
+	assert.Contains(t, stdout.String(), "verb=apply")
+}
+
 func TestSelfHostedInstall_ComputePlane_LocalSplitWritesExternalControlPlaneEndpoints(t *testing.T) {
 	resetInstallFlags(t)
 	prevClientFactory := newClusterClientForSelfHosted

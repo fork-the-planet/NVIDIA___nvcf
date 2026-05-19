@@ -206,7 +206,7 @@ func runSelfHostedInstall(c *cobra.Command, _ []string) error {
 		HelmfileFile: helmfileFile,
 		Env:          selfHostedEnv,
 		Selector:     selector,
-		Apply:        false,
+		Apply:        !selfHostedNoApply,
 		KubeContext:  selfHostedComputePlaneContext, // M+9: empty in single-cluster mode
 		Stdout:       c.OutOrStdout(),
 		Stderr:       c.ErrOrStderr(),
