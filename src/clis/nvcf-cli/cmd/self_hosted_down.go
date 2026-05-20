@@ -334,7 +334,11 @@ func runDownComputePlaneForCluster(c *cobra.Command, ctx context.Context, sink p
 		"CLUSTER_NAME=" + clusterName,
 		"NCA_ID=" + downNCAID,
 	}
+	unregisterClusterID := clusterName
 	if rv, err := readRegisterValuesYAML(resolved.Path, clusterName); err == nil {
+		if rv.ClusterID != "" {
+			unregisterClusterID = rv.ClusterID
+		}
 		extra = append(extra,
 			"CLUSTER_ID="+rv.ClusterID,
 			"CLUSTER_GROUP_ID="+rv.ClusterGroupID,
@@ -384,7 +388,7 @@ func runDownComputePlaneForCluster(c *cobra.Command, ctx context.Context, sink p
 	}
 	defer closeDeleter()
 
-	if err := teardown.Unregister(ctx, deleter, icmsURL, clusterName); err != nil {
+	if err := teardown.Unregister(ctx, deleter, icmsURL, unregisterClusterID); err != nil {
 		return fmt.Errorf("unregister cluster: %w", err)
 	}
 	_ = sink.Emit(ctx, progress.PhaseCompleted{
