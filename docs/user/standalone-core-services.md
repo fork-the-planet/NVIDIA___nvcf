@@ -22,7 +22,7 @@ API Keys provides authentication token management for all NVCF API interactions.
 
 | **Chart** | `helm-nvcf-api-keys` |
 | --- | --- |
-| **Version** | `1.5.0` |
+| **Version** | `1.5.1` |
 | **Namespace** | `api-keys` |
 | **Depends on** | Infrastructure only |
 
@@ -54,7 +54,7 @@ Replace `<REGISTRY>` and `<REPOSITORY>` with your registry settings.
 ```bash
 helm upgrade --install api-keys \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-api-keys \
-  --version 1.5.0 \
+  --version 1.5.1 \
   --namespace api-keys \
   --wait --timeout 10m \
   -f api-keys-values.yaml
@@ -172,7 +172,7 @@ install to initialize the NVCF account with registry credentials.
 
 | **Chart** | `helm-nvcf-api` |
 | --- | --- |
-| **Version** | `1.19.2` |
+| **Version** | `1.19.3` |
 | **Namespace** | `nvcf` |
 | **Depends on** | ESS API (must be running) |
 
@@ -253,7 +253,7 @@ Replace the following placeholders:
 ```bash
 helm upgrade --install api \
   oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-api \
-  --version 1.19.2 \
+  --version 1.19.3 \
   --namespace nvcf \
   --wait --wait-for-jobs --timeout 15m \
   -f nvcf-api-values.yaml
