@@ -43,7 +43,7 @@ Every subtree that an agent may work in should have its own `AGENTS.md` with bui
 
 Skills are reusable, on-demand agent instructions for specific workflows. They follow the [Agent Skills specification](https://agentskills.io/specification) and are compatible with the [Vercel Skills CLI](https://github.com/vercel-labs/skills). Skills are invoked when relevant, not auto-applied (auto-applied guidance belongs in rules, not skills).
 
-Keep durable skills focused on current behavior, stable prerequisites, and reusable workflows. Do not put in-progress MR tables, merge-order checklists, branch-specific references, or temporary cross-repo coordination status in skills. Put that information in MR descriptions, Jira comments, or temporary runbooks instead.
+Keep durable skills focused on current behavior, stable prerequisites, and reusable workflows. Do not put in-progress Merge Request/Pull Request tables, merge-order checklists, branch-specific references, or temporary cross-repo coordination status in skills. Put that information in Merge Request/Pull Request descriptions, comments on the ticket, or temporary runbooks instead.
 
 ### Skill structure
 
@@ -148,24 +148,46 @@ Foundational types (not in release notes): `docs`, `build`, `test`, `refactor`, 
 
 When a commit adds or updates a third-party dependency, call out the dependency name and version in the body so reviewers can assess license and security impact.
 
-## Merge Requests
+## Merge Requests/Pull Requests
 
-Use a structured MR description. Subtree repos may define their own MR template; fall back to this shape when none exists.
+Use Conventional Commit format for Merge Request/Pull Request titles, as
+described in the Commit Messages section. Release automation depends on this
+format. Examples: `feat:`, `fix:`, `chore:`, `docs:`.
+
+Before creating a Merge Request/Pull Request, confirm there is a bug, issue, or
+ticket reference. If none was provided, ask for one. Use `None` or `NO-REF` only
+after explicit confirmation that no issue exists or one is not required.
+
+Use a structured Merge Request/Pull Request description. Subtree repos may define
+their own Merge Request/Pull Request template; fall back to this shape when none
+exists. Do not include a test plan checklist unless explicitly requested.
 
 ```
-## Summary
-<high-level explanation of the change and why it exists>
+## Why
+<context and motivation for the change>
+
+## What changed
+<high-level summary of changes, not a commit log>
 
 ## Customer Release Notes
 <short customer-facing summary for feat/fix/perf, or "Not customer visible">
 
+## Plan Summary
+<resource summary for infrastructure, chart, deploy, or Terraform-like changes; otherwise "Not applicable">
+
+## Usage
+<relevant commands or operator notes, or "Not applicable">
+
 ## Testing
 <what you ran and whether QA is needed>
 
-## Related Issues
-<links or "None">
+## Notes
+<caveats, follow-up work, or reviewer context>
 
-## Related MRs
+## References
+<bug, issue, or ticket links at the bottom, or "None">
+
+## Related Merge Requests/Pull Requests
 <links or "None">
 
 ## Dependencies
@@ -174,11 +196,11 @@ Use a structured MR description. Subtree repos may define their own MR template;
 
 ## Cross-subtree impact
 
-NVCF clients in this repo (notably `src/clis/nvcf-cli`) are hand-written against control-plane and invocation-plane APIs. When changing public API surfaces (request/response shapes, auth flow, new endpoints, removed fields), evaluate whether `src/clis/nvcf-cli` needs a matching change, and list affected clients in the MR "Related MRs" section. If the CLI needs an update, file a follow-up issue.
+NVCF clients in this repo (notably `src/clis/nvcf-cli`) are hand-written against control-plane and invocation-plane APIs. When changing public API surfaces (request/response shapes, auth flow, new endpoints, removed fields), evaluate whether `src/clis/nvcf-cli` needs a matching change, and list affected clients in the Merge Request/Pull Request "Related Merge Requests/Pull Requests" section. If the CLI needs an update, file a follow-up issue.
 
 ## Tests
 
-Code changes must include tests. If a change does not include tests, explain why in the MR description (for example: pure documentation, CI-only change, or refactor with full existing coverage).
+Code changes must include tests. If a change does not include tests, explain why in the Merge Request/Pull Request description (for example: pure documentation, CI-only change, or refactor with full existing coverage).
 
 Prefer the repo-native test runner (`make test`, `go test`, `cargo test`, etc.). Run tests before committing. Check coverage requirements in the subtree `AGENTS.md` or CI config.
 
@@ -267,7 +289,7 @@ When a change affects observability, verify:
 - New spans propagate context and set error attributes on failure.
 - New metrics follow the naming convention and are pre-initialized.
 - Existing dashboards and alerts are not broken by renamed or removed metrics/spans.
-- The MR description calls out the observability impact if dashboards or alerts may need updating.
+- The Merge Request/Pull Request description calls out the observability impact if dashboards or alerts may need updating.
 
 ## Diagrams
 
@@ -275,4 +297,4 @@ When a change modifies runtime behavior, data flow, or component interactions, a
 
 ## Issue Tracking
 
-Reference related issues in commits and MR descriptions. When creating follow-up work, file a ticket rather than leaving a TODO in code.
+Reference related issues in commits and Merge Request/Pull Request descriptions. When creating follow-up work, file a ticket rather than leaving a TODO in code.

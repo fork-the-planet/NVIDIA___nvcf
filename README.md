@@ -1,5 +1,7 @@
 ![NVCF banner](docs/user/images/nvcf-banner.svg)
 
+[![bazel](https://github.com/NVIDIA/nvcf/actions/workflows/bazel.yml/badge.svg?branch=main)](https://github.com/NVIDIA/nvcf/actions/workflows/bazel.yml?query=branch%3Amain)
+
 [Docs](https://docs.nvidia.com/nvcf/overview) | [Roadmap](https://github.com/NVIDIA/nvcf/issues/27) | [Installation](docs/user/installation.md) | [API Reference](docs/user/api.md) | [Contributing](CONTRIBUTING.md) | [build.nvidia.com Powered By NVCF](https://build.nvidia.com/)
 
 # NVIDIA Cloud Functions
