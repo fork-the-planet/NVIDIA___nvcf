@@ -334,3 +334,158 @@ func TestRenderGoWorkIncludesConfiguredModulesAndSubprojects(t *testing.T) {
 		t.Fatalf("rendered go.work should not include roots without go_work enabled\n%s", rendered)
 	}
 }
+
+func TestRenderReleasePipelineEmitsPerServiceJobs(t *testing.T) {
+	cfg := configFile{
+		Version:     1,
+		DefaultTags: []string{"eks", "prod"},
+		Profiles: map[string]profile{
+			"go-library": {
+				Stage: "validate",
+				Image: "golang:1.26-bookworm",
+				Checks: []check{
+					{ID: "vendor", Type: "go-vendor"},
+				},
+			},
+		},
+		Subprojects: []subproject{
+			{
+				ID:          "grpc-proxy",
+				Path:        "src/invocation-plane-services/grpc-proxy",
+				ChangePaths: []string{"src/invocation-plane-services/grpc-proxy/**/*"},
+				Release: &releaseConfig{
+					ServiceName: "nvcf-grpc-proxy",
+					ImagePushTargets: []releaseImagePushTarget{
+						{
+							Name:        "kaze",
+							BazelTarget: "//nvidia-internal:image_push_kaze",
+							Auth: releaseImagePushAuth{
+								Type:     "vault",
+								VaultKey: "nvcf-grpc-proxy",
+							},
+						},
+						{
+							Name:        "ncp_dev",
+							BazelTarget: "//nvidia-internal:image_push_ncp_dev",
+							Auth: releaseImagePushAuth{
+								Type:  "ci_var",
+								CIVar: "NGC_DEVOPS_API_KEY",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	rendered, err := renderReleasePipeline(cfg, "tools/ci/subproject-validations.yaml")
+	if err != nil {
+		t.Fatalf("renderReleasePipeline: %v", err)
+	}
+
+	wants := []string{
+		".compute-next-release-version-service:",
+		".semantic-release-service:",
+		"compute-next-release-version-grpc-proxy:",
+		"semantic-release-grpc-proxy:",
+		"grpc-proxy-image-push:",
+		"SERVICE_NAME: nvcf-grpc-proxy",
+		"SUBTREE: src/invocation-plane-services/grpc-proxy",
+		"NGC_REGISTRY_VAULT_KEY: nvcf-grpc-proxy",
+		"//nvidia-internal:image_push_kaze",
+		"//nvidia-internal:image_push_ncp_dev",
+		"NGC_DEVOPS_API_KEY",
+		"NVCF_VERSION=\"${CI_COMMIT_TAG#nvcf-grpc-proxy-v}\"",
+		"&grpc_proxy_release_paths",
+		"*grpc_proxy_release_paths",
+		"if: $CI_COMMIT_TAG =~ /^nvcf-grpc-proxy-v/",
+	}
+	for _, w := range wants {
+		if !strings.Contains(rendered, w) {
+			t.Errorf("rendered release pipeline missing %q\n---\n%s\n---", w, rendered)
+		}
+	}
+}
+
+func TestValidateReleaseRequiresServiceName(t *testing.T) {
+	cfg := configFile{
+		Version:     1,
+		DefaultTags: []string{"eks"},
+		Profiles: map[string]profile{
+			"p": {Image: "i", Checks: []check{{ID: "c", Type: "shell", Command: "true"}}},
+		},
+		Subprojects: []subproject{
+			{
+				ID:   "svc",
+				Path: "p",
+				Release: &releaseConfig{
+					ImagePushTargets: []releaseImagePushTarget{
+						{Name: "k", BazelTarget: "//k", Auth: releaseImagePushAuth{Type: "vault", VaultKey: "k"}},
+					},
+				},
+			},
+		},
+	}
+	err := validateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "release.service_name") {
+		t.Fatalf("expected service_name error, got: %v", err)
+	}
+}
+
+func TestValidateReleaseRequiresImagePushTargets(t *testing.T) {
+	cfg := configFile{
+		Version:     1,
+		DefaultTags: []string{"eks"},
+		Profiles:    map[string]profile{},
+		Subprojects: []subproject{
+			{
+				ID:      "svc",
+				Path:    "p",
+				Release: &releaseConfig{ServiceName: "nvcf-svc"},
+			},
+		},
+	}
+	err := validateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "image_push_targets must not be empty") {
+		t.Fatalf("expected image_push_targets error, got: %v", err)
+	}
+}
+
+func TestValidateReleaseRejectsUnknownAuthType(t *testing.T) {
+	cfg := configFile{
+		Version:     1,
+		DefaultTags: []string{"eks"},
+		Profiles:    map[string]profile{},
+		Subprojects: []subproject{
+			{
+				ID:   "svc",
+				Path: "p",
+				Release: &releaseConfig{
+					ServiceName: "nvcf-svc",
+					ImagePushTargets: []releaseImagePushTarget{
+						{Name: "k", BazelTarget: "//k", Auth: releaseImagePushAuth{Type: "kerberos"}},
+					},
+				},
+			},
+		},
+	}
+	err := validateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "unsupported auth type") {
+		t.Fatalf("expected unsupported auth type, got: %v", err)
+	}
+}
+
+func TestSubprojectMustHaveProfileOrRelease(t *testing.T) {
+	cfg := configFile{
+		Version:     1,
+		DefaultTags: []string{"eks"},
+		Profiles:    map[string]profile{},
+		Subprojects: []subproject{
+			{ID: "svc", Path: "p"},
+		},
+	}
+	err := validateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "must set profile or release") {
+		t.Fatalf("expected profile-or-release error, got: %v", err)
+	}
+}
