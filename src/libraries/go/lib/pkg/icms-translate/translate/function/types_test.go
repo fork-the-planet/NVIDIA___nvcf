@@ -62,6 +62,91 @@ func TestModelsUnmarshalJSON(t *testing.T) {
 	assert.Error(t, invalid.UnmarshalJSON([]byte(strconvQuote("not base64"))))
 }
 
+func TestFunctionDeepCopy(t *testing.T) {
+	telemetries := &common.TelemetriesLaunchSpecification{}
+	telemetries.Telemetries.Metrics = &common.Telemetry{
+		Protocol: "http",
+		Provider: "DATADOG",
+		Endpoint: "datadoghq.com",
+		Name:     "metrics",
+	}
+	src := &LaunchSpecification{
+		EnvironmentB64: "env",
+		HelmChartLaunchSpecification: &common.HelmChartLaunchSpecification{
+			HelmChartURL: "https://helm.example.com/chart.tgz",
+			Values:       []byte("replicas: 1"),
+		},
+		CacheLaunchSpecification: &common.CacheLaunchSpecification{
+			CacheArtifacts: true,
+			CacheHandle:    "cache-handle",
+			CacheSize:      1 << 30,
+		},
+		Telemetries: telemetries,
+		Models: Models{
+			{
+				Name: "model-a",
+				LLMModelConfig: &LLMModelConfig{
+					URIs:      []string{"oci://model-a"},
+					Tokenizer: "tokenizer-a",
+				},
+			},
+		},
+	}
+
+	copied := src.DeepCopy()
+	require.NotNil(t, copied)
+	src.HelmChartLaunchSpecification.Values[0] = 'R'
+	src.CacheLaunchSpecification.CacheHandle = "changed"
+	src.Telemetries.Telemetries.Metrics.Name = "changed"
+	src.Models[0].LLMModelConfig.URIs[0] = "changed"
+
+	assert.Equal(t, []byte("replicas: 1"), copied.HelmChartLaunchSpecification.Values)
+	assert.Equal(t, "cache-handle", copied.CacheLaunchSpecification.CacheHandle)
+	assert.Equal(t, "metrics", copied.Telemetries.Telemetries.Metrics.Name)
+	assert.Equal(t, "oci://model-a", copied.Models[0].LLMModelConfig.URIs[0])
+
+	llmConfig := (&LLMModelConfig{URIs: []string{"oci://standalone"}, Tokenizer: "tokenizer"}).DeepCopy()
+	require.NotNil(t, llmConfig)
+	assert.Equal(t, "oci://standalone", llmConfig.URIs[0])
+
+	artifacts := LaunchArtifacts{
+		{Type: LaunchArtifactTypePod, Specification: "pod"},
+		{Type: LaunchArtifactTypeSecret, Specification: "secret"},
+	}
+	copiedArtifacts := artifacts.DeepCopy()
+	artifacts[0].Specification = "changed"
+	assert.Equal(t, LaunchArtifacts{
+		{Type: LaunchArtifactTypePod, Specification: "pod"},
+		{Type: LaunchArtifactTypeSecret, Specification: "secret"},
+	}, copiedArtifacts)
+
+	model := (&Model{Name: "model-b", LLMModelConfig: &LLMModelConfig{URIs: []string{"oci://model-b"}}}).DeepCopy()
+	require.NotNil(t, model)
+	assert.Equal(t, "oci://model-b", model.LLMModelConfig.URIs[0])
+
+	models := Models{{Name: "model-c", LLMModelConfig: &LLMModelConfig{URIs: []string{"oci://model-c"}}}}
+	copiedModels := models.DeepCopy()
+	models[0].LLMModelConfig.URIs[0] = "changed"
+	assert.Equal(t, "oci://model-c", copiedModels[0].LLMModelConfig.URIs[0])
+
+	details := (&Details{FunctionID: "function-id", FunctionVersionID: "version-id"}).DeepCopy()
+	require.NotNil(t, details)
+	assert.Equal(t, "function-id", details.FunctionID)
+
+	var nilDetails *Details
+	var nilConfig *LLMModelConfig
+	var nilLaunchArtifacts LaunchArtifacts
+	var nilLaunchSpec *LaunchSpecification
+	var nilModel *Model
+	var nilModels Models
+	assert.Nil(t, nilDetails.DeepCopy())
+	assert.Nil(t, nilConfig.DeepCopy())
+	assert.Nil(t, nilLaunchArtifacts.DeepCopy())
+	assert.Nil(t, nilLaunchSpec.DeepCopy())
+	assert.Nil(t, nilModel.DeepCopy())
+	assert.Nil(t, nilModels.DeepCopy())
+}
+
 func strconvQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)

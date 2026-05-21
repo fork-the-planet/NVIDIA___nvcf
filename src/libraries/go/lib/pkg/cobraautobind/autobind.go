@@ -14,8 +14,6 @@
 // limitations under the License.
 
 // Package cobraautobind registers Cobra CLI flags from a struct shape and binds them to Viper.
-//
-// TODO(NVCF-9201): unit-test coverage is below the lib module threshold; add tests for this package.
 package cobraautobind
 
 import (

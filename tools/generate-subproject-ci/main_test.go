@@ -47,10 +47,9 @@ func TestRenderPipelineGeneratesSubprojectJobs(t *testing.T) {
 					{
 						ID:      "codegen",
 						Type:    "go-codegen",
-						Command: "./scripts/codegen_update",
+						Command: "make codegen-update",
 						Install: []string{"k8s.io/code-generator/cmd/deepcopy-gen@v0.34.2"},
 					},
-					{ID: "license", Type: "shell", Command: "./scripts/ci_check_license"},
 					{
 						ID:         "unit-tests",
 						Type:       "go-unit-tests",
@@ -66,7 +65,7 @@ func TestRenderPipelineGeneratesSubprojectJobs(t *testing.T) {
 		},
 		Subprojects: []subproject{
 			{
-				ID:      "nvcf-go",
+				ID:      "go-lib",
 				Path:    "src/libraries/go/lib",
 				Profile: "go-library",
 				GoWork:  true,
@@ -82,19 +81,17 @@ func TestRenderPipelineGeneratesSubprojectJobs(t *testing.T) {
 	for _, needle := range []string{
 		"default:",
 		"stages:",
-		"nvcf-go-vendor:",
-		"nvcf-go-codegen:",
-		"nvcf-go-license:",
-		"nvcf-go-unit-tests:",
+		"go-lib-vendor:",
+		"go-lib-codegen:",
+		"go-lib-unit-tests:",
 		"./tools/scripts/update-go-work",
 		"./tools/ci/check-go-vendor 'src/libraries/go/lib'",
-		"./tools/ci/check-go-codegen 'src/libraries/go/lib' --command './scripts/codegen_update' --install 'k8s.io/code-generator/cmd/deepcopy-gen@v0.34.2'",
-		`cd "$CI_PROJECT_DIR/src/libraries/go/lib" && ./scripts/ci_check_license`,
-		"./tools/ci/run-go-unit-tests 'src/libraries/go/lib' --results-dir 'public/nvcf-go'",
+		"./tools/ci/check-go-codegen 'src/libraries/go/lib' --command 'make codegen-update' --install 'k8s.io/code-generator/cmd/deepcopy-gen@v0.34.2'",
+		"./tools/ci/run-go-unit-tests 'src/libraries/go/lib' --results-dir 'public/go-lib'",
 		`GOWORK: $CI_PROJECT_DIR/go.work`,
 		"PARENT_PIPELINE_SOURCE",
 		"src/libraries/go/lib/**/*",
-		"public/nvcf-go/report.json",
+		"public/go-lib/report.json",
 	} {
 		if !strings.Contains(rendered, needle) {
 			t.Fatalf("rendered pipeline missing %q\n%s", needle, rendered)
@@ -154,7 +151,7 @@ func TestRenderPipelineAlwaysEmitsSentinel(t *testing.T) {
 			},
 		},
 		Subprojects: []subproject{
-			{ID: "nvcf-go", Path: "src/libraries/go/lib", Profile: "go-library"},
+			{ID: "go-lib", Path: "src/libraries/go/lib", Profile: "go-library"},
 		},
 	}
 
@@ -176,7 +173,7 @@ func TestRenderPipelineAlwaysEmitsSentinel(t *testing.T) {
 		t.Fatalf("sentinel job must not use path-gated rules\n%s", sentinelBlock)
 	}
 
-	if !strings.Contains(rendered, "nvcf-go-vendor:") {
+	if !strings.Contains(rendered, "go-lib-vendor:") {
 		t.Fatalf("rendered pipeline missing real subproject job\n%s", rendered)
 	}
 }
@@ -204,7 +201,7 @@ func TestRenderPipelineGeneratesWorkspaceShellJobs(t *testing.T) {
 		},
 		Subprojects: []subproject{
 			{
-				ID:      "nvcf-go",
+				ID:      "go-lib",
 				Path:    "src/libraries/go/lib",
 				Profile: "go-integration",
 				GoWork:  true,
@@ -218,7 +215,7 @@ func TestRenderPipelineGeneratesWorkspaceShellJobs(t *testing.T) {
 	}
 
 	for _, needle := range []string{
-		"nvcf-go-integration:",
+		"go-lib-integration:",
 		"./tools/scripts/update-go-work",
 		`cd "$CI_PROJECT_DIR/src/libraries/go/lib" && GOWORK="$CI_PROJECT_DIR/go.work" go test ./...`,
 	} {
@@ -307,7 +304,7 @@ func TestRenderGoWorkIncludesConfiguredModulesAndSubprojects(t *testing.T) {
 			},
 		},
 		Subprojects: []subproject{
-			{ID: "nvcf-go", Path: "src/libraries/go/lib", Profile: "go-library", GoWork: true},
+			{ID: "go-lib", Path: "src/libraries/go/lib", Profile: "go-library", GoWork: true},
 			{ID: "ignored", Path: "src/control-plane-services/helm-reval", Profile: "go-library"},
 		},
 	}
