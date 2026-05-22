@@ -677,25 +677,26 @@ Example deployment JSON:
   --version-id <version-id> \
   --request-body '{"input": "Hello!"}' \
   --timeout 120
+
+# Invoke an LLM function with the chat completions path
+./nvcf-cli function invoke \
+  --function-id <function-id> \
+  --version-id <version-id> \
+  --model-name dummy-model \
+  --inference-url /v1/chat/completions \
+  --request-body '{"messages":[{"role":"user","content":"Hello"}],"stream":true}'
+
+# Invoke another OpenAI-compatible LLM path
+./nvcf-cli function invoke \
+  --function-id <function-id> \
+  --version-id <version-id> \
+  --model-name dummy-model \
+  --inference-url /v1/embeddings \
+  --request-body '{"input":"NVCF embeddings check"}'
 ```
 
-LLM functions are invoked through the LLM invocation route and OpenAI-compatible paths:
-
-```bash
-curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
-  -H "Authorization: Bearer ${NVCF_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"<function-id>/dummy-model","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
-```
-
-Use the OpenAI `model` value `<function-id>/<model-name>` for LLM invocation requests.
-
-```bash
-curl -sS -X POST "https://llm.invocation.<domain>/v1/embeddings" \
-  -H "Authorization: Bearer ${NVCF_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"<function-id>/dummy-model","input":"NVCF embeddings check"}'
-```
+Note: The CLI `function invoke` command detects LLM functions automatically.
+For LLM functions, `--model-name` and `--inference-url` are required. The CLI uses the LLM invocation route and sets the OpenAI `model` value to `<function-id>/<model-name>`.
 
 For LLM Gateway endpoint behavior, routing, and session stickiness details, see [LLM Gateway](./llm-gateway.md).
 
@@ -711,6 +712,8 @@ Additional `function invoke` flags:
 | `--grpc-service` | gRPC service name |
 | `--grpc-method` | gRPC method name |
 | `--grpc-plaintext` | Use plaintext (insecure) gRPC |
+| `--inference-url` | Function path, or OpenAI-compatible path for LLM functions (required for LLM) |
+| `--model-name` | OpenAI model name for LLM functions |
 | `--timeout` | Request timeout in seconds (default: 60) |
 | `--poll-duration` | Invocation hold-open duration in seconds (default: 5) |
 | `--input-file` | JSON file with invocation configuration |

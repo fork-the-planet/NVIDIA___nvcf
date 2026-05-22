@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,6 +52,7 @@ const (
 	headerContentType = "Content-Type"
 	contentTypeJSON   = "application/json"
 	apiErrorFormat    = "API error %d: %s"
+	functionTypeLLM   = "LLM"
 )
 
 // Config holds the configuration for the NVCF client
@@ -1345,7 +1347,8 @@ type InvokeFunctionResponse struct {
 
 // InvokeFunctionOptions represents options for function invocation
 type InvokeFunctionOptions struct {
-	InferenceURL        string // Function's inference endpoint (e.g., "/echo")
+	InferenceURL        string // Function inference endpoint, or OpenAI path for LLM functions.
+	ModelName           string // OpenAI model name for LLM functions.
 	PollDurationSeconds int    // Optional invocation hold-open duration in seconds
 }
 
@@ -1362,15 +1365,15 @@ func (c *Client) InvokeFunctionWithOptions(ctx context.Context, functionID, vers
 		defer cancel()
 	}
 
-	inferenceURL, err := c.invokeInferenceURL(ctx, functionID, versionID, options)
+	fullURL, isLLM, err := c.invokeURL(ctx, functionID, versionID, options)
 	if err != nil {
 		return nil, err
 	}
-	fullURL, err := c.directInvokeURL(functionID, inferenceURL)
+	resolvedBody, err := invokeRequestBody(functionID, isLLM, requestBody, options)
 	if err != nil {
 		return nil, err
 	}
-	req, err := c.newInvokeRequest(ctx, fullURL, functionID, requestBody, options)
+	req, err := c.newInvokeRequest(ctx, fullURL, functionID, isLLM, resolvedBody, options)
 	if err != nil {
 		return nil, err
 	}
@@ -1390,19 +1393,36 @@ func (c *Client) InvokeFunctionWithOptions(ctx context.Context, functionID, vers
 	return decodeInvokeFunctionResponse(resp, bodyBytes)
 }
 
-func (c *Client) invokeInferenceURL(ctx context.Context, functionID, versionID string, options *InvokeFunctionOptions) (string, error) {
-	if options != nil && options.InferenceURL != "" {
-		return options.InferenceURL, nil
-	}
-
+func (c *Client) invokeURL(ctx context.Context, functionID, versionID string, options *InvokeFunctionOptions) (string, bool, error) {
 	funcDetails, err := c.GetFunctionDetails(ctx, functionID, versionID)
 	if err != nil {
-		return "", fmt.Errorf("failed to get function details for invocation (hint: specify inferenceUrl in config to skip this): %w", err)
+		if options != nil && options.InferenceURL != "" {
+			fullURL, directErr := c.directInvokeURL(functionID, options.InferenceURL)
+			if directErr == nil && options.ModelName != "" {
+				log.Printf("WARNING: model-name ignored because function details lookup failed; falling back to direct invocation path")
+			}
+			return fullURL, false, directErr
+		}
+		return "", false, fmt.Errorf("failed to get function details for invocation (hint: specify inferenceUrl in config to skip this): %w", err)
 	}
-	if funcDetails.InferenceURL == "" {
-		return "", fmt.Errorf("function has no inferenceUrl configured")
+
+	if strings.EqualFold(funcDetails.FunctionType, functionTypeLLM) {
+		if options == nil || options.InferenceURL == "" {
+			return "", true, fmt.Errorf("inference-url is required when invoking LLM functions")
+		}
+		fullURL, err := c.llmInvokeURL(options.InferenceURL)
+		return fullURL, true, err
 	}
-	return funcDetails.InferenceURL, nil
+
+	inferenceURL := funcDetails.InferenceURL
+	if options != nil && options.InferenceURL != "" {
+		inferenceURL = options.InferenceURL
+	}
+	if inferenceURL == "" {
+		return "", false, fmt.Errorf("function has no inferenceUrl configured")
+	}
+	fullURL, err := c.directInvokeURL(functionID, inferenceURL)
+	return fullURL, false, err
 }
 
 func (c *Client) invokeBaseURL() string {
@@ -1417,6 +1437,67 @@ func (c *Client) directInvokeURL(functionID, inferenceURL string) (string, error
 		return gatewayInvocationURL(c.invokeBaseURL(), inferenceURL)
 	}
 	return directInvocationURL(c.invokeBaseURL(), functionID, inferenceURL)
+}
+
+func (c *Client) llmInvokeURL(inferenceURL string) (string, error) {
+	if c.config.InvokeHost != "" {
+		return gatewayInvocationURL(c.invokeBaseURL(), inferenceURL)
+	}
+	return llmInvocationURL(c.invokeBaseURL(), inferenceURL)
+}
+
+func llmInvocationURL(baseInvokeURL, inferenceURL string) (string, error) {
+	u, err := url.Parse(baseInvokeURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse invoke URL %q: %w", baseInvokeURL, err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invoke URL must include scheme and host: %q", baseInvokeURL)
+	}
+
+	hostname := llmInvocationHostname(u.Hostname())
+	if port := u.Port(); port != "" {
+		u.Host = net.JoinHostPort(hostname, port)
+	} else {
+		u.Host = hostname
+	}
+	u.Path = path.Join(u.Path, inferenceURL)
+	if !strings.HasPrefix(u.Path, "/") {
+		u.Path = "/" + u.Path
+	}
+	if strings.HasSuffix(inferenceURL, "/") && !strings.HasSuffix(u.Path, "/") {
+		u.Path += "/"
+	}
+	return u.String(), nil
+}
+
+func llmInvocationHost(host string) string {
+	u := url.URL{Scheme: "http", Host: host}
+	hostname := u.Hostname()
+	if hostname == "" {
+		return llmInvocationHostname(host)
+	}
+
+	llmHost := llmInvocationHostname(hostname)
+	if port := u.Port(); port != "" {
+		return net.JoinHostPort(llmHost, port)
+	}
+	return llmHost
+}
+
+func llmInvocationHostname(hostname string) string {
+	switch {
+	case strings.HasPrefix(hostname, "llm."):
+		return hostname
+	case hostname == "invocation.localhost":
+		return "llm.localhost"
+	case strings.HasPrefix(hostname, "invocation."):
+		return "llm." + hostname
+	case strings.HasPrefix(hostname, "api."):
+		return "llm.invocation." + strings.TrimPrefix(hostname, "api.")
+	default:
+		return "llm." + hostname
+	}
 }
 
 func gatewayInvocationURL(baseInvokeURL, inferenceURL string) (string, error) {
@@ -1438,7 +1519,7 @@ func gatewayInvocationURL(baseInvokeURL, inferenceURL string) (string, error) {
 	return u.String(), nil
 }
 
-func (c *Client) newInvokeRequest(ctx context.Context, fullURL, functionID string, requestBody map[string]interface{}, options *InvokeFunctionOptions) (*http.Request, error) {
+func (c *Client) newInvokeRequest(ctx context.Context, fullURL, functionID string, isLLM bool, requestBody map[string]interface{}, options *InvokeFunctionOptions) (*http.Request, error) {
 	jsonBody, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -1450,17 +1531,42 @@ func (c *Client) newInvokeRequest(ctx context.Context, fullURL, functionID strin
 	}
 	req.Header.Set(headerContentType, contentTypeJSON)
 	req.Header.Set("Accept", "*/*")
-	c.applyInvokeRouting(req, functionID)
+	c.applyInvokeRouting(req, functionID, isLLM)
 	applyInvokeOptions(req, options)
 	return req, nil
 }
 
-func (c *Client) applyInvokeRouting(req *http.Request, functionID string) {
+func invokeRequestBody(functionID string, isLLM bool, requestBody map[string]interface{}, options *InvokeFunctionOptions) (map[string]interface{}, error) {
+	if !isLLM {
+		return requestBody, nil
+	}
+	if options == nil || options.ModelName == "" {
+		return nil, fmt.Errorf("model-name is required when invoking LLM functions")
+	}
+
+	resolvedModel := functionID + "/" + options.ModelName
+	if _, ok := requestBody["model"]; ok {
+		log.Printf("WARNING: request body model was overridden with %q for LLM invocation", resolvedModel)
+	}
+
+	body := make(map[string]interface{}, len(requestBody)+1)
+	for key, value := range requestBody {
+		body[key] = value
+	}
+	body["model"] = resolvedModel
+	return body, nil
+}
+
+func (c *Client) applyInvokeRouting(req *http.Request, functionID string, isLLM bool) {
 	if c.config.InvokeHost == "" {
 		return
 	}
 
-	req.Host = functionID + "." + c.config.InvokeHost
+	if isLLM {
+		req.Host = llmInvocationHost(c.config.InvokeHost)
+	} else {
+		req.Host = functionID + "." + c.config.InvokeHost
+	}
 	if c.config.Debug {
 		log.Printf("DEBUG: Using Invoke Host header override: %s", req.Host)
 	}

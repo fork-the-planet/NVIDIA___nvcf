@@ -158,6 +158,50 @@ func TestLoadCreateConfigAppendsLLMModelFlag(t *testing.T) {
 	assertStringSlice(t, model.LLMConfig.URIs, []string{"/v1/chat/completions", "/v1/embeddings"})
 }
 
+func TestLoadInvokeConfigAppliesInferenceURLFlag(t *testing.T) {
+	originalFlags := invokeFlags
+	t.Cleanup(func() {
+		invokeFlags = originalFlags
+	})
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("inference-url", "", "")
+	if err := cmd.Flags().Set("inference-url", "/v1/embeddings"); err != nil {
+		t.Fatalf("set inference-url flag: %v", err)
+	}
+	invokeFlags.inferenceURL = "/v1/embeddings"
+
+	config, err := loadInvokeConfig(cmd)
+	if err != nil {
+		t.Fatalf("load invoke config: %v", err)
+	}
+	if got, want := config.InferenceURL, "/v1/embeddings"; got != want {
+		t.Fatalf("InferenceURL = %q, want %q", got, want)
+	}
+}
+
+func TestLoadInvokeConfigAppliesModelNameFlag(t *testing.T) {
+	originalFlags := invokeFlags
+	t.Cleanup(func() {
+		invokeFlags = originalFlags
+	})
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("model-name", "", "")
+	if err := cmd.Flags().Set("model-name", "dummy-model"); err != nil {
+		t.Fatalf("set model-name flag: %v", err)
+	}
+	invokeFlags.modelName = "dummy-model"
+
+	config, err := loadInvokeConfig(cmd)
+	if err != nil {
+		t.Fatalf("load invoke config: %v", err)
+	}
+	if got, want := config.ModelName, "dummy-model"; got != want {
+		t.Fatalf("ModelName = %q, want %q", got, want)
+	}
+}
+
 func stringValue(value *string) string {
 	if value == nil {
 		return ""

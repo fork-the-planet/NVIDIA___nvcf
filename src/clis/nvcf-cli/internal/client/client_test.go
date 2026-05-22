@@ -18,9 +18,11 @@ limitations under the License.
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,6 +47,70 @@ func (t *invokeRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Resp
 		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
 		Request:    req,
 	}, nil
+}
+
+type invokeFunctionDetailsTransport struct {
+	t              *testing.T
+	functionType   string
+	inferenceURL   string
+	detailsStatus  int
+	invocationReq  *http.Request
+	invocationBody []byte
+	functionDetail *http.Request
+}
+
+func (t *invokeFunctionDetailsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	switch {
+	case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/v2/nvcf/functions/"):
+		t.functionDetail = req
+		status := t.detailsStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if status != http.StatusOK {
+			return &http.Response{
+				StatusCode: status,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"message":"details failed"}`)),
+				Request:    req,
+			}, nil
+		}
+		body, err := json.Marshal(struct {
+			Function FunctionDto `json:"function"`
+		}{
+			Function: FunctionDto{
+				ID:           "func-123",
+				VersionID:    "ver-456",
+				FunctionType: t.functionType,
+				InferenceURL: t.inferenceURL,
+			},
+		})
+		if err != nil {
+			t.t.Fatalf("marshal function details: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Request:    req,
+		}, nil
+	case req.Method == http.MethodPost:
+		t.invocationReq = req
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.t.Fatalf("read invocation body: %v", err)
+		}
+		t.invocationBody = body
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request:    req,
+		}, nil
+	default:
+		t.t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+		return nil, nil
+	}
 }
 
 func TestBaseHTTPURLHost(t *testing.T) {
@@ -155,6 +221,309 @@ func TestInvokeFunctionWithOptionsUsesFunctionHostnameRouting(t *testing.T) {
 				t.Fatalf("NVCF-POLL-SECONDS = %q, want 10", got)
 			}
 		})
+	}
+}
+
+func TestInvokeFunctionRoutesLLMFunctionsThroughLLMGateway(t *testing.T) {
+	capture := &invokeFunctionDetailsTransport{
+		t:            t,
+		functionType: "LLM",
+		inferenceURL: "/health",
+	}
+	client := &Client{
+		config: &Config{
+			BaseHTTPURL:   "http://api.localhost:8080",
+			BaseInvokeURL: "http://127.0.0.1:8080",
+			InvokeHost:    "invocation.localhost",
+		},
+		baseURL:    "http://api.localhost:8080",
+		httpClient: &http.Client{Transport: capture},
+	}
+
+	_, err := client.InvokeFunctionWithOptions(
+		context.Background(),
+		"func-123",
+		"ver-456",
+		map[string]interface{}{"stream": true},
+		0,
+		&InvokeFunctionOptions{InferenceURL: "/v1/chat/completions", ModelName: "dummy-model"},
+	)
+	if err != nil {
+		t.Fatalf("InvokeFunctionWithOptions returned error: %v", err)
+	}
+	if capture.functionDetail == nil {
+		t.Fatal("expected function details request")
+	}
+	if capture.invocationReq == nil {
+		t.Fatal("expected invocation request")
+	}
+	if got, want := capture.invocationReq.URL.String(), "http://127.0.0.1:8080/v1/chat/completions"; got != want {
+		t.Fatalf("request URL = %q, want %q", got, want)
+	}
+	if got, want := capture.invocationReq.Host, "llm.localhost"; got != want {
+		t.Fatalf("request Host = %q, want %q", got, want)
+	}
+	assertInvocationBodyField(t, capture.invocationBody, "model", "func-123/dummy-model")
+}
+
+func TestInvokeFunctionRoutesLLMFunctionsWithExplicitOpenAIPath(t *testing.T) {
+	capture := &invokeFunctionDetailsTransport{
+		t:            t,
+		functionType: "LLM",
+		inferenceURL: "/health",
+	}
+	client := &Client{
+		config: &Config{
+			BaseHTTPURL:   "http://api.localhost:8080",
+			BaseInvokeURL: "http://127.0.0.1:8080",
+			InvokeHost:    "invocation.localhost",
+		},
+		baseURL:    "http://api.localhost:8080",
+		httpClient: &http.Client{Transport: capture},
+	}
+
+	_, err := client.InvokeFunctionWithOptions(
+		context.Background(),
+		"func-123",
+		"ver-456",
+		map[string]interface{}{"input": "hello"},
+		0,
+		&InvokeFunctionOptions{InferenceURL: "/v1/embeddings", ModelName: "dummy-model"},
+	)
+	if err != nil {
+		t.Fatalf("InvokeFunctionWithOptions returned error: %v", err)
+	}
+	if capture.functionDetail == nil {
+		t.Fatal("expected function details request")
+	}
+	if capture.invocationReq == nil {
+		t.Fatal("expected invocation request")
+	}
+	if got, want := capture.invocationReq.URL.String(), "http://127.0.0.1:8080/v1/embeddings"; got != want {
+		t.Fatalf("request URL = %q, want %q", got, want)
+	}
+	if got, want := capture.invocationReq.Host, "llm.localhost"; got != want {
+		t.Fatalf("request Host = %q, want %q", got, want)
+	}
+	assertInvocationBodyField(t, capture.invocationBody, "model", "func-123/dummy-model")
+}
+
+func TestInvokeFunctionOverridesRequestBodyModelForLLMFunctions(t *testing.T) {
+	capture := &invokeFunctionDetailsTransport{
+		t:            t,
+		functionType: "LLM",
+		inferenceURL: "/health",
+	}
+	client := &Client{
+		config: &Config{
+			BaseHTTPURL:   "http://api.localhost:8080",
+			BaseInvokeURL: "http://127.0.0.1:8080",
+			InvokeHost:    "invocation.localhost",
+		},
+		baseURL:    "http://api.localhost:8080",
+		httpClient: &http.Client{Transport: capture},
+	}
+	var logOutput bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&logOutput)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+	})
+
+	_, err := client.InvokeFunctionWithOptions(
+		context.Background(),
+		"func-123",
+		"ver-456",
+		map[string]interface{}{"model": "user-supplied-model", "input": "hello"},
+		0,
+		&InvokeFunctionOptions{InferenceURL: "/v1/embeddings", ModelName: "dummy-model"},
+	)
+	if err != nil {
+		t.Fatalf("InvokeFunctionWithOptions returned error: %v", err)
+	}
+
+	assertInvocationBodyField(t, capture.invocationBody, "model", "func-123/dummy-model")
+	if got := logOutput.String(); !strings.Contains(got, "WARNING: request body model") {
+		t.Fatalf("log output = %q, want request body model warning", got)
+	}
+}
+
+func TestInvokeFunctionRequiresModelNameForLLMFunctions(t *testing.T) {
+	capture := &invokeFunctionDetailsTransport{
+		t:            t,
+		functionType: "LLM",
+		inferenceURL: "/health",
+	}
+	client := &Client{
+		config: &Config{
+			BaseHTTPURL:   "http://api.localhost:8080",
+			BaseInvokeURL: "http://127.0.0.1:8080",
+			InvokeHost:    "invocation.localhost",
+		},
+		baseURL:    "http://api.localhost:8080",
+		httpClient: &http.Client{Transport: capture},
+	}
+
+	_, err := client.InvokeFunctionWithOptions(
+		context.Background(),
+		"func-123",
+		"ver-456",
+		map[string]interface{}{"stream": true},
+		0,
+		&InvokeFunctionOptions{InferenceURL: "/v1/chat/completions"},
+	)
+	if err == nil {
+		t.Fatal("expected model-name required error")
+	}
+	if !strings.Contains(err.Error(), "model-name is required") {
+		t.Fatalf("error = %q, want model-name required", err.Error())
+	}
+	if capture.invocationReq != nil {
+		t.Fatal("unexpected invocation request")
+	}
+}
+
+func TestInvokeFunctionRequiresInferenceURLForLLMFunctions(t *testing.T) {
+	capture := &invokeFunctionDetailsTransport{
+		t:            t,
+		functionType: "LLM",
+		inferenceURL: "/health",
+	}
+	client := &Client{
+		config: &Config{
+			BaseHTTPURL:   "http://api.localhost:8080",
+			BaseInvokeURL: "http://127.0.0.1:8080",
+			InvokeHost:    "invocation.localhost",
+		},
+		baseURL:    "http://api.localhost:8080",
+		httpClient: &http.Client{Transport: capture},
+	}
+
+	_, err := client.InvokeFunctionWithOptions(
+		context.Background(),
+		"func-123",
+		"ver-456",
+		map[string]interface{}{"stream": true},
+		0,
+		&InvokeFunctionOptions{ModelName: "dummy-model"},
+	)
+	if err == nil {
+		t.Fatal("expected inference-url required error")
+	}
+	if !strings.Contains(err.Error(), "inference-url is required") {
+		t.Fatalf("error = %q, want inference-url required", err.Error())
+	}
+	if capture.invocationReq != nil {
+		t.Fatal("unexpected invocation request")
+	}
+}
+
+func TestInvokeFunctionFallsBackToExplicitPathWhenDetailsLookupFails(t *testing.T) {
+	capture := &invokeFunctionDetailsTransport{
+		t:             t,
+		detailsStatus: http.StatusInternalServerError,
+	}
+	client := &Client{
+		config: &Config{
+			BaseInvokeURL: "https://invocation.example.com",
+		},
+		httpClient: &http.Client{Transport: capture},
+	}
+	var logOutput bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&logOutput)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+	})
+
+	_, err := client.InvokeFunctionWithOptions(
+		context.Background(),
+		"func-123",
+		"ver-456",
+		map[string]interface{}{"message": "hello"},
+		0,
+		&InvokeFunctionOptions{InferenceURL: "/echo", ModelName: "dummy-model"},
+	)
+	if err != nil {
+		t.Fatalf("InvokeFunctionWithOptions returned error: %v", err)
+	}
+	if capture.functionDetail == nil {
+		t.Fatal("expected function details request")
+	}
+	if capture.invocationReq == nil {
+		t.Fatal("expected invocation request")
+	}
+	if got, want := capture.invocationReq.URL.String(), "https://func-123.invocation.example.com/echo"; got != want {
+		t.Fatalf("request URL = %q, want %q", got, want)
+	}
+	assertInvocationBodyFieldAbsent(t, capture.invocationBody, "model")
+	if got := logOutput.String(); !strings.Contains(got, "WARNING: model-name ignored") {
+		t.Fatalf("log output = %q, want model-name ignored warning", got)
+	}
+}
+
+func TestLLMInvocationURLDerivesHostFromInvocationURL(t *testing.T) {
+	tests := []struct {
+		name          string
+		baseInvokeURL string
+		want          string
+	}{
+		{
+			name:          "invocation domain",
+			baseInvokeURL: "https://invocation.example.com",
+			want:          "https://llm.invocation.example.com/v1/chat/completions",
+		},
+		{
+			name:          "invocation domain with port",
+			baseInvokeURL: "https://invocation.example.com:8443",
+			want:          "https://llm.invocation.example.com:8443/v1/chat/completions",
+		},
+		{
+			name:          "api domain",
+			baseInvokeURL: "https://api.example.com",
+			want:          "https://llm.invocation.example.com/v1/chat/completions",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := llmInvocationURL(tt.baseInvokeURL, "/v1/chat/completions")
+			if err != nil {
+				t.Fatalf("llmInvocationURL returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("llmInvocationURL = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLLMInvocationHostPreservesPort(t *testing.T) {
+	if got, want := llmInvocationHost("invocation.localhost:8080"), "llm.localhost:8080"; got != want {
+		t.Fatalf("llmInvocationHost = %q, want %q", got, want)
+	}
+}
+
+func assertInvocationBodyField(t *testing.T, body []byte, key, want string) {
+	t.Helper()
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal invocation body: %v", err)
+	}
+	if got[key] != want {
+		t.Fatalf("request body %s = %v, want %q", key, got[key], want)
+	}
+}
+
+func assertInvocationBodyFieldAbsent(t *testing.T, body []byte, key string) {
+	t.Helper()
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal invocation body: %v", err)
+	}
+	if _, ok := got[key]; ok {
+		t.Fatalf("request body unexpectedly has %s = %v", key, got[key])
 	}
 }
 

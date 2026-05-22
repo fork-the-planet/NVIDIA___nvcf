@@ -57,6 +57,10 @@ The same configuration can be provided with CLI flags:
 
 `llmConfig.uris` lists the OpenAI-compatible paths handled by the model. Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`. `routingMethod` accepts `round_robin`, `power_of_two`, or `random`. `tokenRateLimit` uses the same rate limit format as function-level rate limits.
 
+Note: LLM functions do not use the normal function invocation hostname or path.
+Send requests to the LLM invocation route, such as `https://llm.invocation.<domain>/v1/chat/completions`, and set `model` to `<function-id>/<model-name>`.
+The CLI `function invoke` command detects LLM functions automatically. Pass `--inference-url` with the OpenAI-compatible path and `--model-name <model-name>` so the CLI can set the OpenAI `model` value to `<function-id>/<model-name>`.
+
 After deployment, invoke chat completions through the LLM invocation route:
 
 ```bash

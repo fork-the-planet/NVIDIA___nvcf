@@ -204,7 +204,7 @@ returns pending request metadata.
 
 Invocation Methods:
   --grpc     Use gRPC invocation (native Go client with JSON encoding)
-  (default)  Use direct REST invocation through <function-id>.invocation.<domain>
+  (default)  Use direct REST invocation. LLM functions use the LLM invocation route.
 
 Examples:
   # Direct REST invocation (default)
@@ -400,7 +400,8 @@ type DeleteConfig struct {
 type InvokeConfig struct {
 	FunctionID          string                 `json:"functionId"`
 	VersionID           string                 `json:"versionId"`
-	InferenceURL        string                 `json:"inferenceUrl"` // Function's inference endpoint (e.g., "/echo")
+	InferenceURL        string                 `json:"inferenceUrl,omitempty"` // Function path, or OpenAI-compatible path for LLM functions.
+	ModelName           string                 `json:"modelName,omitempty"`    // OpenAI model name for LLM functions.
 	RequestBody         map[string]interface{} `json:"requestBody"`
 	Timeout             int                    `json:"timeout,omitempty"`
 	PollDurationSeconds int                    `json:"pollDurationSeconds,omitempty"`
@@ -488,6 +489,8 @@ var invokeFlags struct {
 
 	functionID          string
 	versionID           string
+	inferenceURL        string
+	modelName           string
 	requestBody         string
 	timeout             int
 	pollDurationSeconds int
@@ -574,6 +577,8 @@ func init() {
 	invokeCmd.Flags().StringVar(&invokeFlags.inputFile, "input-file", "", "JSON file with invocation configuration (overrides individual flags)")
 	invokeCmd.Flags().StringVar(&invokeFlags.functionID, "function-id", "", "Function ID (required)")
 	invokeCmd.Flags().StringVar(&invokeFlags.versionID, "version-id", "", "Version ID (required)")
+	invokeCmd.Flags().StringVar(&invokeFlags.inferenceURL, "inference-url", "", "Function path, or OpenAI-compatible path for LLM functions (required for LLM)")
+	invokeCmd.Flags().StringVar(&invokeFlags.modelName, "model-name", "", "OpenAI model name for LLM functions (required for LLM)")
 	invokeCmd.Flags().StringVar(&invokeFlags.requestBody, "request-body", "", "JSON request body (required)")
 	invokeCmd.Flags().IntVar(&invokeFlags.timeout, "timeout", 60, "Request timeout in seconds")
 	invokeCmd.Flags().IntVar(&invokeFlags.pollDurationSeconds, "poll-duration", 5, "Invocation hold-open duration in seconds")
@@ -1180,6 +1185,12 @@ func loadInvokeConfig(cmd *cobra.Command) (*InvokeConfig, error) {
 	}
 	if cmd.Flags().Changed("version-id") {
 		config.VersionID = invokeFlags.versionID
+	}
+	if cmd.Flags().Changed("inference-url") {
+		config.InferenceURL = invokeFlags.inferenceURL
+	}
+	if cmd.Flags().Changed("model-name") {
+		config.ModelName = invokeFlags.modelName
 	}
 	if cmd.Flags().Changed("request-body") {
 		// Parse request body JSON from CLI flag
@@ -1887,11 +1898,12 @@ func invokeViaREST(ctx context.Context, nvcfClient *client.Client, config *Invok
 }
 
 func invokeOptionsFromConfig(config *InvokeConfig) *client.InvokeFunctionOptions {
-	if config.InferenceURL == "" && config.PollDurationSeconds <= 0 {
+	if config.InferenceURL == "" && config.ModelName == "" && config.PollDurationSeconds <= 0 {
 		return nil
 	}
 	return &client.InvokeFunctionOptions{
 		InferenceURL:        config.InferenceURL,
+		ModelName:           config.ModelName,
 		PollDurationSeconds: config.PollDurationSeconds,
 	}
 }
