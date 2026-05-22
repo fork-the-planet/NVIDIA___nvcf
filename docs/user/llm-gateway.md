@@ -16,6 +16,8 @@ Requests use the OpenAI `model` field in this format:
 
 The gateway uses `<function-id>` as the routing key for NVCF authorization and backend selection. It forwards `<model-name>` to the upstream model server.
 
+Requests must already be OpenAI-compatible when they reach the LLM invocation route. Any model-specific prompt formatting or tokenizer behavior belongs in the upstream model server.
+
 ## Request Flow
 
 The LLM Gateway path has these runtime components:
@@ -64,6 +66,8 @@ Set `functionType` to `LLM` and define model routing metadata under `models[].ll
 `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
 
 `llmConfig.tokenRateLimit` applies a per-model token limit using the same rate limit format as function-level limits.
+
+For request admission and rate limiting, the gateway uses request estimates until the upstream service returns usage data. Do not depend on gateway-side exact token counts.
 
 ## Endpoint Behavior
 

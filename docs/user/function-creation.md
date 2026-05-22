@@ -23,6 +23,8 @@ Use an LLM function when the deployed workload exposes OpenAI-compatible model r
 
 For the full request path, supported endpoints, native proxy behavior, and session stickiness details, see [LLM Gateway](./llm-gateway.md).
 
+LLM requests must already be OpenAI-compatible when they reach the gateway. NVCF does not render Hugging Face chat templates or tokenize prompts for the function.
+
 ```json
 {
   "name": "sample-llm-function",
