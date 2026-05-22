@@ -126,6 +126,7 @@ Tool-specific hook config files, such as `.cursor/hooks.json`, `.codex/hooks.jso
 | `bazel-synthetic-import-strategy` | `ai-tooling/dev/skills/` | Plan Bazel rollout for NVCF synthetic imports |
 | `documentation-style` | `ai-tooling/dev/skills/` | NVCF documentation conventions (no bold, no emojis, no em-dash) |
 | `nvcf-explore-stack` | `ai-tooling/dev/skills/` | Navigate the self-hosted stack topology and dependency graph |
+| `official-docs-style` | `ai-tooling/dev/skills/` | External-facing NVCF user documentation voice and structure |
 | `nvcf-self-managed-cli` | `ai-tooling/user/skills/` | Install, operate, and manage self-managed NVCF through `nvcf-cli` |
 | `nvcf-self-managed-installation` | `ai-tooling/user/skills/` | Install and deploy the self-managed NVCF stack |
 

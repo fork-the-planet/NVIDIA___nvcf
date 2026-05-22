@@ -181,6 +181,7 @@ Before committing changes, verify:
 | `bazel-synthetic-import-strategy` | Plan Bazel rollout for NVCF synthetic imports | build-systems |
 | `documentation-style` | NVCF documentation conventions for public repo prose | documentation |
 | `nvcf-explore-stack` | Navigate self-hosted stack topology, helmfile deployment order, chart ownership, and dependencies | cloud-infrastructure |
+| `official-docs-style` | External-facing NVCF user documentation voice and structure | documentation |
 | `nvcf-self-managed-installation` | Install and deploy the nvcf-self-managed-stack helmfile bundle: installation, teardown, values overrides, pull secrets, debugging | cloud-infrastructure |
 | `nvcf-self-managed-cli` | Standalone NVCF CLI for self-managed/self-hosted deployments: function lifecycle, deployment, invocation, API keys, and registry credentials | cloud-infrastructure |
 
