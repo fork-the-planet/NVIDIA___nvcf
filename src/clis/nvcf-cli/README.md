@@ -722,15 +722,20 @@ Update various aspects of an existing function:
 export NVCF_TOKEN="nvapi-your-function-creation-token"
 export NVCF_API_KEY="nvapi-your-general-operations-token"  # optional fallback
 
-# Update function metadata (tags, description)
-./nvcf-cli update metadata \
+# Update function tags
+./nvcf-cli function update \
   --function-id "func-12345678-1234-1234-1234-123456789abc" \
   --version-id "ver-12345678-1234-1234-1234-123456789abc" \
-  --description "Updated function description" \
   --tags "production,ml-model,updated"
 
+# Update LLM model routing config
+./nvcf-cli function update \
+  --function-id "func-12345678-1234-1234-1234-123456789abc" \
+  --version-id "ver-12345678-1234-1234-1234-123456789abc" \
+  --llm-model-update "name=dummy-model,routingMethod=round_robin,tokenRateLimit=1000-M"
+
 # Update function deployment specifications
-./nvcf-cli update deployment \
+./nvcf-cli function deploy update \
   --function-id "func-12345678-1234-1234-1234-123456789abc" \
   --version-id "ver-12345678-1234-1234-1234-123456789abc" \
   --min-instances 2 \
@@ -738,17 +743,25 @@ export NVCF_API_KEY="nvapi-your-general-operations-token"  # optional fallback
   --max-request-concurrency 20
 
 # Or update with JSON configuration
-./nvcf-cli update metadata --input-file update-metadata.json
-./nvcf-cli update deployment --input-file update-deployment.json
+./nvcf-cli function update --input-file update-metadata.json
+./nvcf-cli function deploy update --input-file update-deployment.json
 ```
 
-**Update Metadata JSON format (`update-metadata.json`):**
+**Update Function JSON format (`update-metadata.json`):**
 ```json
 {
   "functionId": "func-12345678-1234-1234-1234-123456789abc",
   "versionId": "ver-12345678-1234-1234-1234-123456789abc",
-  "description": "Updated function description",
-  "tags": ["production", "ml-model", "updated"]
+  "tags": ["production", "ml-model", "updated"],
+  "modelUpdates": [
+    {
+      "modelName": "dummy-model",
+      "llmConfig": {
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-M"
+      }
+    }
+  ]
 }
 ```
 
@@ -766,7 +779,7 @@ export NVCF_API_KEY="nvapi-your-general-operations-token"  # optional fallback
 ```
 
 **Update Command Features:**
-- **Metadata Updates**: Change function description and tags without affecting code or deployment
+- **Function Updates**: Change function tags and LLM model routing config without affecting code or deployment
 - **Deployment Updates**: Modify instance counts, concurrency, clusters, and other deployment settings
 - **Non-destructive**: Updates preserve existing function code and configuration
 - **Note**: GPU type and backend configurations cannot be modified through update operations
@@ -1075,15 +1088,14 @@ echo '{
 }' > deploy.json
 ./nvcf-cli deploy --function-id func-12345678-1234-1234-1234-123456789abc --version-id ver-87654321-4321-4321-4321-123456789abc --input-file deploy.json
 
-# Step 5: Update function metadata (uses NVCF_TOKEN)
-./nvcf-cli update metadata \
+# Step 5: Update function tags (uses NVCF_TOKEN)
+./nvcf-cli function update \
   --function-id func-12345678-1234-1234-1234-123456789abc \
   --version-id ver-87654321-4321-4321-4321-123456789abc \
-  --description "Updated production function" \
   --tags "production,v2,optimized"
 
 # Step 6: Update deployment (scale up) (uses NVCF_TOKEN)
-./nvcf-cli update deployment \
+./nvcf-cli function deploy update \
   --function-id func-12345678-1234-1234-1234-123456789abc \
   --version-id ver-87654321-4321-4321-4321-123456789abc \
   --min-instances 2 \

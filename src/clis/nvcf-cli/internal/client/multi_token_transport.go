@@ -23,7 +23,10 @@ import (
 	"strings"
 )
 
-const deploymentPathSegment = "/deployments/"
+const (
+	deploymentPathSegment     = "/deployments/"
+	functionVersionPathPrefix = "/v2/nvcf/functions/"
+)
 
 // multiTokenTransport is an HTTP transport that uses different tokens for different operations
 // Based on NVCF service analysis:
@@ -118,8 +121,13 @@ func isFunctionDeletion(method, path string) bool {
 }
 
 func isFunctionMetadataUpdate(method, path string) bool {
-	// update_function - Function metadata updates.
-	return method == "PUT" && strings.Contains(path, "/metadata/")
+	// update_function - Function updates.
+	if method != "PUT" || !strings.HasPrefix(path, functionVersionPathPrefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(path, functionVersionPathPrefix)
+	functionID, rest, ok := strings.Cut(rest, "/versions/")
+	return ok && functionID != "" && rest != "" && !strings.Contains(rest, "/")
 }
 
 func isRegistryCredentialManagement(path string) bool {
@@ -181,7 +189,7 @@ func functionUserScope(method, path string) (string, bool) {
 	if method == "DELETE" && strings.Contains(path, "/functions/") {
 		return "delete_function", true
 	}
-	if method == "PUT" && strings.Contains(path, "/metadata/") {
+	if isFunctionMetadataUpdate(method, path) {
 		return "update_function", true
 	}
 	return "", false

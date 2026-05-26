@@ -111,6 +111,8 @@ Use `functionType: "LLM"` for OpenAI-compatible models served through the self-m
 
 Invocation uses the LLM route, for example `https://llm.invocation.<domain>/v1/chat/completions`. The OpenAI `model` value must be `<function-id>/<model-name>`; the function ID is the routing key and the model name is forwarded upstream.
 
+Update mutable per-model routing settings with `nvcf-cli function update --llm-model-update='name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>'`, or put the same fields under `modelUpdates[].llmConfig` in an update JSON file. Do not include `uris` in model updates.
+
 For `/v1/responses`, the gateway proxies the native Responses path upstream, relays SSE to streaming clients, and aggregates the terminal JSON response for non-streaming clients. For `/v1/embeddings`, input may be a string or string array, must be non-empty, and may contain at most 2048 entries.
 
 Session stickiness uses `x-multi-turn-session-id` for chat completions and Responses API requests only. Embeddings requests do not use stickiness.
@@ -205,6 +207,7 @@ nvcf-cli cluster register …                   # register cluster
 nvcf-cli api-key generate --description=…     # mint API key for invoke
 nvcf-cli function create --input-file=…       # create function
 nvcf-cli function create --function-type=LLM --llm-model=<spec>  # create LLM function metadata
+nvcf-cli function update --llm-model-update=<spec>  # update LLM routing/token limits
 nvcf-cli function deploy create --input-file=…
 nvcf-cli function invoke --input-file=…
 ```

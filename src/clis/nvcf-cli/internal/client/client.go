@@ -53,6 +53,8 @@ const (
 	contentTypeJSON   = "application/json"
 	apiErrorFormat    = "API error %d: %s"
 	functionTypeLLM   = "LLM"
+
+	functionVersionEndpointFormat = "/v2/nvcf/functions/%s/versions/%s"
 )
 
 // Config holds the configuration for the NVCF client
@@ -925,7 +927,7 @@ func (c *Client) DeleteFunction(ctx context.Context, functionID, versionID strin
 	}
 
 	// Use regular endpoint (works with both JWT and API key)
-	endpoint := fmt.Sprintf("/v2/nvcf/functions/%s/versions/%s",
+	endpoint := fmt.Sprintf(functionVersionEndpointFormat,
 		url.PathEscape(functionID), url.PathEscape(versionID))
 
 	resp, err := c.makeRequest(ctx, "DELETE", endpoint, nil)
@@ -978,7 +980,7 @@ type HealthInfo struct {
 func (c *Client) GetFunction(ctx context.Context, functionID, versionID string) (*GetFunctionResponse, error) {
 	// Choose endpoint based on available authentication
 	// Use regular endpoint (works with both JWT and API key)
-	endpoint := fmt.Sprintf("/v2/nvcf/functions/%s/versions/%s",
+	endpoint := fmt.Sprintf(functionVersionEndpointFormat,
 		url.PathEscape(functionID), url.PathEscape(versionID))
 
 	resp, err := c.makeRequest(ctx, "GET", endpoint, nil)
@@ -1133,10 +1135,23 @@ func (c *Client) DeployFunction(ctx context.Context, functionID, versionID strin
 	return nil
 }
 
-// UpdateFunctionMetadataRequest represents a metadata update request
+// UpdateFunctionMetadataRequest represents a function update request
 type UpdateFunctionMetadataRequest struct {
-	Description string   `json:"description,omitempty"` // Function description
-	Tags        []string `json:"tags,omitempty"`        // Function tags
+	Description  string           `json:"description,omitempty"`  // Function description
+	Tags         []string         `json:"tags,omitempty"`         // Function tags
+	ModelUpdates []ModelUpdateDto `json:"modelUpdates,omitempty"` // Model-specific updates
+}
+
+// ModelUpdateDto represents updates for one model.
+type ModelUpdateDto struct {
+	ModelName string              `json:"modelName"`
+	LLMConfig *LLMConfigUpdateDto `json:"llmConfig,omitempty"`
+}
+
+// LLMConfigUpdateDto represents mutable LLM config fields.
+type LLMConfigUpdateDto struct {
+	TokenRateLimit *string `json:"tokenRateLimit,omitempty"`
+	RoutingMethod  *string `json:"routingMethod,omitempty"`
 }
 
 // UpdateGpuSpecification updates a single GPU specification of an existing
@@ -1173,15 +1188,13 @@ func (c *Client) UpdateGpuSpecification(ctx context.Context, deploymentID, gpuSp
 	return &result, nil
 }
 
-// UpdateFunctionMetadata updates a function's metadata
+// UpdateFunctionMetadata updates mutable function fields
 func (c *Client) UpdateFunctionMetadata(ctx context.Context, functionID, versionID string, req *UpdateFunctionMetadataRequest) error {
-	// Function metadata update requires authentication with update_function scope
 	if c.config.Token == "" && c.config.APIKey == "" {
-		return fmt.Errorf("function metadata update requires NVCF_TOKEN or NVCF_API_KEY with 'update_function' scope")
+		return fmt.Errorf("function update requires NVCF_TOKEN or NVCF_API_KEY with 'update_function' scope")
 	}
 
-	// Use metadata endpoint (works with both JWT and API key)
-	endpoint := fmt.Sprintf("/v2/nvcf/metadata/functions/%s/versions/%s",
+	endpoint := fmt.Sprintf(functionVersionEndpointFormat,
 		url.PathEscape(functionID), url.PathEscape(versionID))
 
 	resp, err := c.makeRequest(ctx, "PUT", endpoint, req)
@@ -1806,7 +1819,7 @@ func (c *Client) ListFunctionVersions(ctx context.Context, functionID string) (*
 
 // GetFunctionDetails retrieves details for a specific function version
 func (c *Client) GetFunctionDetails(ctx context.Context, functionID, versionID string) (*FunctionDto, error) {
-	endpoint := fmt.Sprintf("/v2/nvcf/functions/%s/versions/%s", url.PathEscape(functionID), url.PathEscape(versionID))
+	endpoint := fmt.Sprintf(functionVersionEndpointFormat, url.PathEscape(functionID), url.PathEscape(versionID))
 
 	resp, err := c.makeRequest(ctx, "GET", endpoint, nil)
 	if err != nil {

@@ -649,11 +649,35 @@ Example deployment JSON:
   --version-id <version-id> \
   --tags "production,v2"
 
+# Update LLM model routing config
+./nvcf-cli function update \
+  --function-id <function-id> \
+  --version-id <version-id> \
+  --llm-model-update "name=dummy-model,routingMethod=round_robin,tokenRateLimit=1000-M"
+
 # Update from JSON file
 ./nvcf-cli function update \
   --function-id <function-id> \
   --version-id <version-id> \
   --input-file metadata-update.json
+```
+
+LLM model updates can also be provided in the input file:
+
+```json
+{
+  "functionId": "<function-id>",
+  "versionId": "<version-id>",
+  "modelUpdates": [
+    {
+      "modelName": "dummy-model",
+      "llmConfig": {
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-M"
+      }
+    }
+  ]
+}
 ```
 
 #### Invoke Function

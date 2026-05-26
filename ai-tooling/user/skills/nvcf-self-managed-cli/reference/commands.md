@@ -40,6 +40,8 @@ Full subcommand list. Always pair with [flags.md](flags.md) for global flags and
 | `function create --input-file=FILE` | Create function metadata | Returns Function ID + Version ID; LLM functions use `functionType: "LLM"` and `models[].llmConfig.uris` for `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` |
 | `function list` / `function list-ids` | List functions / IDs only | |
 | `function get --function-id=ID --version-id=VID` | Function metadata | |
+| `function update --function-id=ID --version-id=VID --tags=TAG[,TAG]` | Update function tags | |
+| `function update --function-id=ID --version-id=VID --llm-model-update=SPEC` | Update LLM model routing config | `SPEC` uses `name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>` |
 | `function deploy create --input-file=FILE` | Schedule a deployment | Blocks until ACTIVE (default 900s) |
 | `function deploy get --function-id=ID --version-id=VID [--json]` | Deployment status | `functionStatus: ACTIVE\|DEPLOYING\|ERROR\|FAILED` |
 | `function deploy update --input-file=FILE` | Modify a deployment in place | |

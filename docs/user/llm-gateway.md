@@ -69,6 +69,8 @@ Set `functionType` to `LLM` and define model routing metadata under `models[].ll
 
 `llmConfig.tokenRateLimit` applies a per-model token limit using the same rate limit format as function-level limits.
 
+These per-model routing fields are mutable. Use `nvcf-cli function update --llm-model-update "name=<model>,routingMethod=<method>,tokenRateLimit=<limit>"` or JSON `modelUpdates` to change them without recreating the function version.
+
 For request admission and rate limiting, the gateway uses request estimates until the upstream service returns usage data. Do not depend on gateway-side exact token counts.
 
 ## Endpoint Behavior

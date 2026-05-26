@@ -158,6 +158,146 @@ func TestLoadCreateConfigAppendsLLMModelFlag(t *testing.T) {
 	assertStringSlice(t, model.LLMConfig.URIs, []string{"/v1/chat/completions", "/v1/embeddings"})
 }
 
+func TestUpdateConfigParsesLLMModelUpdatesFromJSON(t *testing.T) {
+	t.Parallel()
+
+	var config UpdateConfig
+	err := json.Unmarshal([]byte(`{
+		"functionId": "func-123",
+		"versionId": "ver-456",
+		"modelUpdates": [{
+			"modelName": "dummy-model",
+			"llmConfig": {
+				"routingMethod": "round_robin",
+				"tokenRateLimit": "1000-M"
+			}
+		}]
+	}`), &config)
+	if err != nil {
+		t.Fatalf("unmarshal update config: %v", err)
+	}
+
+	if len(config.ModelUpdates) != 1 {
+		t.Fatalf("modelUpdates length = %d, want 1", len(config.ModelUpdates))
+	}
+	update := config.ModelUpdates[0]
+	if update.ModelName != "dummy-model" {
+		t.Fatalf("modelName = %q, want dummy-model", update.ModelName)
+	}
+	if update.LLMConfig == nil {
+		t.Fatal("llmConfig is nil")
+	}
+	if got := stringValue(update.LLMConfig.RoutingMethod); got != "round_robin" {
+		t.Fatalf("routingMethod = %q, want round_robin", got)
+	}
+	if got := stringValue(update.LLMConfig.TokenRateLimit); got != "1000-M" {
+		t.Fatalf("tokenRateLimit = %q, want 1000-M", got)
+	}
+}
+
+func TestParseLLMModelUpdateString(t *testing.T) {
+	t.Parallel()
+
+	update, err := parseLLMModelUpdateString("name=dummy-model,routingMethod=power_of_two,tokenRateLimit=1000-M")
+	if err != nil {
+		t.Fatalf("parse llm model update: %v", err)
+	}
+
+	if update.ModelName != "dummy-model" {
+		t.Fatalf("modelName = %q, want dummy-model", update.ModelName)
+	}
+	if update.LLMConfig == nil {
+		t.Fatal("llmConfig is nil")
+	}
+	if got := stringValue(update.LLMConfig.RoutingMethod); got != "power_of_two" {
+		t.Fatalf("routingMethod = %q, want power_of_two", got)
+	}
+	if got := stringValue(update.LLMConfig.TokenRateLimit); got != "1000-M" {
+		t.Fatalf("tokenRateLimit = %q, want 1000-M", got)
+	}
+}
+
+func TestParseLLMModelUpdateStringAcceptsTokenRateLimitOnly(t *testing.T) {
+	t.Parallel()
+
+	update, err := parseLLMModelUpdateString("name=dummy-model,tokenRateLimit=1000-M")
+	if err != nil {
+		t.Fatalf("parse llm model update: %v", err)
+	}
+
+	if update.ModelName != "dummy-model" {
+		t.Fatalf("modelName = %q, want dummy-model", update.ModelName)
+	}
+	if update.LLMConfig == nil {
+		t.Fatal("llmConfig is nil")
+	}
+	if got := stringValue(update.LLMConfig.RoutingMethod); got != "" {
+		t.Fatalf("routingMethod = %q, want empty", got)
+	}
+	if got := stringValue(update.LLMConfig.TokenRateLimit); got != "1000-M" {
+		t.Fatalf("tokenRateLimit = %q, want 1000-M", got)
+	}
+}
+
+func TestParseLLMModelUpdateStringRejectsMissingModelName(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseLLMModelUpdateString("routingMethod=round_robin")
+	if err == nil {
+		t.Fatal("expected missing name error")
+	}
+}
+
+func TestParseLLMModelUpdateStringRejectsInvalidRoutingMethod(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseLLMModelUpdateString("name=dummy-model,routingMethod=sticky")
+	if err == nil {
+		t.Fatal("expected invalid routing method error")
+	}
+}
+
+func TestLoadUpdateConfigAppendsLLMModelUpdateFlag(t *testing.T) {
+	t.Parallel()
+
+	originalFlags := updateFlags
+	t.Cleanup(func() {
+		updateFlags = originalFlags
+	})
+
+	cmd := &cobra.Command{}
+	cmd.Flags().StringArray("llm-model-update", nil, "")
+	if err := cmd.Flags().Set("llm-model-update", "name=dummy-model,routingMethod=round_robin"); err != nil {
+		t.Fatalf("set llm-model-update flag: %v", err)
+	}
+	updateFlags.llmModelUpdates = []string{"name=dummy-model,routingMethod=round_robin"}
+
+	config, err := loadUpdateConfig(cmd)
+	if err != nil {
+		t.Fatalf("load update config: %v", err)
+	}
+
+	if len(config.ModelUpdates) != 1 {
+		t.Fatalf("modelUpdates length = %d, want 1", len(config.ModelUpdates))
+	}
+	update := config.ModelUpdates[0]
+	if update.ModelName != "dummy-model" {
+		t.Fatalf("modelName = %q, want dummy-model", update.ModelName)
+	}
+	if got := stringValue(update.LLMConfig.RoutingMethod); got != "round_robin" {
+		t.Fatalf("routingMethod = %q, want round_robin", got)
+	}
+}
+
+func TestValidateUpdateConfigRejectsNoUpdates(t *testing.T) {
+	t.Parallel()
+
+	err := validateUpdateConfig(&UpdateConfig{FunctionID: "func-123", VersionID: "ver-456"})
+	if err == nil {
+		t.Fatal("expected no updates error")
+	}
+}
+
 func TestLoadInvokeConfigAppliesInferenceURLFlag(t *testing.T) {
 	originalFlags := invokeFlags
 	t.Cleanup(func() {

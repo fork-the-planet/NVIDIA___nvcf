@@ -74,6 +74,15 @@ In JSON, LLM functions set `functionType: "LLM"` and model routing metadata unde
 
 LLM invocation requests use `model: "<function-id>/<model-name>"`. The function ID selects the NVCF function, and the model name is forwarded upstream. Chat completions and Responses API requests can use `x-multi-turn-session-id` for session stickiness; embeddings requests do not.
 
+## `function update`-specific
+
+| Flag | Purpose | Default |
+|---|---|---|
+| `--tags TAG[,TAG]` | Replace function tags | - |
+| `--llm-model-update SPEC` | LLM model update; format `name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>`; repeatable | - |
+
+In JSON, `function update` accepts `modelUpdates[]` entries with `modelName` and `llmConfig.routingMethod` and/or `llmConfig.tokenRateLimit`. `uris` are create-time model metadata and are not part of model updates.
+
 ## `function deploy create`-specific
 
 `--input-file FILE` is recommended (full JSON spec). For ad-hoc one-shot use:

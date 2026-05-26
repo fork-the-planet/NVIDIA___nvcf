@@ -43,6 +43,7 @@ const (
 	errLoadConfigFmt       = "failed to load configuration: %w"
 	errParseInputFileFmt   = "failed to parse JSON file '%s': %w"
 	errReadInputFileFmt    = "failed to read input file '%s': %w"
+	inputFileFlag          = "input-file"
 )
 
 // ============================================================================
@@ -64,7 +65,7 @@ Available subcommands:
 - list: List all functions
 - list-ids: List function IDs only
 - list-versions: List versions of a specific function
-- update: Update function metadata
+- update: Update function tags and LLM model config
 - queue: Manage function queues
 
 Examples:
@@ -252,12 +253,13 @@ var listVersionsCmd = &cobra.Command{
 // updateCmd represents the update command
 var updateCmd = &cobra.Command{
 	Use:          "update",
-	Short:        "Update function tags",
+	Short:        "Update function tags and LLM model config",
 	SilenceUsage: true,
-	Long: `Updates function tags.
+	Long: `Updates function tags and LLM model configuration.
 
-This allows you to modify the tags of an existing function version
-without affecting the function's code or deployment configuration.
+This allows you to modify mutable fields of an existing function version
+without affecting the function's code or deployment configuration. LLM model
+updates support routingMethod and tokenRateLimit.
 
 For updating deployments, use: nvcf-cli function deploy update
 
@@ -412,11 +414,24 @@ type InvokeConfig struct {
 	GRPCPlaintext bool   `json:"grpcPlaintext,omitempty"` // Use plaintext (insecure) gRPC
 }
 
-// UpdateConfig represents the JSON configuration for updating function metadata
+// UpdateConfig represents the JSON configuration for updating a function
 type UpdateConfig struct {
-	FunctionID string   `json:"functionId"`
-	VersionID  string   `json:"versionId"`
-	Tags       []string `json:"tags,omitempty"`
+	FunctionID   string              `json:"functionId"`
+	VersionID    string              `json:"versionId"`
+	Tags         []string            `json:"tags,omitempty"`
+	ModelUpdates []ModelUpdateConfig `json:"modelUpdates,omitempty"`
+}
+
+// ModelUpdateConfig represents LLM model update configuration.
+type ModelUpdateConfig struct {
+	ModelName string                `json:"modelName"`
+	LLMConfig *LLMConfigUpdateInput `json:"llmConfig,omitempty"`
+}
+
+// LLMConfigUpdateInput represents mutable LLM routing fields.
+type LLMConfigUpdateInput struct {
+	TokenRateLimit *string `json:"tokenRateLimit,omitempty"`
+	RoutingMethod  *string `json:"routingMethod,omitempty"`
 }
 
 // ============================================================================
@@ -501,10 +516,11 @@ var invokeFlags struct {
 }
 
 var updateFlags struct {
-	inputFile  string
-	functionID string
-	versionID  string
-	tags       []string
+	inputFile       string
+	functionID      string
+	versionID       string
+	tags            []string
+	llmModelUpdates []string
 }
 
 // ============================================================================
@@ -531,7 +547,7 @@ func init() {
 	queueCmd.AddCommand(queuePositionCmd)
 
 	// Create command flags
-	createCmd.Flags().StringVar(&createFlags.inputFile, "input-file", "", "JSON file with function configuration (overrides individual flags)")
+	createCmd.Flags().StringVar(&createFlags.inputFile, inputFileFlag, "", "JSON file with function configuration (overrides individual flags)")
 	createCmd.Flags().StringVar(&createFlags.name, "name", "", "Function name (required)")
 	createCmd.Flags().StringVar(&createFlags.containerImage, "image", "", "Container image (required)")
 	createCmd.Flags().StringVar(&createFlags.inferenceURL, "inference-url", "", "Inference URL (required)")
@@ -561,7 +577,7 @@ func init() {
 	createCmd.Flags().StringVar(&createFlags.tracesTelemetryId, "traces-telemetry-id", "", "UUID for traces telemetry")
 
 	// Delete command flags
-	deleteCmd.Flags().StringVar(&deleteFlags.inputFile, "input-file", "", "JSON file with deletion configuration (overrides individual flags)")
+	deleteCmd.Flags().StringVar(&deleteFlags.inputFile, inputFileFlag, "", "JSON file with deletion configuration (overrides individual flags)")
 	deleteCmd.Flags().StringVar(&deleteFlags.functionID, "function-id", "", "Function ID (optional - uses current function from state if not specified)")
 	deleteCmd.Flags().StringVar(&deleteFlags.versionID, "version-id", "", "Version ID (optional - uses current version from state if not specified)")
 	deleteCmd.Flags().BoolVar(&deleteFlags.graceful, "graceful", false, "Gracefully shutdown deployment (only for deployment deletion)")
@@ -574,7 +590,7 @@ func init() {
 	getFunctionCmd.MarkFlagRequired("version-id")
 
 	// Invoke command flags
-	invokeCmd.Flags().StringVar(&invokeFlags.inputFile, "input-file", "", "JSON file with invocation configuration (overrides individual flags)")
+	invokeCmd.Flags().StringVar(&invokeFlags.inputFile, inputFileFlag, "", "JSON file with invocation configuration (overrides individual flags)")
 	invokeCmd.Flags().StringVar(&invokeFlags.functionID, "function-id", "", "Function ID (required)")
 	invokeCmd.Flags().StringVar(&invokeFlags.versionID, "version-id", "", "Version ID (required)")
 	invokeCmd.Flags().StringVar(&invokeFlags.inferenceURL, "inference-url", "", "Function path, or OpenAI-compatible path for LLM functions (required for LLM)")
@@ -588,10 +604,11 @@ func init() {
 	invokeCmd.Flags().BoolVar(&invokeFlags.grpcPlaintext, "grpc-plaintext", false, "Use plaintext (insecure) gRPC")
 
 	// Update command flags
-	updateCmd.Flags().StringVar(&updateFlags.inputFile, "input-file", "", "JSON file with metadata update configuration")
+	updateCmd.Flags().StringVar(&updateFlags.inputFile, inputFileFlag, "", "JSON file with function update configuration")
 	updateCmd.Flags().StringVar(&updateFlags.functionID, "function-id", "", "Function ID (required)")
 	updateCmd.Flags().StringVar(&updateFlags.versionID, "version-id", "", "Version ID (required)")
-	updateCmd.Flags().StringSliceVar(&updateFlags.tags, "tags", []string{}, "Function tags (comma-separated, required)")
+	updateCmd.Flags().StringSliceVar(&updateFlags.tags, "tags", []string{}, "Function tags (comma-separated)")
+	updateCmd.Flags().StringArrayVar(&updateFlags.llmModelUpdates, "llm-model-update", []string{}, "LLM model update (format: name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>)")
 }
 
 // ============================================================================
@@ -658,6 +675,62 @@ func parseLLMModelString(s string) (ArtifactConfig, error) {
 			RoutingMethod:  optionalString(routingMethod),
 		},
 	}, nil
+}
+
+func parseLLMModelUpdateString(s string) (ModelUpdateConfig, error) {
+	fields := map[string]string{}
+	for _, item := range strings.Split(s, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		parts := strings.SplitN(item, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+			return ModelUpdateConfig{}, fmt.Errorf("invalid field %q, expected key=value", item)
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		switch key {
+		case "name", "routingMethod", "tokenRateLimit":
+			fields[key] = value
+		default:
+			return ModelUpdateConfig{}, fmt.Errorf("unknown llm model update field %q", key)
+		}
+	}
+
+	name := fields["name"]
+	if name == "" {
+		return ModelUpdateConfig{}, fmt.Errorf("name is required")
+	}
+
+	routingMethod, err := normalizeLLMRoutingMethod(fields["routingMethod"])
+	if err != nil {
+		return ModelUpdateConfig{}, err
+	}
+
+	update := ModelUpdateConfig{
+		ModelName: name,
+		LLMConfig: &LLMConfigUpdateInput{
+			TokenRateLimit: optionalString(fields["tokenRateLimit"]),
+			RoutingMethod:  optionalString(routingMethod),
+		},
+	}
+	if update.LLMConfig.TokenRateLimit == nil && update.LLMConfig.RoutingMethod == nil {
+		return ModelUpdateConfig{}, fmt.Errorf("at least one of routingMethod or tokenRateLimit is required")
+	}
+	return update, nil
+}
+
+func parseLLMModelUpdateStrings(values []string) ([]ModelUpdateConfig, error) {
+	updates := make([]ModelUpdateConfig, 0, len(values))
+	for _, value := range values {
+		update, err := parseLLMModelUpdateString(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid llm model update format %q: %w", value, err)
+		}
+		updates = append(updates, update)
+	}
+	return updates, nil
 }
 
 func parseLLMModelURIs(value string) ([]string, error) {
@@ -753,6 +826,47 @@ func llmConfigInputToClient(input *LLMConfigInput) (*client.LLMConfigDto, error)
 		TokenRateLimit: input.TokenRateLimit,
 		RoutingMethod:  optionalString(routingMethod),
 	}, nil
+}
+
+func modelUpdateConfigToClient(update ModelUpdateConfig) (client.ModelUpdateDto, error) {
+	if strings.TrimSpace(update.ModelName) == "" {
+		return client.ModelUpdateDto{}, fmt.Errorf("modelName is required")
+	}
+	if update.LLMConfig == nil {
+		return client.ModelUpdateDto{}, fmt.Errorf("llmConfig is required")
+	}
+
+	routingMethod, err := normalizeLLMRoutingMethod(optionalStringValue(update.LLMConfig.RoutingMethod))
+	if err != nil {
+		return client.ModelUpdateDto{}, err
+	}
+
+	llmConfig := &client.LLMConfigUpdateDto{
+		TokenRateLimit: update.LLMConfig.TokenRateLimit,
+		RoutingMethod:  optionalString(routingMethod),
+	}
+	if llmConfig.TokenRateLimit == nil && llmConfig.RoutingMethod == nil {
+		return client.ModelUpdateDto{}, fmt.Errorf("at least one of routingMethod or tokenRateLimit is required")
+	}
+
+	return client.ModelUpdateDto{
+		ModelName: update.ModelName,
+		LLMConfig: llmConfig,
+	}, nil
+}
+
+func updateConfigToClientRequest(config *UpdateConfig) (*client.UpdateFunctionMetadataRequest, error) {
+	req := &client.UpdateFunctionMetadataRequest{
+		Tags: config.Tags,
+	}
+	for _, update := range config.ModelUpdates {
+		clientUpdate, err := modelUpdateConfigToClient(update)
+		if err != nil {
+			return nil, fmt.Errorf("model update %q: %w", update.ModelName, err)
+		}
+		req.ModelUpdates = append(req.ModelUpdates, clientUpdate)
+	}
+	return req, nil
 }
 
 // generateDemoFolder creates a demo folder with JSON stubs for all operations
@@ -1219,7 +1333,7 @@ func loadInvokeConfig(cmd *cobra.Command) (*InvokeConfig, error) {
 	return config, nil
 }
 
-// loadUpdateConfig loads configuration for metadata updates
+// loadUpdateConfig loads configuration for function updates
 func loadUpdateConfig(cmd *cobra.Command) (*UpdateConfig, error) {
 	config := &UpdateConfig{}
 
@@ -1234,7 +1348,7 @@ func loadUpdateConfig(cmd *cobra.Command) (*UpdateConfig, error) {
 			return nil, fmt.Errorf(errParseInputFileFmt, updateFlags.inputFile, err)
 		}
 
-		fmt.Printf("Loaded metadata update configuration from %s\n", updateFlags.inputFile)
+		fmt.Printf("Loaded function update configuration from %s\n", updateFlags.inputFile)
 	}
 
 	// Override with CLI flags
@@ -1247,8 +1361,28 @@ func loadUpdateConfig(cmd *cobra.Command) (*UpdateConfig, error) {
 	if cmd.Flags().Changed("tags") {
 		config.Tags = updateFlags.tags
 	}
+	if cmd.Flags().Changed("llm-model-update") {
+		updates, err := parseLLMModelUpdateStrings(updateFlags.llmModelUpdates)
+		if err != nil {
+			return nil, err
+		}
+		config.ModelUpdates = append(config.ModelUpdates, updates...)
+	}
 
 	return config, nil
+}
+
+func validateUpdateConfig(config *UpdateConfig) error {
+	if config.FunctionID == "" {
+		return fmt.Errorf("function ID is required (use --function-id or specify in JSON file)")
+	}
+	if config.VersionID == "" {
+		return fmt.Errorf("version ID is required (use --version-id or specify in JSON file)")
+	}
+	if len(config.Tags) == 0 && len(config.ModelUpdates) == 0 {
+		return fmt.Errorf("at least one update is required (use --tags, --llm-model-update, or specify modelUpdates in JSON file)")
+	}
+	return nil
 }
 
 // ============================================================================
@@ -2323,17 +2457,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Validate required fields
-	if config.FunctionID == "" {
-		return fmt.Errorf("function ID is required (use --function-id or specify in JSON file)")
-	}
-	if config.VersionID == "" {
-		return fmt.Errorf("version ID is required (use --version-id or specify in JSON file)")
-	}
-
-	// Tags are required
-	if len(config.Tags) == 0 {
-		return fmt.Errorf("tags are required (use --tags or specify in JSON file)")
+	if err := validateUpdateConfig(config); err != nil {
+		return err
 	}
 
 	// Load client configuration
@@ -2351,17 +2476,28 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 
-	fmt.Printf("Updating tags for function %s (version %s)...\n", config.FunctionID, config.VersionID)
-
-	// Update function tags
-	if err := nvcfClient.UpdateFunctionMetadata(ctx, config.FunctionID, config.VersionID, &client.UpdateFunctionMetadataRequest{
-		Tags: config.Tags,
-	}); err != nil {
-		return fmt.Errorf("failed to update function tags: %w", err)
+	req, err := updateConfigToClientRequest(config)
+	if err != nil {
+		return err
 	}
 
-	fmt.Printf("Function tags updated successfully!\n")
-	fmt.Printf("Tags: %s\n", strings.Join(config.Tags, ", "))
+	fmt.Printf("Updating function %s (version %s)...\n", config.FunctionID, config.VersionID)
+
+	if err := nvcfClient.UpdateFunctionMetadata(ctx, config.FunctionID, config.VersionID, req); err != nil {
+		return fmt.Errorf("failed to update function: %w", err)
+	}
+
+	fmt.Printf("Function updated successfully!\n")
+	if len(config.Tags) > 0 {
+		fmt.Printf("Tags: %s\n", strings.Join(config.Tags, ", "))
+	}
+	if len(config.ModelUpdates) > 0 {
+		modelNames := make([]string, 0, len(config.ModelUpdates))
+		for _, update := range config.ModelUpdates {
+			modelNames = append(modelNames, update.ModelName)
+		}
+		fmt.Printf("Model updates: %s\n", strings.Join(modelNames, ", "))
+	}
 
 	return nil
 }

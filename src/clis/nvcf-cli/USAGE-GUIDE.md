@@ -1030,10 +1030,11 @@ When `--json` is set:
 
 ### Update Function
 ```bash
-# Using
-
-# Using direct API calls
-./nvcf-cli update --file examples/update-metadata.json
+./nvcf-cli function update --input-file examples/update-metadata.json
+./nvcf-cli function update \
+  --function-id "550e8400-e29b-41d4-a716-446655440000" \
+  --version-id "01234567-89ab-cdef-0123-456789abcdef" \
+  --llm-model-update "name=dummy-model,routingMethod=round_robin,tokenRateLimit=1000-M"
 ```
 
 ### Delete Function or Deployment

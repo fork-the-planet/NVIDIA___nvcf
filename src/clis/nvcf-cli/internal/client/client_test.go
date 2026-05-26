@@ -49,6 +49,26 @@ func (t *invokeRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Resp
 	}, nil
 }
 
+type updateRequestCaptureTransport struct {
+	req  *http.Request
+	body []byte
+}
+
+func (t *updateRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.req = req
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	t.body = body
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Request:    req,
+	}, nil
+}
+
 type invokeFunctionDetailsTransport struct {
 	t              *testing.T
 	functionType   string
@@ -462,6 +482,62 @@ func TestInvokeFunctionFallsBackToExplicitPathWhenDetailsLookupFails(t *testing.
 	}
 }
 
+func TestUpdateFunctionMetadataSendsModelUpdatesToFunctionEndpoint(t *testing.T) {
+	routingMethod := "round_robin"
+	tokenRateLimit := "1000-M"
+	capture := &updateRequestCaptureTransport{}
+	client := &Client{
+		config:     &Config{Token: "token"},
+		baseURL:    "https://api.example.com",
+		httpClient: &http.Client{Transport: capture},
+	}
+
+	err := client.UpdateFunctionMetadata(context.Background(), "func-123", "ver-456", &UpdateFunctionMetadataRequest{
+		Tags: []string{"production"},
+		ModelUpdates: []ModelUpdateDto{
+			{
+				ModelName: "dummy-model",
+				LLMConfig: &LLMConfigUpdateDto{
+					RoutingMethod:  &routingMethod,
+					TokenRateLimit: &tokenRateLimit,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateFunctionMetadata returned error: %v", err)
+	}
+	if capture.req == nil {
+		t.Fatal("expected update request")
+	}
+	if got, want := capture.req.Method, http.MethodPut; got != want {
+		t.Fatalf("method = %q, want %q", got, want)
+	}
+	if got, want := capture.req.URL.Path, "/v2/nvcf/functions/func-123/versions/ver-456"; got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(capture.body, &payload); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	modelUpdates, ok := payload["modelUpdates"].([]interface{})
+	if !ok || len(modelUpdates) != 1 {
+		t.Fatalf("modelUpdates = %#v, want one update", payload["modelUpdates"])
+	}
+	modelUpdate := modelUpdates[0].(map[string]interface{})
+	if got, want := modelUpdate["modelName"], "dummy-model"; got != want {
+		t.Fatalf("modelName = %#v, want %q", got, want)
+	}
+	llmConfig := modelUpdate["llmConfig"].(map[string]interface{})
+	if got, want := llmConfig["routingMethod"], "round_robin"; got != want {
+		t.Fatalf("routingMethod = %#v, want %q", got, want)
+	}
+	if got, want := llmConfig["tokenRateLimit"], "1000-M"; got != want {
+		t.Fatalf("tokenRateLimit = %#v, want %q", got, want)
+	}
+}
+
 func TestLLMInvocationURLDerivesHostFromInvocationURL(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -570,7 +646,7 @@ func TestJWTRequirementForWriteOperations(t *testing.T) {
 					Tags: []string{"test"},
 				})
 			},
-			expectedError: "function metadata update requires NVCF_TOKEN or NVCF_API_KEY with 'update_function' scope",
+			expectedError: "function update requires NVCF_TOKEN or NVCF_API_KEY with 'update_function' scope",
 		},
 		{
 			name: "DeleteFunction requires JWT",
@@ -659,11 +735,11 @@ func TestIsAdminOperation(t *testing.T) {
 			reason:   "Deployment deletion requires admin:deploy_function",
 		},
 		{
-			name:     "Function metadata update",
+			name:     "Function update",
 			method:   "PUT",
-			path:     "/v2/nvcf/metadata/functions/id/versions/vid",
+			path:     "/v2/nvcf/functions/id/versions/vid",
 			expected: true,
-			reason:   "Metadata update requires admin:update_function",
+			reason:   "Function update requires admin:update_function",
 		},
 		{
 			name:     "Deployment update (GPU spec PATCH)",

@@ -71,6 +71,17 @@ nvcf-cli function create \
 
 Use the same deploy step below after the LLM function is created.
 
+Optional model routing update after creation:
+
+```sh
+nvcf-cli function update \
+  --function-id=<fn_id> \
+  --version-id=<ver_id> \
+  --llm-model-update='name=dummy-model,routingMethod=power_of_two,tokenRateLimit=2000-M'
+```
+
+Use this for mutable `routingMethod` and `tokenRateLimit`; create-time `uris` stay in `models[].llmConfig`.
+
 LLM Gateway routes requests by the OpenAI `model` value. Use `<function-id>/<model-name>`: the function ID selects the NVCF function, and the model name is forwarded to the upstream container through `stargate-client`.
 
 Supported LLM paths:

@@ -74,9 +74,16 @@ func TestMultiTokenTransportIsAdminOperation(t *testing.T) {
 		{
 			name:     "Function update",
 			method:   "PUT",
-			path:     "/v2/nvcf/metadata/functions/id/versions/vid",
+			path:     "/v2/nvcf/functions/id/versions/vid",
 			expected: true,
 			reason:   "Update requires admin:update_function scope",
+		},
+		{
+			name:     "Function version sub-resource update",
+			method:   "PUT",
+			path:     "/v2/nvcf/functions/id/versions/vid/labels",
+			expected: false,
+			reason:   "Only the function version resource uses update_function scope",
 		},
 		{
 			name:     "Registry credentials",
@@ -232,10 +239,16 @@ func TestGetExpectedUserScope(t *testing.T) {
 			expected: "delete_function",
 		},
 		{
-			name:     "Update metadata",
+			name:     "Update function",
 			method:   "PUT",
-			path:     "/v2/nvcf/metadata/functions/id/versions/vid",
+			path:     "/v2/nvcf/functions/id/versions/vid",
 			expected: "update_function",
+		},
+		{
+			name:     "Update function version sub-resource",
+			method:   "PUT",
+			path:     "/v2/nvcf/functions/id/versions/vid/labels",
+			expected: "no-auth or unknown",
 		},
 		{
 			name:     "Direct invocation path",
@@ -369,7 +382,7 @@ func TestTokenSelectionPriority(t *testing.T) {
 			apiKey:        "api-key",
 			functionToken: "jwt-token",
 			requestMethod: "PUT",
-			requestPath:   "/v2/nvcf/metadata/functions/id/versions/vid",
+			requestPath:   "/v2/nvcf/functions/id/versions/vid",
 			expectedToken: "Bearer jwt-token",
 			description:   "PUT operations are admin and use JWT",
 		},
