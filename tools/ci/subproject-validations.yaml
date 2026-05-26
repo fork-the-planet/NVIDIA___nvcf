@@ -259,3 +259,53 @@ subprojects:
       # upstream's SONARQUBE_PROJECT_KEY so existing dashboards keep
       # receiving findings for the nats-auth-callout subtree.
       sonarqube_project_key: SW-Cloud_NVCF_NVCF_nvcf-nats-auth-callout-service
+  # dns-cache is a native Bazel-built subtree (imports.yaml
+  # authoritative_source: native). Ships TWO release artifacts:
+  #
+  #   1. A Go webhook binary (cmd/webhook) packaged as an OCI image
+  #      and pushed to nvcr.io. Two push destinations: nv-ngc-devops
+  #      (legacy) and ncp-dev (universal). Both reachable with the
+  #      shared NGC_DEVOPS_API_KEY CI variable (no per-service vault
+  #      entry).
+  #
+  #   2. The `nvcf-unbound` Helm chart at deploy/Chart.yaml, packaged
+  #      and pushed to nvcr.io. Three NGC orgs: ncp-dev (universal),
+  #      nv-ngc-devops (legacy), and nvcf-internal (NGC self-managed
+  #      org-root). Chart version stamps from semantic-release's
+  #      NEXT_VERSION via the cds-component's chart-version input.
+  #
+  # Anchor tag in the umbrella is `nvcf-dns-cache-v0.7.18` (matches
+  # the upstream's last chart tag).
+  - id: dns-cache
+    path: src/compute-plane-services/dns-cache
+    change_paths:
+      - src/compute-plane-services/dns-cache/**/*
+    release:
+      service_name: nvcf-dns-cache
+      image_push_targets:
+        - name: devops
+          bazel_target: //cmd/webhook:image_push_devops
+          auth:
+            type: ci_var
+            ci_var: NGC_DEVOPS_API_KEY
+          docker_auth_path: nvcr.io/nv-ngc-devops/nvcf-dns-cache
+        - name: ncp_dev
+          bazel_target: //cmd/webhook:image_push_ncp_dev
+          auth:
+            type: ci_var
+            ci_var: NGC_DEVOPS_API_KEY
+          docker_auth_path: nvcr.io/0651155215864979/ncp-dev/nvcf-dns-cache
+      helm:
+        chart_path: deploy
+        push_targets:
+          - name: ncp-dev
+            ngc_path: 0651155215864979/ncp-dev
+            ngc_key_var: NGC_DEVOPS_API_KEY
+          - name: nv-ngc-devops
+            ngc_path: nv-ngc-devops
+            ngc_key_var: NGC_DEVOPS_API_KEY
+          - name: nvcf-internal
+            ngc_path: "0544956542906249"
+            ngc_key_var: NGC_PUSH_SERVICE_KEY_NVCF_INTERNAL
+      slack_channel: C08S6KLCEJH
+      sonarqube_project_key: SW-Cloud_NVCF_NVCF-Unbound_dns-cache

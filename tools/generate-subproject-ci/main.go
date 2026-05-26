@@ -431,14 +431,21 @@ semantic-release-{{ .ID }}:
       echo "[{{ .ID }}-image-push] using NVCF_VERSION=${NVCF_VERSION}"
     - |
       mkdir -p ~/.docker
+{{- /* One "is var set" guard per unique CI variable used by ci_var
+       targets. Multiple targets may share the same variable (e.g.
+       dns-cache uses NGC_DEVOPS_API_KEY for both devops and ncp_dev
+       pushes); without dedup the script emits the same guard
+       back-to-back. */}}
+{{- range $civar := .CIVars }}
+      if [ -z "${ {{- $civar -}} :-}" ]; then
+        echo "[{{ $svc.ID }}-image-push] ERROR: {{ $civar }} is not set; image push will fail." >&2
+        exit 1
+      fi
+{{- end }}
 {{- range .Targets }}
 {{- if eq .AuthType "vault" }}
       {{ .Name | upper }}_AUTH=$(printf '$oauthtoken:%s' "${NGC_REGISTRY_TOKEN}" | base64 -w0)
 {{- else if eq .AuthType "ci_var" }}
-      if [ -z "${ {{- .CIVar -}} :-}" ]; then
-        echo "[{{ $svc.ID }}-image-push] ERROR: {{ .CIVar }} is not set; {{ .Name }} push will fail." >&2
-        exit 1
-      fi
       {{ .Name | upper }}_AUTH=$(printf '$oauthtoken:%s' "${ {{- .CIVar -}} }" | base64 -w0)
 {{- end }}
 {{- end }}
@@ -643,6 +650,13 @@ type releaseServiceView struct {
 	Targets             []releaseTargetView
 	HasVaultTarget      bool
 	VaultKey            string
+	// CIVars is the deduplicated set of CI/CD variable names used by
+	// `ci_var` image push targets, in first-seen order. The template
+	// emits one "is var set" guard per entry rather than one per
+	// target, so a service whose targets share a CI variable (e.g.
+	// dns-cache uses NGC_DEVOPS_API_KEY for both devops and ncp_dev
+	// pushes) gets a single check instead of N redundant ones.
+	CIVars              []string
 	SlackChannel        string
 	SonarqubeProjectKey string
 	Helm                *releaseHelmView
@@ -1269,6 +1283,21 @@ func renderReleasePipeline(cfg configFile, configPath string) (string, error) {
 				svc.HasVaultTarget = true
 				svc.VaultKey = t.Auth.VaultKey
 			}
+		}
+
+		// Dedupe ci_var names across targets so the template emits one
+		// "is var set" guard per unique variable. Order preserved by
+		// first-seen across image_push_targets.
+		seenCIVar := map[string]struct{}{}
+		for _, t := range sp.Release.ImagePushTargets {
+			if t.Auth.Type != "ci_var" {
+				continue
+			}
+			if _, ok := seenCIVar[t.Auth.CIVar]; ok {
+				continue
+			}
+			seenCIVar[t.Auth.CIVar] = struct{}{}
+			svc.CIVars = append(svc.CIVars, t.Auth.CIVar)
 		}
 
 		if sp.Release.Helm != nil {
