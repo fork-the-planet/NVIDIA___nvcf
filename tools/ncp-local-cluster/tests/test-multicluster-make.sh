@@ -39,6 +39,9 @@ run_make() {
 
 print_directory_clusters="$(MAKEFLAGS=--print-directory; export MAKEFLAGS; run_make print-compute-clusters)"
 assert_eq "ncp-local-compute-1" "$print_directory_clusters" "print-directory compute cluster output"
+if ! grep -q '\$(MAKE) --no-print-directory -s print-compute-clusters' "$ROOT_DIR/Makefile"; then
+  fail "recursive print-compute-clusters calls must suppress make directory noise"
+fi
 
 default_clusters="$(run_make print-compute-clusters)"
 assert_eq "ncp-local-compute-1" "$default_clusters" "default compute cluster"

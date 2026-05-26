@@ -111,7 +111,7 @@ Use `functionType: "LLM"` for OpenAI-compatible models served through the self-m
 
 Invocation uses the LLM route, for example `https://llm.invocation.<domain>/v1/chat/completions`. The OpenAI `model` value must be `<function-id>/<model-name>`; the function ID is the routing key and the model name is forwarded upstream.
 
-Update mutable per-model routing settings with `nvcf-cli function update --llm-model-update='name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>'`, or put the same fields under `modelUpdates[].llmConfig` in an update JSON file. Do not include `uris` in model updates.
+Update mutable per-model routing settings with `nvcf-cli function update --llm-model-update='name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>'`, or put the same fields under `modelUpdates[].llmConfig` in an update JSON file. `tokenRateLimit` supports positive integer limits for `S`, `M`, `H`, `D`, and `W`; use JSON input for combined limits such as `1000-S,5000-M,100000-H,500000-D,1000000-W`. Do not include `uris` in model updates.
 
 For `/v1/responses`, the gateway proxies the native Responses path upstream, relays SSE to streaming clients, and aggregates the terminal JSON response for non-streaming clients. For `/v1/embeddings`, input may be a string or string array, must be non-empty, and may contain at most 2048 entries.
 

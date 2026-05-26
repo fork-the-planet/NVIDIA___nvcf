@@ -609,7 +609,7 @@ export NVCF_TOKEN="nvapi-your-function-creation-token"
   --inference-url "/" \
   --inference-port 8000 \
   --function-type "LLM" \
-  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-S"
 ```
 
 **Required flags:**
@@ -645,7 +645,7 @@ export NVCF_TOKEN="nvapi-your-function-creation-token"
       "llmConfig": {
         "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
-        "tokenRateLimit": "1000-M"
+        "tokenRateLimit": "1000-S"
       }
     }
   ],
@@ -661,6 +661,8 @@ key/value fields. Separate multiple URIs with `|`. Valid routing
 methods are `round_robin`, `power_of_two`, `groq_multiregion`, `pulsar`, and
 `random`; the CLI validates and sends these API/auth spellings in the create
 request.
+`tokenRateLimit` supports positive integer token limits for `S`, `M`, `H`, `D`, and `W`.
+Use `1000-S` for a single inline CLI limit. Use JSON input for combined limits, such as `1000-S,5000-M,100000-H,500000-D,1000000-W`, because inline model specs use commas as field separators.
 Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`.
 
 #### **Deploy a Function** *Uses `NVCF_TOKEN` (with `NVCF_API_KEY` fallback)*
@@ -733,7 +735,7 @@ export NVCF_API_KEY="nvapi-your-general-operations-token"  # optional fallback
 ./nvcf-cli function update \
   --function-id "func-12345678-1234-1234-1234-123456789abc" \
   --version-id "ver-12345678-1234-1234-1234-123456789abc" \
-  --llm-model-update "name=dummy-model,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model-update "name=dummy-model,routingMethod=round_robin,tokenRateLimit=1000-S"
 
 # Update function deployment specifications
 ./nvcf-cli function deploy update \
@@ -759,7 +761,7 @@ export NVCF_API_KEY="nvapi-your-general-operations-token"  # optional fallback
       "modelName": "dummy-model",
       "llmConfig": {
         "routingMethod": "round_robin",
-        "tokenRateLimit": "1000-M"
+        "tokenRateLimit": "1000-S,5000-M,100000-H,500000-D,1000000-W"
       }
     }
   ]

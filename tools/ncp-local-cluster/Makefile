@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: help clean build build-linux-amd64 test test-coverage-html test-manual start stop destroy status ensure-context ensure-docker-config validate-compute-clusters print-compute-clusters start-control-plane deploy-control-plane-addons deploy-control-plane-endpoints build-and-deploy-control-plane-cluster destroy-control-plane start-compute-plane deploy-compute-plane-addons configure-compute-control-plane-dns deploy-compute-control-plane-endpoints build-and-deploy-compute-plane-cluster destroy-compute-plane build-and-deploy-multicluster destroy-multicluster test-multicluster-make setup-gateway-api check-gateway-api deploy-sample wait-for-deployment validate-deployment cleanup-sample build-and-deploy-cluster build-csi-smb deploy-csi-smb wait-for-csi-smb build-fake-gpu-operator deploy-fake-gpu-operator wait-for-fake-gpu-operator deploy-prometheus-crds uninstall-prometheus-crds deploy-kube-state-metrics wait-for-kube-state-metrics uninstall-kube-state-metrics build-credential-provider-multiarch
+.PHONY: help clean build build-linux-amd64 test test-coverage-html test-manual start stop destroy destroy-all-ncp-local status ensure-context ensure-docker-config validate-compute-clusters print-compute-clusters start-control-plane deploy-control-plane-addons deploy-control-plane-endpoints build-and-deploy-control-plane-cluster destroy-control-plane start-compute-plane deploy-compute-plane-addons configure-compute-control-plane-dns deploy-compute-control-plane-endpoints build-and-deploy-compute-plane-cluster destroy-compute-plane build-and-deploy-multicluster destroy-multicluster test-multicluster-make setup-gateway-api check-gateway-api deploy-sample wait-for-deployment validate-deployment cleanup-sample build-and-deploy-cluster build-csi-smb deploy-csi-smb wait-for-csi-smb build-fake-gpu-operator deploy-fake-gpu-operator wait-for-fake-gpu-operator deploy-prometheus-crds uninstall-prometheus-crds deploy-kube-state-metrics wait-for-kube-state-metrics uninstall-kube-state-metrics build-credential-provider-multiarch
 
 # === Cluster Configuration ===
 CLUSTER_NAME := ncp-local
@@ -129,9 +129,29 @@ stop:
 	@echo "Cluster $(CLUSTER_NAME) stopped."
 
 destroy:
-	@echo "Destroying k3d cluster $(CLUSTER_NAME)..."
-	@k3d cluster delete $(CLUSTER_NAME)
-	@echo "Cluster $(CLUSTER_NAME) destroyed."
+	@if k3d cluster get $(CLUSTER_NAME) >/dev/null 2>&1; then \
+		echo "Destroying k3d cluster $(CLUSTER_NAME)..."; \
+		k3d cluster delete $(CLUSTER_NAME); \
+		echo "Cluster $(CLUSTER_NAME) destroyed."; \
+	else \
+		echo "Cluster $(CLUSTER_NAME) absent; skipping."; \
+	fi
+
+destroy-all-ncp-local: ## Discover and destroy every ncp-local* k3d cluster on the host
+	@command -v jq >/dev/null 2>&1 || { \
+		echo "destroy-all-ncp-local requires jq; install it and retry." >&2; \
+		exit 1; \
+	}
+	@set -o pipefail; \
+	NAMES=$$(k3d cluster list -o json | jq -r '.[] | select(.name|startswith("ncp-local")) | .name'); \
+	if [ -z "$$NAMES" ]; then \
+		echo "No ncp-local* clusters present."; \
+		exit 0; \
+	fi; \
+	for name in $$NAMES; do \
+		echo "Destroying k3d cluster $$name..."; \
+		k3d cluster delete "$$name"; \
+	done
 
 status:
 	@echo "Checking status of k3d cluster $(CLUSTER_NAME)..."
@@ -206,10 +226,20 @@ deploy-compute-control-plane-endpoints: ## Deploy compute-cluster aliases for co
 	$(call require,kubectl,See https://kubernetes.io/docs/tasks/tools/)
 	@echo "========== COMPUTE CONTROL-PLANE ENDPOINT ALIASES =========="
 	@kubectl kustomize ./apps/compute-control-plane-endpoints | kubectl apply -f -
+	@# CONTROL_PLANE_LB_HTTP_PORT / CONTROL_PLANE_LB_NATS_PORT are the
+	@# load-balancer CONTAINER ports (k3d-config-control-plane.yaml maps
+	@# host CONTROL_PLANE_HTTP_PORT -> container 80, host
+	@# CONTROL_PLANE_NATS_PORT -> container 4222). Cross-cluster traffic
+	@# from the compute cluster reaches the control-plane LB container
+	@# over the docker network on the container ports, not the host
+	@# ports. Pass the literal container ports; do NOT forward
+	@# CONTROL_PLANE_HTTP_PORT / CONTROL_PLANE_NATS_PORT, which would
+	@# make compute aliases point at host-port:8080 (refused on the
+	@# container side).
 	@CONTROL_PLANE_DOMAIN="$(CONTROL_PLANE_DOMAIN)" \
 		CONTROL_PLANE_CLUSTER_NAME="$(CONTROL_PLANE_CLUSTER_NAME)" \
-		CONTROL_PLANE_LB_HTTP_PORT="$(CONTROL_PLANE_HTTP_PORT)" \
-		CONTROL_PLANE_LB_NATS_PORT="$(CONTROL_PLANE_NATS_PORT)" \
+		CONTROL_PLANE_LB_HTTP_PORT=80 \
+		CONTROL_PLANE_LB_NATS_PORT=4222 \
 		CLUSTER_NAME="$(COMPUTE_CLUSTER_NAME)" \
 		bash ./scripts/configure-control-plane-endpoints.sh
 	@echo "OK Compute-plane endpoint aliases deployed for $(CONTROL_PLANE_DOMAIN)"
@@ -226,7 +256,7 @@ build-and-deploy-multicluster: ensure-docker-config validate-compute-clusters cl
 	@echo "========== BUILD AND DEPLOY MULTI-CLUSTER =========="
 	@$(MAKE) CLUSTER_NAME=$(CONTROL_PLANE_CLUSTER_NAME) K3D_CONFIG_FILE=$(CONTROL_PLANE_CONFIG_FILE) \
 		start deploy-control-plane-addons
-	@clusters="$$( $(MAKE) -s print-compute-clusters )"; \
+	@clusters="$$( $(MAKE) --no-print-directory -s print-compute-clusters )"; \
 	for cluster in $$clusters; do \
 		echo "========== BUILD AND DEPLOY COMPUTE CLUSTER $$cluster =========="; \
 		if ! $(MAKE) COMPUTE_CLUSTER_NAME="$$cluster" start-compute-plane deploy-compute-plane-addons; then \
@@ -242,7 +272,7 @@ build-and-deploy-multicluster: ensure-docker-config validate-compute-clusters cl
 
 destroy-multicluster: validate-compute-clusters ## Destroy the default control-plane cluster and resolved compute-plane clusters
 	@$(MAKE) CLUSTER_NAME=$(CONTROL_PLANE_CLUSTER_NAME) destroy || true
-	@clusters="$$( $(MAKE) -s print-compute-clusters )"; \
+	@clusters="$$( $(MAKE) --no-print-directory -s print-compute-clusters )"; \
 	for cluster in $$clusters; do \
 		$(MAKE) CLUSTER_NAME="$$cluster" destroy || true; \
 	done

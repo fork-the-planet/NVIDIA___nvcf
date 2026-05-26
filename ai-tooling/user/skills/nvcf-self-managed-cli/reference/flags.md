@@ -68,9 +68,10 @@
 | `--inference-port PORT` | Container inference port | — |
 | `--function-type DEFAULT\|STREAMING\|LLM` | Function type | `DEFAULT` |
 | `--models NAME:VERSION:URI` | Standard model artifact; repeatable | — |
-| `--llm-model SPEC` | LLM model config; format `name=<model>,uris=<uri>|<uri>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>`; repeatable | - |
+| `--llm-model SPEC` | LLM model config; format `name=<model>,uris=<uri>|<uri>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>`; repeatable. Token limits use `<value>-<unit>` with `S`, `M`, `H`, `D`, or `W`, for example `1000-S`. Use input JSON for combined token limits because inline specs use commas as field separators. | - |
 
 In JSON, LLM functions set `functionType: "LLM"` and model routing metadata under `models[].llmConfig`. `llmConfig.uris` declares the OpenAI-compatible upstream paths exposed by the model. Current supported paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`. `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, or `random`.
+`llmConfig.tokenRateLimit` accepts one or more comma-separated positive integer token limits in `<value>-<unit>` format. Supported units are `S` (seconds), `M` (minutes), `H` (hours), `D` (days), and `W` (weeks). Use distinct units when combining limits, for example `1000-S,5000-M,100000-H,500000-D,1000000-W` in input JSON.
 
 LLM invocation requests use `model: "<function-id>/<model-name>"`. The function ID selects the NVCF function, and the model name is forwarded upstream. Chat completions and Responses API requests can use `x-multi-turn-session-id` for session stickiness; embeddings requests do not.
 
@@ -79,7 +80,7 @@ LLM invocation requests use `model: "<function-id>/<model-name>"`. The function 
 | Flag | Purpose | Default |
 |---|---|---|
 | `--tags TAG[,TAG]` | Replace function tags | - |
-| `--llm-model-update SPEC` | LLM model update; format `name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>`; repeatable | - |
+| `--llm-model-update SPEC` | LLM model update; format `name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>`; repeatable. Token limit example: `1000-S`. Use input JSON for combined token limits. | - |
 
 In JSON, `function update` accepts `modelUpdates[]` entries with `modelName` and `llmConfig.routingMethod` and/or `llmConfig.tokenRateLimit`. `uris` are create-time model metadata and are not part of model updates.
 

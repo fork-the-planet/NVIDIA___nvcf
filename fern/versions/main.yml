@@ -232,3 +232,5 @@ navigation:
         path: ../../docs/user/local-development.md
       - page: Fake GPU Operator
         path: ../../docs/user/fake-gpu-operator.md
+      - page: Release Process
+        path: ../../docs/dev/release-process.md

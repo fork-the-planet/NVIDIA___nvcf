@@ -223,12 +223,24 @@ include:
       if [ -z "$NEXT_VERSION" ]; then
         if [ -n "${CI_MERGE_REQUEST_IID:-}" ]; then
           NEXT_VERSION="mr.${CI_MERGE_REQUEST_IID}-${CI_COMMIT_SHORT_SHA}"
+          SKIP_SEMANTIC_RELEASE=true
+        elif [ -n "${CI_COMMIT_TAG:-}" ]; then
+          # Tag pipeline. semantic-release's dry-run emits nothing
+          # here because the tag already exists, so the awk above
+          # produced an empty NEXT_VERSION. Derive it from the tag
+          # instead. SKIP_SEMANTIC_RELEASE stays false so downstream
+          # publish jobs (image-push, helm-package, helm-push) run
+          # and stamp the artifact with the tag's semver, matching
+          # what the originating default-branch pipeline pushed.
+          NEXT_VERSION="${CI_COMMIT_TAG#${SERVICE_NAME}-v}"
+          SKIP_SEMANTIC_RELEASE=false
         elif [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
           NEXT_VERSION=$(git describe --tags --match="${SERVICE_NAME}-v*" --abbrev=0 2>/dev/null | sed "s/^${SERVICE_NAME}-v//" || echo "0.0.0")
+          SKIP_SEMANTIC_RELEASE=true
         else
           NEXT_VERSION="${CI_COMMIT_SHORT_SHA}"
+          SKIP_SEMANTIC_RELEASE=true
         fi
-        SKIP_SEMANTIC_RELEASE=true
       else
         SKIP_SEMANTIC_RELEASE=false
       fi
@@ -335,6 +347,13 @@ compute-next-release-version-{{ .ID }}:
 {{- end }}
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       changes: *{{ .RulesAnchor }}
+    # Tag pipelines need NEXT_VERSION too: the helm-package job's
+    # chart-version input reads ${NEXT_VERSION}, and the image-push
+    # job's NVCF_VERSION shell fallback consumes it when set. The
+    # compute job's own script falls back to ${CI_COMMIT_TAG#${SERVICE_NAME}-v}
+    # when semantic-release reports no new release, so on a tag
+    # pipeline it produces NEXT_VERSION=<tag-semver>.
+    - if: $CI_COMMIT_TAG =~ /^{{ .ServiceName }}-v/
 
 semantic-release-{{ .ID }}:
   extends: .semantic-release-service
@@ -611,6 +630,13 @@ semantic-release-{{ .ID }}:
   needs:
     - job: compute-next-release-version-{{ .ID }}
       artifacts: true
+      # 'optional: true' so the YAML validator does not reject the
+      # pipeline on tag refs where the depended job might not be
+      # scheduled (matches the image-push pattern). On tag pipelines
+      # compute-next-release-version-{{ .ID }} fires (its rules
+      # include the {{ .ServiceName }}-v tag prefix) and supplies
+      # the NEXT_VERSION dotenv that chart-version reads.
+      optional: true
   rules:
     - if: $CI_COMMIT_TAG =~ /^{{ .ServiceName }}-v/
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

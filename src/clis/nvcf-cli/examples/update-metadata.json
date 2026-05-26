@@ -7,7 +7,7 @@
       "modelName": "dummy-model",
       "llmConfig": {
         "routingMethod": "round_robin",
-        "tokenRateLimit": "1000-M"
+        "tokenRateLimit": "1000-S,5000-M,100000-H,500000-D,1000000-W"
       }
     }
   ]

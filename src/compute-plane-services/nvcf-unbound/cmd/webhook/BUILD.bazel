@@ -51,29 +51,30 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
-# Three multi-arch image pushes, all to nvcr.io but distinct repos and
-# credentials. bazel-image-push in .gitlab-ci.yml swaps the docker
+# Two multi-arch image pushes, all to nvcr.io but distinct repos and
+# credentials. The umbrella's image-push CI job swaps the docker
 # config per push so crane picks up the right auth.
 #
-#   :image_push_devops  -> nvcr.io/nv-ngc-devops/nvcf-dns-cache
+#   :image_push_devops  -> nvcr.io/nv-ngc-devops/nvcf-unbound
 #                          (NGC_DEVOPS_API_KEY CI/CD variable)
-#   :image_push_ncp_dev -> nvcr.io/0651155215864979/ncp-dev/nvcf-dns-cache
+#   :image_push_ncp_dev -> nvcr.io/0651155215864979/ncp-dev/nvcf-unbound
 #                          (same NGC_DEVOPS_API_KEY token grants access
 #                          to both nv-ngc-devops and ncp-dev)
 #
 # The Bazel scaffold is excluded from the OSS snapshot via
 # .oss-allowlist (urm.nvidia.com / nvcr.io references are internal-only
-# infra). dns-cache OSS users build via the Dockerfile + Makefile path.
+# infra). nvcf-unbound OSS users build via the Dockerfile + Makefile
+# path.
 go_oci_image(
     name = "image",
     base = "@distroless_go",
     binary = ":webhook",
     binary_path = "/usr/bin/app",
     extra_registries = {
-        "devops": "nvcr.io/nv-ngc-devops/nvcf-dns-cache",
-        "ncp_dev": "nvcr.io/0651155215864979/ncp-dev/nvcf-dns-cache",
+        "devops": "nvcr.io/nv-ngc-devops/nvcf-unbound",
+        "ncp_dev": "nvcr.io/0651155215864979/ncp-dev/nvcf-unbound",
     },
-    tags = ["nvcf-dns-cache"],
+    tags = ["nvcf-unbound"],
     visibility = ["//visibility:public"],
 )
 

@@ -50,7 +50,7 @@ Set `functionType` to `LLM` and define model routing metadata under `models[].ll
       "llmConfig": {
         "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
-        "tokenRateLimit": "1000-M"
+        "tokenRateLimit": "1000-S"
       }
     }
   ]
@@ -67,7 +67,7 @@ Set `functionType` to `LLM` and define model routing metadata under `models[].ll
 
 `llmConfig.routingMethod` accepts `round_robin`, `power_of_two`, `groq_multiregion`, `pulsar`, or `random`.
 
-`llmConfig.tokenRateLimit` applies a per-model token limit using the same rate limit format as function-level limits.
+`llmConfig.tokenRateLimit` applies a per-model token limit. Use one or more comma-separated limits in `<value>-<unit>` format, where `<value>` is a positive integer and `<unit>` is one of `S` (seconds), `M` (minutes), `H` (hours), `D` (days), or `W` (weeks). A single limit is one token budget over one time window, such as `1000-S`. A combined limit is multiple token budgets over distinct time windows, such as `1000-S,5000-M,100000-H,500000-D,1000000-W`; do not repeat a unit in the same value.
 
 These per-model routing fields are mutable. Use `nvcf-cli function update --llm-model-update "name=<model>,routingMethod=<method>,tokenRateLimit=<limit>"` or JSON `modelUpdates` to change them without recreating the function version.
 

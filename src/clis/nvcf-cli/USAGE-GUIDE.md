@@ -751,7 +751,7 @@ curl -X POST https://api.nvcf.nvidia.com/v2/nvcf/accounts/nvcf-default/registry-
   --inference-port 8000 \
   --inference-url / \
   --function-type LLM \
-  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-S"
 ```
 
 **Secrets Format:**
@@ -804,7 +804,7 @@ curl -X POST https://api.nvcf.nvidia.com/v2/nvcf/accounts/nvcf-default/registry-
       "llmConfig": {
         "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
-        "tokenRateLimit": "1000-M"
+        "tokenRateLimit": "1000-S"
       }
     }
   ]
@@ -1034,7 +1034,7 @@ When `--json` is set:
 ./nvcf-cli function update \
   --function-id "550e8400-e29b-41d4-a716-446655440000" \
   --version-id "01234567-89ab-cdef-0123-456789abcdef" \
-  --llm-model-update "name=dummy-model,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model-update "name=dummy-model,routingMethod=round_robin,tokenRateLimit=1000-S"
 ```
 
 ### Delete Function or Deployment

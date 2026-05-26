@@ -27,6 +27,7 @@
 
 # Local CI/test artifacts.
 /public/
+/tests/bdd/out/
 
 # Transient symlink created by root Makefile's link-secrets target;
 # points at ../../../../secrets/<env>-secrets.yaml (root-level user file).

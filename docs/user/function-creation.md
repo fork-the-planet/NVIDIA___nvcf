@@ -41,7 +41,7 @@ LLM requests must already be OpenAI-compatible when they reach the gateway. NVCF
       "llmConfig": {
         "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
-        "tokenRateLimit": "1000-M"
+        "tokenRateLimit": "1000-S"
       }
     }
   ]
@@ -57,10 +57,10 @@ The same configuration can be provided with CLI flags:
   --inference-url "/" \
   --inference-port 8000 \
   --function-type LLM \
-  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M"
+  --llm-model "name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-S"
 ```
 
-`llmConfig.uris` lists the OpenAI-compatible paths handled by the model. Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`. `routingMethod` accepts `round_robin`, `power_of_two`, `groq_multiregion`, `pulsar`, or `random`. `tokenRateLimit` uses the same rate limit format as function-level rate limits.
+`llmConfig.uris` lists the OpenAI-compatible paths handled by the model. Supported LLM paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`. `routingMethod` accepts `round_robin`, `power_of_two`, `groq_multiregion`, `pulsar`, or `random`. `tokenRateLimit` applies a per-model token limit in `<value>-<unit>` format. Supported units are `S` (seconds), `M` (minutes), `H` (hours), `D` (days), and `W` (weeks). Use `1000-S` for a single limit, or `1000-S,5000-M,100000-H,500000-D,1000000-W` for a combined limit with distinct units. Use JSON input for combined limits because inline CLI model specs use commas as field separators.
 
 After creation, update per-model `routingMethod` or `tokenRateLimit` with `nvcf-cli function update --llm-model-update "name=<model>,routingMethod=<method>,tokenRateLimit=<limit>"` or JSON `modelUpdates`.
 

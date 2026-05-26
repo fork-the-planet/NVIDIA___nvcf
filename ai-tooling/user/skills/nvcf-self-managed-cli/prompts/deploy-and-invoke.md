@@ -50,7 +50,7 @@ For an OpenAI-compatible LLM function, set `functionType: "LLM"` and put route m
       "llmConfig": {
         "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
         "routingMethod": "round_robin",
-        "tokenRateLimit": "1000-M"
+        "tokenRateLimit": "1000-S"
       }
     }
   ]
@@ -66,7 +66,7 @@ nvcf-cli function create \
   --inference-url=/ \
   --inference-port=8000 \
   --function-type=LLM \
-  --llm-model='name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-M'
+  --llm-model='name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-S'
 ```
 
 Use the same deploy step below after the LLM function is created.
@@ -77,10 +77,11 @@ Optional model routing update after creation:
 nvcf-cli function update \
   --function-id=<fn_id> \
   --version-id=<ver_id> \
-  --llm-model-update='name=dummy-model,routingMethod=power_of_two,tokenRateLimit=2000-M'
+  --llm-model-update='name=dummy-model,routingMethod=power_of_two,tokenRateLimit=1000-S'
 ```
 
 Use this for mutable `routingMethod` and `tokenRateLimit`; create-time `uris` stay in `models[].llmConfig`.
+`tokenRateLimit` supports positive integer token limits for `S`, `M`, `H`, `D`, and `W`. Use `1000-S` for a single inline CLI limit. Use input JSON for combined limits, such as `1000-S,5000-M,100000-H,500000-D,1000000-W`, because inline model specs use commas as field separators.
 
 LLM Gateway routes requests by the OpenAI `model` value. Use `<function-id>/<model-name>`: the function ID selects the NVCF function, and the model name is forwarded to the upstream container through `stargate-client`.
 
