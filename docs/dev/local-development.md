@@ -23,11 +23,11 @@ and adjust the pull secret configuration accordingly. See [self-hosted-image-mir
 for details on mirroring artifacts to other registries.
 
 <Tip>
-A ready-to-use k3d configuration and setup script is available in the
-[nv-cloud-function-helpers](https://github.com/NVIDIA/nv-cloud-function-helpers/tree/main/examples/self_hosted_local_development)
-repository. Clone it and run `./setup.sh` to create the cluster with all prerequisites.
-The script is the source of truth for local cluster bootstrap. The manual commands below
-are for debugging and recovery. After the script completes, skip to [Deploy the NVCF Stack].
+A ready-to-use k3d configuration and setup is available at `tools/ncp-local-cluster/`
+in this repo. Run `make build-and-deploy-cluster` from there to create the cluster with
+all prerequisites. The Makefile is the source of truth for local cluster bootstrap. The
+manual commands below are for debugging and recovery. After the cluster is up, skip to
+[Deploy the NVCF Stack].
 
 </Tip>
 
@@ -130,7 +130,7 @@ helm upgrade -i gpu-operator fake-gpu-operator/fake-gpu-operator \
 ```
 
 <Note>
-If Helm fails with `RuntimeClass "nvidia" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata`, rerun the helper repository `./setup.sh`. The script removes known stale fake GPU operator resources without deleting the k3d cluster. For the canonical recovery workflow, see `examples/self-hosted-local-development/README.md`.
+If Helm fails with `RuntimeClass "nvidia" in namespace "" exists and cannot be imported into the current release: invalid ownership metadata`, rerun `make build-and-deploy-cluster` in `tools/ncp-local-cluster/`. The Makefile removes known stale fake GPU operator resources without deleting the k3d cluster.
 
 </Note>
 

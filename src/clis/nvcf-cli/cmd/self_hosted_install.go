@@ -141,8 +141,20 @@ func runSelfHostedInstall(c *cobra.Command, _ []string) error {
 		}
 		fmt.Fprintf(c.ErrOrStderr(), "Wrote control-plane profile:\n  %s\n", path)
 		if !selfHostedNoApply && selfHostedToken == "" {
+			// Post-install admin-token mint is best-effort: it pre-warms the
+			// admin JWT cache so the next command does not need to call
+			// `init`. The install path itself does not consume the token, so
+			// failures here are non-fatal -- surface a hint and let the
+			// caller mint a token when ready. This removes the need for a
+			// throwaway `--token=...` value just to bypass this gate when
+			// running in CI / under --non-interactive / against a non-TTY
+			// stdin.
 			if err := authGatePhase5ForcedRefresh(c.Context(), discardProgressSink{}, time.Now().UTC()); err != nil {
-				return fmt.Errorf("auth-gate: %w", err)
+				fmt.Fprintf(c.ErrOrStderr(),
+					">>> Note: skipped post-install admin-token mint (%v).\n"+
+						">>> Run `nvcf-cli init` to mint an admin token when ready.\n",
+					err,
+				)
 			}
 		}
 		return nil

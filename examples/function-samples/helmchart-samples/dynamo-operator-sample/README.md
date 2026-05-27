@@ -4,7 +4,7 @@ This demo uses and modifies [this upstream example disaggregated router DGD](htt
 
 ## Prerequisites
 
-* An NVCF self-hosted Kubernetes cluster with Dynamo Operator installed (see [the dev install guide](../../../self-hosted-local-development/dynamo-operator.md) for local cluster testing).
+* An NVCF self-hosted Kubernetes cluster with Dynamo Operator installed (see [the local Dynamo Operator install guide](../../../../tools/ncp-local-cluster/docs/dynamo-operator.md) for local cluster testing).
 * A HuggingFace [token](https://huggingface.co/docs/hub/en/security-tokens), if using the default model [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) used in the example Helm chart
 
 ## Deploying your Dynamo chart

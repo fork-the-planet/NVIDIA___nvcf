@@ -14,7 +14,7 @@ This sample demonstrates how to run a [Ray Serve](https://docs.ray.io/en/latest/
 
 - A Kubernetes cluster with `nvidia.com/gpu` extended resources (real or fake via [fake-gpu-operator](https://github.com/run-ai/fake-gpu-operator)) when `gpu.count > 0`
 - `helm` >= 3.12
-- For NVCF deployment: a self-managed NVCF control plane (see [self-hosted-local-development](../../../self-hosted-local-development/))
+- For NVCF deployment: a self-managed NVCF control plane (see [`tools/ncp-local-cluster/`](../../../../tools/ncp-local-cluster/) for local k3d setup)
 
 > **Apple Silicon note:** The default image tag (`2.40.0-py310-gpu`) is AMD64-only. For local testing on macOS ARM64 (k3d, kind), use the `-aarch64` variant: `--set image.tag=2.40.0-py310-aarch64`.
 

@@ -5,7 +5,9 @@ NVCF development cluster, configure NVCA to support them, and create and deploy 
 backed by a DynamoGraphDeployment.
 
 This guide assumes the local k3d cluster and NVCF stack are already running.
-See [README.md](README.md) for cluster setup and NVCF stack deployment.
+See [the ncp-local cluster README](../README.md) for k3d setup and
+[docs/dev/local-development.md](../../../docs/dev/local-development.md) for the
+NVCF stack deployment.
 
 [KAI Scheduler](https://github.com/kai-scheduler/KAI-Scheduler) provides advanced GPU-aware bin-packing and gang scheduling for NVCF workloads.
 [Grove](https://github.com/ai-dynamo/grove) adds topology-aware multi-node gang scheduling and is a required dependency of the Dynamo
@@ -15,8 +17,8 @@ NVCF API; both are cluster infrastructure that the Dynamo Operator relies on.
 
 ## Prerequisites
 
-- Followed steps in [README.md](README.md)
-- A Helm chart containing one or more Dynamo Operator manifests, like a `DynamoGraphDeployment`. You may use the [Dynamo example](../function-samples/helmchart-samples/dynamo-operator-sample).
+- A running ncp-local cluster with the NVCF stack deployed. See [the ncp-local cluster README](../README.md) and [docs/dev/local-development.md](../../../docs/dev/local-development.md).
+- A Helm chart containing one or more Dynamo Operator manifests, like a `DynamoGraphDeployment`. You may use the [Dynamo example](../../../examples/function-samples/helmchart-samples/dynamo-operator-sample).
 
 ## 1. Install KAI Scheduler
 

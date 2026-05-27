@@ -12,7 +12,8 @@ Top-level groups:
 - `function-samples/helmchart-samples/`: Helm charts that wrap the FastAPI and multi-node samples.
 - `load-tests/`: k6 scripts for `functions/` (HTTP, gRPC, SSE, streaming).
 - `cluster-monitoring-sample/`: Prometheus ServiceMonitor and OTEL collector configs for NVCA.
-- `self-hosted-local-development/`: k3d config and setup/teardown scripts for local self-hosted NVCF.
+
+Local development tooling for self-hosted NVCF lives in `tools/ncp-local-cluster/`, not under `examples/`.
 
 Per-example `README.md` files hold the run instructions. Read them before modifying a sample.
 
@@ -57,16 +58,6 @@ k6 run functions/<test>.js
 ```
 
 k6 scripts accept endpoint URLs and keys through environment variables. Do not hardcode NGC keys, auth tokens, or customer-facing endpoints. Every test must read credentials from env.
-
-### Local self-hosted NVCF
-
-```
-cd examples/self-hosted-local-development
-./setup.sh
-./teardown.sh
-```
-
-Follow `README.md` for prerequisites (k3d, Docker, Helm). This script targets a developer laptop, not CI.
 
 ## Code style
 

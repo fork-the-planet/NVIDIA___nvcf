@@ -146,6 +146,68 @@ func TestSelfHostedInstall_ControlPlane_AppliesByDefault(t *testing.T) {
 	assert.Equal(t, 1, initCalls)
 }
 
+// TestSelfHostedInstall_ControlPlane_PostInstallMintNonFatalWithoutTTY covers
+// the case that motivated the BDD's old `--token DUMMY` workaround: under a
+// non-TTY stdin (CI runs, `go test` invocations, the BDD suite), the
+// post-install admin-token mint cannot prompt for consent, but the install
+// itself does not consume the token. The install must still succeed and the
+// hint to run `nvcf-cli init` must be surfaced.
+func TestSelfHostedInstall_ControlPlane_PostInstallMintNonFatalWithoutTTY(t *testing.T) {
+	resetInstallFlags(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("NVCF_BASE_HTTP_URL", "http://api.localhost:8080")
+
+	stackDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(stackDir, "helmfile.d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stackDir, "global.yaml.gotmpl"), []byte("# stub\n"), 0o644))
+
+	fakeBin := filepath.Join(t.TempDir(), "helmfile")
+	require.NoError(t, os.WriteFile(fakeBin,
+		[]byte("#!/bin/sh\nprintf 'apiVersion: v1\\nkind: ConfigMap\\nmetadata:\\n  name: from-fake\\n'\n"),
+		0o755))
+	t.Setenv("PATH", filepath.Dir(fakeBin)+":"+os.Getenv("PATH"))
+
+	prevAuthProbe := authProbe
+	prevInit := runSelfHostedInit
+	prevTTY := stdinIsTerminal
+	t.Cleanup(func() {
+		authProbe = prevAuthProbe
+		runSelfHostedInit = prevInit
+		stdinIsTerminal = prevTTY
+	})
+	authProbe = func(context.Context, string) (*auth.Fingerprint, error) {
+		return &auth.Fingerprint{
+			IssuerURL:       "http://api.localhost:8080",
+			JWKSKid:         "kid",
+			APIKeysEndpoint: "http://api-keys.localhost:8080",
+		}, nil
+	}
+	initCalls := 0
+	runSelfHostedInit = func(context.Context) error {
+		initCalls++
+		return nil
+	}
+	// Simulate non-TTY environment (CI runs, BDD suite invocations).
+	stdinIsTerminal = func() bool { return false }
+
+	var stdout, stderr bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetErr(&stderr)
+	rootCmd.SetArgs([]string{
+		"self-hosted", "install", "--control-plane",
+		"--stack", stackDir,
+	})
+	// Install must succeed: the post-install token mint is best-effort.
+	require.NoError(t, rootCmd.Execute())
+
+	// init must NOT have been called: the TTY check short-circuited before
+	// the prompt could fire.
+	assert.Equal(t, 0, initCalls)
+	// Hint must be surfaced so the operator knows to mint a token later.
+	assert.Contains(t, stderr.String(), "skipped post-install admin-token mint")
+	assert.Contains(t, stderr.String(), "nvcf-cli init")
+}
+
 func TestSelfHostedInstall_ControlPlane_WritesProfile(t *testing.T) {
 	resetInstallFlags(t)
 	selfHostedToken = "test-token"

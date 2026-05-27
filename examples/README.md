@@ -2,11 +2,7 @@
 
 Sample containers, configurations, and guides for self-hosted NVIDIA Cloud Functions (NVCF). All samples target the self-hosted control plane and are driven via `nvcf-cli`.
 
-## Local Development
-
-| Sample | Description |
-|--------|-------------|
-| [Self-Hosted Local Development](self-hosted-local-development/) | Run the full NVCF self-hosted control plane locally on k3d with fake GPUs. Includes cluster config, setup script, and teardown. |
+Local development tooling for self-hosted NVCF lives in [`tools/ncp-local-cluster/`](../tools/ncp-local-cluster/), not under `examples/`. Run `make build-and-deploy-cluster` there to bring up the canonical k3d topology.
 
 ## Function Samples
 
