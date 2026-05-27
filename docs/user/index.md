@@ -12,3 +12,5 @@ This guide provides information for deploying and operating NVCF in self-managed
   : Configure gateway routing, registries, and optional enhancements.
 - [Using Cloud Functions](./api.md)
   : Create and invoke functions using the NVCF API and CLI.
+- [Managed (Legacy)](../ngc-managed/cluster-management/ngc-managed.md)
+  : Documentation for the legacy NGC-managed NVCF platform (BYOC).

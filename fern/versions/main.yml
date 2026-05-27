@@ -234,3 +234,31 @@ navigation:
         path: ../../docs/user/fake-gpu-operator.md
       - page: Release Process
         path: ../../docs/dev/release-process.md
+
+  - section: Managed (Legacy)
+    skip-slug: true
+    contents:
+      - section: Cluster Management
+        skip-slug: true
+        contents:
+          - page: NGC-Managed Clusters
+            path: ../../docs/ngc-managed/cluster-management/ngc-managed.md
+          - page: Helm-Managed Clusters
+            path: ../../docs/ngc-managed/cluster-management/helm-managed.md
+          - page: Configuration
+            path: ../../docs/ngc-managed/cluster-management/configuration.md
+          - page: Monitoring
+            path: ../../docs/ngc-managed/cluster-management/monitoring.md
+          - page: Reference
+            path: ../../docs/ngc-managed/cluster-management/reference.md
+          - page: Container Cache
+            path: ../../docs/ngc-managed/cluster-management/container-cache.md
+          - page: GXCache
+            path: ../../docs/ngc-managed/cluster-management/gxcache.md
+          - page: KAI Scheduler
+            path: ../../docs/ngc-managed/cluster-management/kai-scheduler.md
+      - page: Function Lifecycle
+        path: ../../docs/ngc-managed/function-lifecycle.md
+      - page: Observability
+        slug: managed-observability
+        path: ../../docs/ngc-managed/observability.md

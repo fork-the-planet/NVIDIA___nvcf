@@ -6,6 +6,7 @@ Use this file when navigating or editing NVCF documentation under `docs/`.
 
 - `docs/user/`: current customer-facing documentation for main.
 - `docs/v*/`: frozen versioned documentation. Do not edit these trees unless the user explicitly asks for a historical docs fix.
+- `docs/ngc-managed/`: legacy NGC-managed (BYOC) platform documentation. Separate from the self-hosted docs in `docs/user/`.
 - `docs/dev/`: developer and local workflow documentation.
 - `docs/version-catalog/main.yaml`: source of truth for generated artifact versions in current docs.
 - `fern/versions/main.yml`: source of truth for current docs navigation.
