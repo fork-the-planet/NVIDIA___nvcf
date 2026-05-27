@@ -120,6 +120,81 @@ func TestEnvironmentVariables(t *testing.T) {
 	}
 }
 
+func TestEnvVarToConfigKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVar   string
+		expected string
+	}{
+		{
+			name:     "single underscores delimit path segments",
+			envVar:   "NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVER_PORT",
+			expected: "server.port",
+		},
+		{
+			name:     "double underscores preserve snake case field names",
+			envVar:   "NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED",
+			expected: "service.nkey_seed",
+		},
+		{
+			name:     "multiple escaped fields in one path",
+			envVar:   "NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_MAX__EXPORT__BATCH__SIZE",
+			expected: "tracing.otel.max_export_batch_size",
+		},
+		{
+			name:     "triple underscores preserve kebab case field names",
+			envVar:   "NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_X___API___KEY",
+			expected: "tracing.otel.headers.x-api-key",
+		},
+		{
+			name:     "unescaped snake case remains path segments",
+			envVar:   "NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SEED",
+			expected: "service.nkey.seed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, envVarToConfigKey(tt.envVar))
+		})
+	}
+}
+
+func TestEnvironmentVariablesWithEscapedSnakeCase(t *testing.T) {
+	defer ResetConfig()
+	setupTestConfig()
+
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS__URL", "nats://env.example:4222")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED", "SUAOTESTSEEDKEYFROMENV")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SIGNATURE", "SAATESTSIGNATUREKEYFROMENV")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_STACKTRACE__LEVEL", "panic")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_DISABLE__TIMESTAMP", "true")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FIELDS_SERVICE__NAME", "env-log-service")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP__ENDPOINT", "http://otel.example/v1/traces")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_SAMPLING__RATIO", "0.25")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_TIMEOUT__MS", "1234")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_X___API___KEY", "otel-api-key")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS__TOKEN", "lightstep-token")
+	t.Setenv("NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_MAX__QUEUE__SIZE", "4096")
+
+	cfg, err := InitConfig("test", "")
+	assert.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	assert.Equal(t, "nats://env.example:4222", cfg.Service.NatsURL)
+	assert.Equal(t, "SUAOTESTSEEDKEYFROMENV", cfg.Service.NkeySeed)
+	assert.Equal(t, "SAATESTSIGNATUREKEYFROMENV", cfg.Service.NkeySignature)
+	assert.Equal(t, "panic", cfg.Logging.StacktraceLevel)
+	assert.True(t, cfg.Logging.DisableTimestamp)
+	assert.Equal(t, "env-log-service", cfg.Logging.Fields.ServiceName)
+	assert.Equal(t, "http://otel.example/v1/traces", cfg.Tracing.Otel.HTTPEndpoint)
+	assert.Equal(t, "0.25", cfg.Tracing.Otel.SamplingRatio)
+	assert.Equal(t, 1234, cfg.Tracing.Otel.TimeoutMs)
+	assert.Equal(t, "otel-api-key", cfg.Tracing.Otel.Headers.XAPIKey)
+	assert.Equal(t, "lightstep-token", cfg.Tracing.Lightstep.AccessToken)
+	assert.Equal(t, 4096, cfg.Tracing.Lightstep.MaxQueueSize)
+}
+
 func TestConfigValidation(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -75,9 +75,9 @@ The service supports configuration through multiple sources (in order of precede
 
 | Setting | CLI Flag | Environment Variable | Config File Path | Default Value | Description |
 |---------|----------|---------------------|------------------|---------------|-------------|
-| NATS URL | `--nats-url` | `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS_URL` | `service.nats_url` | `nats://localhost:4222` | NATS server URL |
-| NKey Seed | `--nkey-seed` | `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SEED` | `service.nkey_seed` | - | NKey seed for authentication |
-| NKey Signature | `--nkey-signature` | `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SIGNATURE` | `service.nkey_signature` | - | Signing key seed for JWT signing |
+| NATS URL | `--nats-url` | `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS__URL` | `service.nats_url` | `nats://localhost:4222` | NATS server URL |
+| NKey Seed | `--nkey-seed` | `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED` | `service.nkey_seed` | - | NKey seed for authentication |
+| NKey Signature | `--nkey-signature` | `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SIGNATURE` | `service.nkey_signature` | - | Signing key seed for JWT signing |
 
 ### Essential Configuration
 
@@ -125,8 +125,8 @@ The service requires two NKey seeds for operation:
 **Example Configuration:**
 ```bash
 # Using environment variables (recommended for production)
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SEED="SUA..."
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SIGNATURE="SAA..."
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED="SUA..."
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SIGNATURE="SAA..."
 
 # Using CLI flags
 ./nvcf-nats-auth-callout-service server \
@@ -151,9 +151,9 @@ The application supports comprehensive logging configuration:
 | Log Format | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FORMAT` | `logging.format` | `json` | Log format (json, console, text) |
 | Log Output | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_OUTPUT` | `logging.output` | `stdout` | Log output (stdout, stderr) |
 | Show Caller | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_CALLER` | `logging.caller` | `true` | Include caller information |
-| Stacktrace Level | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_STACKTRACE_LEVEL` | `logging.stacktrace_level` | `error` | Stacktrace level |
+| Stacktrace Level | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_STACKTRACE__LEVEL` | `logging.stacktrace_level` | `error` | Stacktrace level |
 | Development Mode | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_DEVELOPMENT` | `logging.development` | `false` | Development mode logging |
-| Service Name Field | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FIELDS_SERVICE_NAME` | `logging.fields.service_name` | - | Service name in logs |
+| Service Name Field | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FIELDS_SERVICE__NAME` | `logging.fields.service_name` | - | Service name in logs |
 | Environment Field | `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FIELDS_ENVIRONMENT` | `logging.fields.environment` | - | Environment name in logs |
 
 **Note**: The version field in logs is automatically populated from build-time version injection and cannot be configured.
@@ -263,9 +263,9 @@ export NVCF_NATS_AUTH_CALLOUT_SERVICE_CONFIG_PATH=/path/to/config.yaml
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_SECRETS_FILE_PATH=/path/to/secrets.json
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVER_PORT=9090
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NAME=my-service
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS_URL=nats://localhost:4222
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SEED="SUA..."
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SIGNATURE="SAA..."
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS__URL=nats://localhost:4222
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED="SUA..."
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SIGNATURE="SAA..."
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_LEVEL=debug
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FORMAT=console
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_METRICS_ENABLED=true
@@ -274,7 +274,7 @@ export NVCF_NATS_AUTH_CALLOUT_SERVICE_METRICS_ENABLED=true
 ./nvcf-nats-auth-callout-service server
 
 # Or run with inline environment variables
-NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVER_PORT=9090 NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NAME=my-service NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS_URL=nats://localhost:4222 NVCF_NATS_AUTH_CALLOUT_SERVICE_SECRETS_FILE_PATH=/path/to/secrets.json ./nvcf-nats-auth-callout-service server
+NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVER_PORT=9090 NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NAME=my-service NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS__URL=nats://localhost:4222 NVCF_NATS_AUTH_CALLOUT_SERVICE_SECRETS_FILE_PATH=/path/to/secrets.json ./nvcf-nats-auth-callout-service server
 ```
 
 ## Using Configuration Files
@@ -421,7 +421,7 @@ NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FORMAT=console NVCF_NATS_AUTH_CALLOUT_SER
 NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FORMAT=json NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_LEVEL=info ./nvcf-nats-auth-callout-service server
 
 # Add custom fields to logs
-NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FIELDS_ENVIRONMENT=production NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FIELDS_SERVICE_NAME=my-service ./nvcf-nats-auth-callout-service server
+NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FIELDS_ENVIRONMENT=production NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_FIELDS_SERVICE__NAME=my-service ./nvcf-nats-auth-callout-service server
 ```
 
 ## DevSpace Integration
@@ -435,11 +435,11 @@ When using DevSpace for development, you can:
        env:
          - name: NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVER_PORT
            value: "9090"
-         - name: NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS_URL
+         - name: NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS__URL
            value: "nats://localhost:4222"
-         - name: NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SEED
+         - name: NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED
            value: "SUA..." # NKey seed for authentication
-         - name: NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SIGNATURE
+         - name: NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SIGNATURE
            value: "SAA..." # Signing key seed for JWT signing
          - name: NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_LEVEL
            value: "debug"
@@ -486,13 +486,14 @@ When using DevSpace for development, you can:
    - Secrets file path → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SECRETS_FILE_PATH`
    - Config key `server.port` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVER_PORT`
    - Config key `service.name` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NAME`
-   - Config key `service.nats_url` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS_URL`
-   - Config key `service.nkey_seed` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SEED`
-   - Config key `service.nkey_signature` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SIGNATURE`
+   - Config key `service.nats_url` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS__URL`
+   - Config key `service.nkey_seed` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED`
+   - Config key `service.nkey_signature` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SIGNATURE`
    - Config key `logging.level` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_LEVEL`
    - Config key `metrics.enabled` → Environment variable `NVCF_NATS_AUTH_CALLOUT_SERVICE_METRICS_ENABLED`
-   - Kebab-case in config becomes SNAKE_CASE in environment variables
-   - Dots (.) become underscores (_) in environment variables
+   - Single underscores (`_`) separate config path segments in environment variables
+   - Double underscores (`__`) preserve literal underscores in config keys
+   - Triple underscores (`___`) preserve literal hyphens in config keys
 
 6. **Check if config file is being loaded:**
    The debug command shows which config file (if any) is being used.
@@ -578,25 +579,25 @@ devspace dev -p tracing
 | Setting | Environment Variable | Config File Path | Default Value | Description |
 |---------|---------------------|------------------|---------------|-------------|
 | gRPC Endpoint | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_ENDPOINT` | `tracing.otel.endpoint` | - | OTLP gRPC endpoint |
-| HTTP Endpoint | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP_ENDPOINT` | `tracing.otel.http_endpoint` | - | OTLP HTTP endpoint (preferred) |
+| HTTP Endpoint | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP__ENDPOINT` | `tracing.otel.http_endpoint` | - | OTLP HTTP endpoint (preferred) |
 | Insecure | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_INSECURE` | `tracing.otel.insecure` | `false` | Use insecure connection |
 | Environment | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_ENVIRONMENT` | `tracing.otel.environment` | - | Deployment environment |
-| Sampling Ratio | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_SAMPLING_RATIO` | `tracing.otel.sampling_ratio` | `1.0` | Trace sampling ratio (0.0-1.0) |
-| Timeout | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_TIMEOUT_MS` | `tracing.otel.timeout_ms` | `10000` | Export timeout (ms) |
+| Sampling Ratio | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_SAMPLING__RATIO` | `tracing.otel.sampling_ratio` | `1.0` | Trace sampling ratio (0.0-1.0) |
+| Timeout | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_TIMEOUT__MS` | `tracing.otel.timeout_ms` | `10000` | Export timeout (ms) |
 | Compression | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_COMPRESSION` | `tracing.otel.compression` | `gzip` | Compression (gzip, none) |
-| Retry Delay | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_RETRY_DELAY_MS` | `tracing.otel.retry_delay_ms` | `5000` | Retry delay (ms) |
+| Retry Delay | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_RETRY__DELAY__MS` | `tracing.otel.retry_delay_ms` | `5000` | Retry delay (ms) |
 | Authorization | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_AUTHORIZATION` | `tracing.otel.headers.authorization` | - | Authorization header |
-| API Key | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_X_API_KEY` | `tracing.otel.headers.x_api_key` | - | X-API-Key header |
+| API Key | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_X___API___KEY` | `tracing.otel.headers.x-api-key` | - | X-API-Key header |
 
 **Lightstep Provider Settings:**
 
 | Setting | Environment Variable | Config File Path | Default Value | Description |
 |---------|---------------------|------------------|---------------|-------------|
 | Endpoint | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ENDPOINT` | `tracing.lightstep.endpoint` | `https://ingest.lightstep.com:443/traces/otel/v1` | Lightstep OTLP endpoint |
-| Access Token | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS_TOKEN` | `tracing.lightstep.access_token` | - | Lightstep access token |
+| Access Token | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS__TOKEN` | `tracing.lightstep.access_token` | - | Lightstep access token |
 | Environment | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ENVIRONMENT` | `tracing.lightstep.environment` | - | Deployment environment |
-| Sampling Ratio | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_SAMPLING_RATIO` | `tracing.lightstep.sampling_ratio` | `1.0` | Trace sampling ratio (0.0-1.0) |
-| Timeout | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_TIMEOUT_MS` | `tracing.lightstep.timeout_ms` | `10000` | Export timeout (ms) |
+| Sampling Ratio | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_SAMPLING__RATIO` | `tracing.lightstep.sampling_ratio` | `1.0` | Trace sampling ratio (0.0-1.0) |
+| Timeout | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_TIMEOUT__MS` | `tracing.lightstep.timeout_ms` | `10000` | Export timeout (ms) |
 | Compression | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_COMPRESSION` | `tracing.lightstep.compression` | `gzip` | Compression (gzip, none) |
 | Insecure | `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_INSECURE` | `tracing.lightstep.insecure` | `false` | Use insecure connection |
 
@@ -621,9 +622,9 @@ These are automatically injected in Kubernetes deployments via the Downward API.
 # Enable OpenTelemetry tracing with Jaeger
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_ENABLED=true
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_PROVIDER=otel
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP_ENDPOINT="http://jaeger:14268/api/traces"
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP__ENDPOINT="http://jaeger:14268/api/traces"
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_INSECURE=true
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_SAMPLING_RATIO=0.1
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_SAMPLING__RATIO=0.1
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_ENVIRONMENT=production
 
 ./nvcf-nats-auth-callout-service server
@@ -634,9 +635,9 @@ export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_ENVIRONMENT=production
 # Enable Lightstep tracing
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_ENABLED=true
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_PROVIDER=lightstep
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS_TOKEN="your-lightstep-token"
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS__TOKEN="your-lightstep-token"
 export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ENVIRONMENT=production
-export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_SAMPLING_RATIO=0.1
+export NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_SAMPLING__RATIO=0.1
 
 ./nvcf-nats-auth-callout-service server
 ```
@@ -706,16 +707,16 @@ Tracing follows OpenTelemetry standards and should only be configured via enviro
 docker run -p 8080:8080 \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_ENABLED=true \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_PROVIDER=otel \
-  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP_ENDPOINT="http://jaeger:14268/api/traces" \
+  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP__ENDPOINT="http://jaeger:14268/api/traces" \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_INSECURE=true \
-  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_SAMPLING_RATIO=0.1 \
+  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_SAMPLING__RATIO=0.1 \
   nvcf-nats-auth-callout-service server
 
 # OpenTelemetry with Tempo and authentication
 docker run -p 8080:8080 \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_ENABLED=true \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_PROVIDER=otel \
-  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP_ENDPOINT="http://tempo:4318/v1/traces" \
+  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HTTP__ENDPOINT="http://tempo:4318/v1/traces" \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_AUTHORIZATION="Bearer your-token" \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_COMPRESSION=gzip \
   nvcf-nats-auth-callout-service server
@@ -724,9 +725,9 @@ docker run -p 8080:8080 \
 docker run -p 8080:8080 \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_ENABLED=true \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_PROVIDER=lightstep \
-  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS_TOKEN="your-lightstep-token" \
+  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS__TOKEN="your-lightstep-token" \
   -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ENVIRONMENT=production \
-  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_SAMPLING_RATIO=0.1 \
+  -e NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_SAMPLING__RATIO=0.1 \
   nvcf-nats-auth-callout-service server
 ```
 
@@ -830,8 +831,8 @@ serviceConfig:
 - **Automatic Creation**: Secrets are created when secret data is provided and `existingSecret` is empty
 - **Existing Secrets**: Reference existing secrets by setting `existingSecret` to the secret name
 - **Environment Variables**: Secret values are automatically injected as environment variables:
-  - OpenTelemetry: `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_AUTHORIZATION`, `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_X_API_KEY`
-  - Lightstep: `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS_TOKEN`
+  - OpenTelemetry: `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_AUTHORIZATION`, `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_OTEL_HEADERS_X___API___KEY`
+  - Lightstep: `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_LIGHTSTEP_ACCESS__TOKEN`
 
 #### Examples
 
@@ -889,4 +890,4 @@ tracing:
 - Cannot specify both `existingSecret` and secret creation values
 - If `secretName` is provided, corresponding secret data must also be provided
 - Secret names must be valid Kubernetes secret names
-- At least one secret field must be provided when creating secrets 
+- At least one secret field must be provided when creating secrets

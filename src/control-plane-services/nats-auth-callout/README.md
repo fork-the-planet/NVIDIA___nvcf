@@ -366,13 +366,16 @@ The service supports configuration via:
 
 Common environment variables:
 
+Use a double underscore (`__`) for literal underscores and triple underscore (`___`) for literal hyphens in config keys.
+For example, `service.nkey_seed` maps to `SERVICE_NKEY__SEED`.
+
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_CONFIG_PATH`: Path to configuration file
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_SECRETS_FILE_PATH`: Path to secrets file
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVER_PORT`: Server port (default: 8080)
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NAME`: Service name for identification
-- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS_URL`: NATS server URL (default: nats://localhost:4222)
-- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SEED`: NKey seed for authentication
-- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SIGNATURE`: Signing key seed for JWT signing
+- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS__URL`: NATS server URL (default: nats://localhost:4222)
+- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED`: NKey seed for authentication
+- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SIGNATURE`: Signing key seed for JWT signing
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_METRICS_ENABLED`: Enable Prometheus metrics
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_ENABLED`: Enable distributed tracing
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_LEVEL`: Set log level (debug, info, warn, error)
@@ -468,13 +471,16 @@ docker run -p 8080:8080 \
 
 Key environment variables for deployment:
 
+Use a double underscore (`__`) for literal underscores and triple underscore (`___`) for literal hyphens in config keys.
+For example, `service.nkey_seed` maps to `SERVICE_NKEY__SEED`.
+
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_CONFIG_PATH`: Path to configuration file
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_SECRETS_FILE_PATH`: Path to secrets file
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVER_PORT`: Server port (default: 8080)
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NAME`: Service name for tracing
-- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS_URL`: NATS server URL (default: nats://localhost:4222)
-- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SEED`: NKey seed for authentication
-- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY_SIGNATURE`: Signing key seed for JWT signing
+- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NATS__URL`: NATS server URL (default: nats://localhost:4222)
+- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SEED`: NKey seed for authentication
+- `NVCF_NATS_AUTH_CALLOUT_SERVICE_SERVICE_NKEY__SIGNATURE`: Signing key seed for JWT signing
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_METRICS_ENABLED`: Enable metrics collection
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_TRACING_ENABLED`: Enable distributed tracing
 - `NVCF_NATS_AUTH_CALLOUT_SERVICE_LOGGING_LEVEL`: Log level (debug, info, warn, error)

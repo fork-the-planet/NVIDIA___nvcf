@@ -174,15 +174,7 @@ func InitConfig(serviceName string, customConfigPaths ...string) (*Config, error
 	}
 
 	// Always load environment variables (so they can override defaults or previous values)
-	if err := k.Load(env.Provider("NVCF_NATS_AUTH_CALLOUT_SERVICE_", ".", func(s string) string {
-		// Convert environment variable to config key
-		// Remove prefix and convert to lowercase
-		key := strings.TrimPrefix(s, "NVCF_NATS_AUTH_CALLOUT_SERVICE_")
-		key = strings.ToLower(key)
-		// Replace underscores with dots for nested keys
-		key = strings.ReplaceAll(key, "_", ".")
-		return key
-	}), nil); err != nil {
+	if err := k.Load(env.Provider("NVCF_NATS_AUTH_CALLOUT_SERVICE_", ".", envVarToConfigKey), nil); err != nil {
 		return nil, fmt.Errorf("error loading environment variables: %w", err)
 	}
 
@@ -195,6 +187,23 @@ func InitConfig(serviceName string, customConfigPaths ...string) (*Config, error
 	}
 
 	return &config, nil
+}
+
+func envVarToConfigKey(envVar string) string {
+	key := strings.TrimPrefix(envVar, "NVCF_NATS_AUTH_CALLOUT_SERVICE_")
+	key = strings.ToLower(key)
+
+	// Double underscores escape literal underscores and triple underscores
+	// escape literal hyphens in mapstructure tags.
+	const escapedHyphen = "\x00"
+	const escapedUnderscore = "\x01"
+	key = strings.ReplaceAll(key, "___", escapedHyphen)
+	key = strings.ReplaceAll(key, "__", escapedUnderscore)
+	key = strings.ReplaceAll(key, "_", ".")
+	key = strings.ReplaceAll(key, escapedHyphen, "-")
+	key = strings.ReplaceAll(key, escapedUnderscore, "_")
+
+	return key
 }
 
 // BindFlag binds a CLI flag to a configuration key
