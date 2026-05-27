@@ -18,6 +18,7 @@ filegroup(
     srcs = glob([
         "nvcf-self-managed-cli/**",
         "nvcf-self-managed-installation/**",
+        "nvcf-self-managed-prerequisite/**",
     ]),
     visibility = ["//visibility:public"],
 )
