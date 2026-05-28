@@ -462,6 +462,9 @@ CHECKED=0
 
 # Build find args
 FIND_ROOTS=("${REPO_ROOT}")
+if [[ ${#SEARCH_PATHS[@]} -gt 0 ]]; then
+    FIND_ROOTS=("${SEARCH_PATHS[@]}")
+fi
 PRUNE_ARGS=()
 for d in "${SKIP_DIR_NAMES[@]}"; do
     PRUNE_ARGS+=(-name "${d}" -o)
@@ -514,7 +517,7 @@ while IFS= read -r filepath; do
     group=$(determine_group "${rel_path}")
     FAILURES+=("${group}	${rel_path}	${lang}")
 
-done < <(find "${REPO_ROOT}" \( "${PRUNE_ARGS[@]}" \) -prune -o \
+done < <(find "${FIND_ROOTS[@]}" \( "${PRUNE_ARGS[@]}" \) -prune -o \
     \( -name '*.go' -o -name '*.py' -o -name '*.java' -o -name '*.rs' \
        -o -name '*.properties' -o -name '*.yaml' -o -name '*.yml' -o -name '*.tpl' \) \
     -type f -print 2>/dev/null | LC_ALL=C sort)

@@ -96,8 +96,8 @@ Services that manage the NVCF platform including API gateway, deployment orchest
 | Chart (OCI) | helm-nvcf-ess-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-ess-api:1.5.3` |
 | Image | notary-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/notary-service:1.9.4` |
 | Chart (OCI) | helm-nvcf-notary-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-notary-service:1.4.1` |
-| Image | reval-server | `nvcr.io/0833294136851237/nvcf-ncp-staging/reval-server:0.2.1` |
-| Chart (OCI) | helm-reval | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-reval:1.3.7` |
+| Image | reval-server | `nvcr.io/0833294136851237/nvcf-ncp-staging/reval-server:0.2.2` |
+| Chart (OCI) | helm-reval | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-reval:1.3.8` |
 | Image | nv-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/nv-api-keys:0.0.7` |
 | Chart (OCI) | helm-nvcf-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-api-keys:1.5.1` |
 | Image | nvct-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvct-service-oss:1.3.11` |
@@ -224,7 +224,7 @@ Helmfile and CLI resources for deployment.
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
-| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.50` |
+| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.51` |
 | Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |
 
 {/* docs-version-sync:END manifest-artifact-registry-paths */}
