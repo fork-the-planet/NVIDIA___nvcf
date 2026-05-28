@@ -44,6 +44,13 @@ go_oci_image(
     visibility = ["//visibility:public"],
 )
 
+sh_test(
+    name = "image_entrypoint_mode_test",
+    srcs = ["image_entrypoint_mode_test.sh"],
+    args = ["$(location :image.tar)"],
+    data = [":image.tar"],
+)
+
 go_test(
     name = "reval-service_test",
     srcs = ["main_test.go"],
