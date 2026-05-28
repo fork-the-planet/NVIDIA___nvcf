@@ -410,6 +410,31 @@ type WorkloadConfig struct {
 	// Stargate configuration
 	DefaultStargateAddress string `yaml:",omitempty"`
 	StargateQUICInsecure   bool   `yaml:",omitempty"`
+
+	// TransportTLS configures trust material used by workload transport clients.
+	TransportTLS *TransportTLSConfig `yaml:",omitempty"`
+}
+
+// TrustMode controls how the NVCA agent's LLM worker pins the QUIC TLS
+// certificate served by Stargate. "system" uses the host's standard CA
+// pool; "bundle" requires the operator-supplied PEM and fingerprint and
+// pins exclusively against that root.
+type TrustMode string
+
+const (
+	TrustModeSystem TrustMode = "system"
+	TrustModeBundle TrustMode = "bundle"
+)
+
+// TransportTLSConfig is the operator-supplied trust material the NVCA agent
+// uses to verify Stargate's openbao-issued QUIC TLS certificate on
+// self-managed clusters.
+type TransportTLSConfig struct {
+	TrustMode                TrustMode `yaml:"trustMode"`
+	TrustBundleConfigMapName string    `yaml:"trustBundleConfigMapName"`
+	TrustBundleKey           string    `yaml:"trustBundleKey"`
+	TrustBundleFingerprint   string    `yaml:"trustBundleFingerprint"`
+	TrustBundlePEM           string    `yaml:"trustBundlePem"`
 }
 
 func (t WorkloadConfig) Complete() WorkloadConfig {
