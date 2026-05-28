@@ -251,7 +251,7 @@ apikeys:
   {{- end }}
 
 {{- $apiEnvOverrides := dig "api" "env" dict .Values }}
-{{- $llmRouterClientImageDefault := printf "%s/%s/stargate-client:0.2.0" .Values.global.image.registry .Values.global.image.repository }}
+{{- $llmRouterClientImageDefault := printf "%s/%s/stargate-client:0.3.0" .Values.global.image.registry .Values.global.image.repository }}
 {{- $llmRouterClientImage := dig "NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE" $llmRouterClientImageDefault $apiEnvOverrides }}
 api:
   fullnameOverride: nvcf-api
@@ -277,7 +277,7 @@ api:
     image:
       registry: {{ .Values.global.image.registry }}
       repository: {{ .Values.global.image.repository }}/alpine-k8s
-      tag: 1.30.14
+      tag: 1.36.1
       pullPolicy: IfNotPresent
 
     registryCredentials: []
@@ -606,6 +606,53 @@ llmRequestRouter:
   {{- with dig "addons" "llm" "requestRouter" "loadBalancer" dict .Values }}
   loadBalancer:
     {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- /* Compound guard: skip the entire PKI block (and its required/fail
+       validations) when the LLM addon itself is disabled. helmfile's
+       `condition: addons.llm.enabled` already suppresses the chart release,
+       so an operator staging pki.enabled=true ahead of llm.enabled=true
+       should not be punished with confusing required errors during render. */ -}}
+  {{- if and (dig "addons" "llm" "enabled" false .Values) (dig "addons" "llm" "pki" "enabled" false .Values) }}
+  {{- $secretName := dig "addons" "llm" "pki" "secretName" "stargate-quic-tls" .Values }}
+  {{- $allowedDomains := required "addons.llm.pki.allowedDomains is required when addons.llm.pki.enabled is true" (dig "addons" "llm" "pki" "allowedDomains" "" .Values) }}
+  {{- $dnsNames := dig "addons" "llm" "pki" "dnsNames" (list) .Values }}
+  {{- if eq (len $dnsNames) 0 }}
+  {{- fail "addons.llm.pki.dnsNames must contain at least one DNS name when addons.llm.pki.enabled is true" }}
+  {{- end }}
+  {{- /* Provisioning hook reuses the same image the k8s-openbao chart drives;
+       fall back to openbao.migrations.image.tag so operators set the version
+       in one place. */ -}}
+  {{- $pkiImageTag := dig "addons" "llm" "pki" "image" "tag" (dig "openbao" "migrations" "image" "tag" "" .Values) .Values }}
+  {{- if not $pkiImageTag }}
+  {{- fail "addons.llm.pki.image.tag (or openbao.migrations.image.tag) is required when addons.llm.pki.enabled is true" }}
+  {{- end }}
+  certificate:
+    enabled: true
+    secretName: {{ $secretName | quote }}
+    issuerRef:
+      kind: {{ dig "addons" "llm" "pki" "issuerKind" "ClusterIssuer" .Values | quote }}
+      name: {{ dig "addons" "llm" "pki" "issuerName" "nvcf-openbao-pki" .Values | quote }}
+    dnsNames:
+      {{- toYaml $dnsNames | nindent 6 }}
+  tls:
+    secretName: {{ $secretName | quote }}
+    mountPath: {{ dig "addons" "llm" "pki" "mountPath" "/etc/stargate/tls" .Values | quote }}
+    certPath: {{ dig "addons" "llm" "pki" "certPath" "/etc/stargate/tls/tls.crt" .Values | quote }}
+    keyPath: {{ dig "addons" "llm" "pki" "keyPath" "/etc/stargate/tls/tls.key" .Values | quote }}
+    quicInsecure: false
+  pki:
+    enabled: true
+    namespace: {{ dig "addons" "llm" "pki" "namespace" "vault-system" .Values | quote }}
+    allowedDomains: {{ $allowedDomains | quote }}
+    image:
+      registry: {{ dig "addons" "llm" "pki" "image" "registry" .Values.global.image.registry .Values | quote }}
+      repository: {{ dig "addons" "llm" "pki" "image" "repository" (printf "%s/nvcf-openbao-migrations" .Values.global.image.repository) .Values | quote }}
+      tag: {{ $pkiImageTag | quote }}
+      pullPolicy: {{ dig "addons" "llm" "pki" "image" "pullPolicy" "IfNotPresent" .Values | quote }}
+    {{- if .Values.global.imagePullSecrets }}
+    imagePullSecrets:
+      {{- toYaml .Values.global.imagePullSecrets | nindent 6 }}
+    {{- end }}
   {{- end }}
 
 vanityGateway:

@@ -148,6 +148,34 @@ addons:
   # LLM addon: gateway + request router (stargate) for LLM function invocation
   llm:
     enabled: false
+    # OpenBao-issued QUIC TLS certificate for the request router (Stargate).
+    # When enabled, the chart provisions an NVCF service-issuing PKI hierarchy
+    # in OpenBao via a Helm pre-install/pre-upgrade Job, requests a Certificate
+    # against the nvcf-openbao-pki ClusterIssuer, and mounts the resulting
+    # Secret into the request-router pod. Disabled by default; opt in per env.
+    pki:
+      enabled: false
+      # REQUIRED when enabled. Comma-separated DNS suffixes the OpenBao PKI
+      # role accepts. Typically the customer domain plus cluster.local for
+      # in-cluster service identity.
+      allowedDomains: ""
+      # REQUIRED when enabled. SANs requested on the issued certificate.
+      dnsNames: []
+      # Optional overrides; defaults are usually correct.
+      # secretName: stargate-quic-tls
+      # issuerKind: ClusterIssuer
+      # issuerName: nvcf-openbao-pki
+      # namespace: vault-system
+      # mountPath: /etc/stargate/tls
+      # certPath: /etc/stargate/tls/tls.crt
+      # keyPath: /etc/stargate/tls/tls.key
+      # Image defaults to ${global.image.registry}/${global.image.repository}/nvcf-openbao-migrations.
+      # tag falls back to openbao.migrations.image.tag if unset here, so the
+      # operator can pin both in one place.
+      # image:
+      #   registry: ""
+      #   repository: ""
+      #   tag: ""
 
   # Vanity Gateway addon for optional vanity and OpenAI-compatible invocation routes.
   # Disabled by default; enabling this deploys the vanity-gateway service and its

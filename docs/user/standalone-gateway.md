@@ -33,7 +33,7 @@ to NVCF services through the Gateway.
 
 | **Chart** | `nvcf-gateway-routes` |
 | --- | --- |
-| **Version** | `1.12.0` |
+| **Version** | `1.13.0` |
 | **Namespace** | `envoy-gateway-system` |
 | **Depends on** | Notary Service, API Keys (must be running), Gateway (must be programmed) |
 
@@ -74,7 +74,7 @@ Replace `<DOMAIN>` with the `GATEWAY_ADDR` value obtained above.
 ```bash
 helm upgrade --install ingress \
   oci://${REGISTRY}/${REPOSITORY}/nvcf-gateway-routes \
-  --version 1.12.0 \
+  --version 1.13.0 \
   --namespace envoy-gateway-system \
   --wait --timeout 10m \
   -f gateway-routes-values.yaml

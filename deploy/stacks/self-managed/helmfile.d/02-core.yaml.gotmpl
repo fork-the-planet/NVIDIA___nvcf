@@ -121,7 +121,7 @@ releases:
 
   - name: reval
     chart: nvcf/helm-reval
-    version: 1.3.6
+    version: 1.3.7
     namespace: nvcf
     values:
       - ../global.yaml.gotmpl
@@ -143,7 +143,7 @@ releases:
 
   - name: llm-request-router
     chart: nvcf/helm-nvcf-llm-request-router
-    version: 1.3.1
+    version: 1.6.0
     namespace: nvcf
     condition: addons.llm.enabled
     values:

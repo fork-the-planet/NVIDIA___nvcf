@@ -71,11 +71,11 @@ Core infrastructure services including NATS for messaging, NATS auth callout sup
 | Image | nvcf-nats-auth-callout-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-nats-auth-callout-service:0.3.3` |
 | Chart (OCI) | helm-nvcf-nats-auth-callout-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-nats-auth-callout-service:1.0.1` |
 | Image | bitnami-cassandra | `nvcr.io/0833294136851237/nvcf-ncp-staging/bitnami-cassandra:5.0.6-nv-1` |
-| Image | nvcf-cassandra-migrations | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cassandra-migrations:0.6.4` |
-| Chart (OCI) | helm-nvcf-cassandra | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-cassandra:0.14.5` |
+| Image | nvcf-cassandra-migrations | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cassandra-migrations:0.6.6` |
+| Chart (OCI) | helm-nvcf-cassandra | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-cassandra:0.14.8` |
 | Image | nvcf-openbao | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-openbao:2.5.1-nv-1.2.1` |
-| Image | nvcf-openbao-migrations | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-openbao-migrations:0.11.2` |
-| Chart (OCI) | helm-nvcf-openbao-server | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-openbao-server:0.30.11` |
+| Image | nvcf-openbao-migrations | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-openbao-migrations:0.12.1` |
+| Chart (OCI) | helm-nvcf-openbao-server | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-openbao-server:0.30.14` |
 | Image | oss-vault-k8s | `nvcr.io/0833294136851237/nvcf-ncp-staging/oss-vault-k8s:1.7.4` |
 
 #### Control Plane Components
@@ -96,16 +96,16 @@ Services that manage the NVCF platform including API gateway, deployment orchest
 | Chart (OCI) | helm-nvcf-ess-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-ess-api:1.5.3` |
 | Image | notary-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/notary-service:1.9.4` |
 | Chart (OCI) | helm-nvcf-notary-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-notary-service:1.4.1` |
-| Image | reval-server | `nvcr.io/0833294136851237/nvcf-ncp-staging/reval-server:0.16.2` |
-| Chart (OCI) | helm-reval | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-reval:1.3.5` |
+| Image | reval-server | `nvcr.io/0833294136851237/nvcf-ncp-staging/reval-server:0.2.1` |
+| Chart (OCI) | helm-reval | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-reval:1.3.7` |
 | Image | nv-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/nv-api-keys:0.0.7` |
 | Chart (OCI) | helm-nvcf-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-api-keys:1.5.1` |
 | Image | nvct-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvct-service-oss:1.3.11` |
 | Chart (OCI) | helm-nvct-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvct-api:1.0.2` |
-| Image | llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.3.0` |
+| Image | llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.6.1` |
 | Image | llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.4.0` |
 | Chart (OCI) | helm-nvcf-llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-llm-api-gateway:1.2.0` |
-| Chart (OCI) | helm-nvcf-llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-llm-request-router:1.3.1` |
+| Chart (OCI) | helm-nvcf-llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-llm-request-router:1.6.0` |
 
 #### GPU Workload Components
 
@@ -128,7 +128,7 @@ Additional utilities and helper services required for the platform, including th
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
-| Image | alpine-k8s | `nvcr.io/0833294136851237/nvcf-ncp-staging/alpine-k8s:1.30.14` |
+| Image | alpine-k8s | `nvcr.io/0833294136851237/nvcf-ncp-staging/alpine-k8s:1.36.1` |
 | Image | load_tester_supreme | `nvcr.io/0833294136851237/nvcf-ncp-staging/load_tester_supreme:0.0.8` |
 | Chart (HTTP) | gpu-operator | [Public NGC Helm repo](https://helm.ngc.nvidia.com/nvidia) |
 | Image | gpu-operator-validator | [Public NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/cloud-native/containers/gpu-operator-validator) |
@@ -142,7 +142,7 @@ Optional components for the reference deployment architecture.
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
-| Chart (OCI) | nvcf-gateway-routes | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-gateway-routes:1.12.0` |
+| Chart (OCI) | nvcf-gateway-routes | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-gateway-routes:1.13.0` |
 | Image | admin-token-issuer-proxy | `nvcr.io/0833294136851237/nvcf-ncp-staging/admin-token-issuer-proxy:1.0.1` |
 | Chart (OCI) | helm-admin-token-issuer-proxy | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-admin-token-issuer-proxy:1.3.2` |
 
@@ -213,9 +213,10 @@ Additional components present in the current stack artifact manifest.
 | Image | cert-manager-webhook | `nvcr.io/0833294136851237/nvcf-ncp-staging/cert-manager-webhook:v1.20.2` |
 | Chart (OCI) | helm-nvcf-cert-manager | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-cert-manager:0.1.0` |
 | Chart (OCI) | helm-nvcf-nvct-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-nvct-api:1.1.2` |
+| Chart (OCI) | helm-nvcf-vanity-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-vanity-gateway:0.1.0-nvcf-10204.1` |
 | Image | nvcf-api-keys-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-api-keys-service:1.2.14` |
 | Image | nvcf-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-service-oss:1.2.8` |
-| Image | stargate-client | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate-client:0.2.0` |
+| Image | stargate-client | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate-client:0.3.0` |
 
 #### Deployment Resources
 
@@ -223,7 +224,7 @@ Helmfile and CLI resources for deployment.
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
-| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.39` |
+| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.50` |
 | Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |
 
 {/* docs-version-sync:END manifest-artifact-registry-paths */}

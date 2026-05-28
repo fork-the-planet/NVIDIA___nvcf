@@ -54,7 +54,7 @@ If you mirror images to a registry that does not use the stack's default
 ```yaml
 api:
   env:
-    NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE: <registry>/<repository>/stargate-client:0.2.0
+    NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE: <registry>/<repository>/stargate-client:0.3.0
 ```
 
 The LLM API Gateway and request router images are resolved from the same stack
