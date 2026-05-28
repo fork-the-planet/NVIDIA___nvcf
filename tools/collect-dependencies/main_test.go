@@ -136,6 +136,66 @@ func TestNormalizeLicenseGroupKeepsMPLVersion(t *testing.T) {
 	}
 }
 
+func TestParseCargoTOMLResolvesWorkspaceDependencyVersions(t *testing.T) {
+	tmp := t.TempDir()
+	writeTestFile(t, filepath.Join(tmp, "Cargo.toml"), `[workspace]
+members = ["crates/app"]
+
+[workspace.dependencies]
+anyhow = "=1.0.102"
+serde = { version = "1.0", features = ["derive"] }
+internal = { path = "crates/internal" }
+`)
+	writeTestFile(t, filepath.Join(tmp, "crates", "app", "Cargo.toml"), `[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+internal = { workspace = true }
+local-only = { path = "../local-only" }
+`)
+
+	got := parseCargoTOML(filepath.Join(tmp, "crates", "app", "Cargo.toml"))
+	for _, want := range []string{"anyhow =1.0.102", "serde 1.0", "internal", "local-only"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("parseCargoTOML missing %q from %#v", want, got)
+		}
+	}
+}
+
+func TestParseCargoTOMLStopsAtPathOnlyWorkspaceRoot(t *testing.T) {
+	tmp := t.TempDir()
+	writeTestFile(t, filepath.Join(tmp, "Cargo.toml"), `[workspace]
+members = ["repo"]
+
+[workspace.dependencies]
+internal = "=9.9.9"
+`)
+	writeTestFile(t, filepath.Join(tmp, "repo", "Cargo.toml"), `[workspace]
+members = ["crates/app"]
+
+[workspace.dependencies]
+internal = { path = "crates/internal" }
+`)
+	writeTestFile(t, filepath.Join(tmp, "repo", "crates", "app", "Cargo.toml"), `[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+internal = { workspace = true }
+`)
+
+	got := parseCargoTOML(filepath.Join(tmp, "repo", "crates", "app", "Cargo.toml"))
+	if _, ok := got["internal"]; !ok {
+		t.Fatalf("parseCargoTOML missing path-only workspace dep from %#v", got)
+	}
+	if _, ok := got["internal =9.9.9"]; ok {
+		t.Fatalf("parseCargoTOML used ancestor workspace dep version: %#v", got)
+	}
+}
+
 func TestLicenseFromPlainDirSkipsNonLicenseFallbackText(t *testing.T) {
 	tmp := t.TempDir()
 	writeTestFile(t, filepath.Join(tmp, "LICENSE"), "Permalink:\nhttps://example.com/license\n")
