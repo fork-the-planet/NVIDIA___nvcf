@@ -40,7 +40,10 @@ def is_under(path: Path, roots: list[Path]) -> bool:
 
 
 def main() -> int:
-    repo = Path.cwd()
+    # Anchor on the script's resolved location so the hook works no matter
+    # which subdirectory the invoking agent is running from. The script lives
+    # at <repo>/ai-tooling/dev/hooks/validate-skill-fanout.py.
+    repo = Path(__file__).resolve().parents[3]
     problems = []
 
     for kind, config in FANOUTS.items():
