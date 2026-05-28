@@ -174,11 +174,11 @@ func createToolboxContainer() corev1.Container {
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 			Limits: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
@@ -230,11 +230,11 @@ exit 0`,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("5m"),
-				corev1.ResourceMemory: resource.MustParse("8Mi"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 			Limits: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
@@ -263,11 +263,11 @@ func createMergeCertsContainer() corev1.Container {
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 			Limits: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{

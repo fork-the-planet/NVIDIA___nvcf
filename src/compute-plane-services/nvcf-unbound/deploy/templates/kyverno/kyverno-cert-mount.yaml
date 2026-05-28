@@ -96,8 +96,8 @@ spec:
                   seccompProfile: { type: RuntimeDefault }
                   capabilities: { drop: ["ALL"] }
                 resources:
-                  requests: { cpu: "50m", memory: "32Mi" }
-                  limits:   { cpu: "50m", memory: "32Mi" }
+                  requests: { cpu: "50m", memory: "128Mi" }
+                  limits:   { cpu: "50m", memory: "128Mi" }
                 volumeMounts:
                   - name: tools
                     mountPath: /tools
@@ -170,8 +170,8 @@ spec:
                   seccompProfile: { type: RuntimeDefault }
                   capabilities: { drop: ["ALL"] }
                 resources:
-                  requests: { cpu: "100m", memory: "64Mi" }
-                  limits:   { cpu: "100m", memory: "64Mi" }
+                  requests: { cpu: "100m", memory: "128Mi" }
+                  limits:   { cpu: "100m", memory: "128Mi" }
                 volumeMounts:
                   - name: merged-certs
                     mountPath: /merged-certs
@@ -261,8 +261,8 @@ spec:
                     seccompProfile: { type: RuntimeDefault }
                     capabilities: { drop: ["ALL"] }
                   resources:
-                    requests: { cpu: "5m", memory: "8Mi" }
-                    limits:   { cpu: "50m", memory: "32Mi" }
+                    requests: { cpu: "5m", memory: "128Mi" }
+                    limits:   { cpu: "50m", memory: "128Mi" }
                   volumeMounts:
                     - name: tools
                       mountPath: /tools

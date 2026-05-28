@@ -819,9 +819,9 @@ func TestMutateCertificates_VerifyResources(t *testing.T) {
 		limCPU string
 		limMem string
 	}{
-		"a-toolbox":           {"50m", "32Mi", "50m", "32Mi"},
-		"b-extract-inference": {"5m", "8Mi", "50m", "32Mi"},
-		"fast-merge-certs":    {"50m", "32Mi", "50m", "32Mi"}, // Lower with Go binary
+		"a-toolbox":           {"50m", "128Mi", "50m", "128Mi"},
+		"b-extract-inference": {"5m", "128Mi", "50m", "128Mi"},
+		"fast-merge-certs":    {"50m", "128Mi", "50m", "128Mi"},
 	}
 
 	for _, c := range initContainers {
