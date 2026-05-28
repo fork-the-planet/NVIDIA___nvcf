@@ -59,6 +59,32 @@ resources:
     memory: "64Gi"
     cpu: "32"
 
+# Resource requests/limits for the nginx-prometheus-exporter sidecar.
+# Sized from 7d P95 (~0.001 cores, ~22MiB working set); see NVCF Resource
+# Right-Sizing dashboard.
+exporter:
+  # Guaranteed QoS: requests == limits.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+
+# Resource requests/limits for the `configure` container in the DaemonSet
+# (writes containerd/CRI-O registry mirror configs to the host).
+# Sized from 7d P95 (~0.001 cores, ~30MiB working set).
+configure:
+  # Guaranteed QoS: requests == limits.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+
 # Configuration options related to persistent/ephemeral storage.
 # Default to emptydir for open-source/cluster-agnostic deployments.
 persistentVolumeClaim:

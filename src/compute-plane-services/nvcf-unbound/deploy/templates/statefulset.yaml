@@ -105,6 +105,10 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 30
             timeoutSeconds: 10
+          {{- with $.Values.unbound.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
         - name: dns-logger
           image: {{ required "Property '.images.logger' is required." $.Values.images.logger | quote }}
           imagePullPolicy: IfNotPresent
@@ -134,6 +138,10 @@ spec:
               scheme: HTTP
             initialDelaySeconds: 10
             periodSeconds: 10
+          {{- with $.Values.dnsLogger.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
           - mountPath: /tmp/
             name: dnstap-socket-volume

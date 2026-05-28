@@ -55,6 +55,10 @@ spec:
           value: {{ $.Values.vault.certLocation | quote }}
         securityContext:
           privileged: true
+        {{- with $.Values.configure.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         volumeMounts:
         - name: etc-containerd
           mountPath: /host/etc/containerd

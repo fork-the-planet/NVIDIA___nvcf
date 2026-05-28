@@ -224,6 +224,10 @@ spec:
           ports:
             - name: metrics
               containerPort: 9113
+          {{- with $.Values.exporter.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
     {{- end }}
     {{- if (.Values.traces).enabled }}
         - name: opentelemetry-collector
