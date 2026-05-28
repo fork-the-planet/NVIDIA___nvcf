@@ -37,6 +37,9 @@
 # Shared Go libraries (upstream: nvcf-go).
 /src/libraries/go/                                      @NVIDIA/nvca-dev
 
+# Stargate Rust library (upstream: stargate).
+/src/libraries/rust/stargate/                           @FamousDirector @barrygreengus
+
 # All control-plane source.
 /src/control-plane-services/                            @NVIDIA/nvcf-control-plane-dev
 
@@ -47,7 +50,7 @@
 /src/invocation-plane-services/                         @NVIDIA/nvcf-invocation-dev
 
 # Public skills and AI tooling.
-/ai-tooling/                                            @NVJCameron
+/ai-tooling/                                            @FamousDirector
 /tools/ncp-local-cluster/                               @NVIDIA/nvcf-dev
 
 # Documentation. Listed last so *.md takes precedence over service rules above.
