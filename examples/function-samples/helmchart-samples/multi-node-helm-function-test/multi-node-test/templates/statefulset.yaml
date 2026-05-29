@@ -17,7 +17,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   annotations:
-    dra.nvcf.nvidia.io/required-nvlink-domain-index: "0" # force all nodes to use the same NVLink domain
+    # dra.nvcf.nvidia.io/required-nvlink-domain-index: "0" # force all nodes to use the same NVLink domain
   name: {{ include "multi-node-test.name" . }}
   labels:
     {{- include "multi-node-test.labels" . | nindent 4 }}
@@ -39,6 +39,11 @@ spec:
       labels:
         {{- include "multi-node-test.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if .Values.resourceClaimTemplate.enabled }}
+      resourceClaims:
+        - name: {{ .Values.resourceClaimTemplate.claimName }}
+          resourceClaimTemplateName: {{ .Values.resourceClaimTemplate.name }}
+      {{- end }}
       volumes:
         - name: dshm
           emptyDir:
@@ -75,16 +80,25 @@ spec:
             - name: http
               containerPort: 8000
               protocol: TCP
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: http
           readinessProbe:
             httpGet:
               path: /health
               port: http
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          {{- if or .Values.resourceClaimTemplate.enabled (not (empty .Values.resources)) }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- with .Values.resources }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.resourceClaimTemplate.enabled }}
+            claims:
+              - name: {{ .Values.resourceClaimTemplate.claimName }}
+            {{- end }}
+          {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

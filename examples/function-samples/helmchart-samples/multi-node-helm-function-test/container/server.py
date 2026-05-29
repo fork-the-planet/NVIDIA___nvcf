@@ -17,6 +17,7 @@ import os
 import subprocess
 import uvicorn
 import traceback
+from typing import Literal
 from pydantic import BaseModel
 from fastapi import FastAPI, status, HTTPException
 
@@ -32,7 +33,7 @@ def check_gpu_availability() -> str:
     
     Returns:
         str: The nvidia-smi output
-        
+
     Raises:
         HTTPException: If nvidia-smi fails or GPUs are not available
     """
@@ -72,28 +73,96 @@ class TestParameters(BaseModel):
     npernode: int = 1
     mnnvl: bool = False
     debug: bool = False
-    cluster_type: str = "efa"
+    cluster_type: Literal["ncp-mlx5", "aws-gb200", "aws-gb300"]
 @app.post("/nccl-test")
 def nccl_test(tp: TestParameters) -> dict:
     try:
         # Check GPU availability
         check_gpu_availability()
-        
+
         # Build the command
         # ex: /opt/amazon/openmpi/bin/mpirun --allow-run-as-root --debug-devel -bind-to none -mca plm_rsh_agent ssh_helper --mca pml ^cm,ucx --mca btl tcp,self --mca btl_tcp_if_exclude lo,docker0,veth_def_agent -x LD_LIBRARY_PATH=/opt/amazon/openmpi/lib:/opt/nccl/build/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/nvidia/lib:/opt/amazon/ofi-nccl/lib/aarch64-linux-gnu -x PATH=$PATH:/opt/amazon/efa/bin:/usr/bin -x FI_PROVIDER=efa -x FI_EFA_USE_DEVICE_RDMA=1 -x FI_EFA_FORK_SAFE=1 -x NCCL_DEBUG=INFO -x NCCL_MNNVL_ENABLE=1 -np 16 -npernode 4 --hostfile $HOSTFILE -- /opt/nccl-tests/build/all_reduce_perf -n 20 -b 1K -e 16G -f 2 -g 1
         if tp.np > 0:
-            command = (f"/opt/amazon/openmpi/bin/mpirun --allow-run-as-root --debug-devel -bind-to none -mca plm_rsh_agent ssh_helper "
-                       f"--mca pml ^cm,ucx --mca btl tcp,self --mca btl_tcp_if_exclude lo,docker0,veth_def_agent "
+            env_flags = ""
+            if tp.debug:
+                env_flags += "-x NCCL_DEBUG=INFO "
+            env_flags += f"-x NCCL_MNNVL_ENABLE={'1' if tp.mnnvl else '0'} "
 
-                       f"-x LD_LIBRARY_PATH=/opt/amazon/openmpi/lib:/opt/nccl/build/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/nvidia/lib:/opt/amazon/ofi-nccl/lib/aarch64-linux-gnu "       
-                       f"-x PATH=$PATH:/opt/amazon/efa/bin:/usr/bin "
+            nccl_args = f"{NCCL_TEST_PATH} -n {tp.n} -b {tp.b} -e {tp.e} -f {tp.f} -g {tp.g}"
+            hostfile_args = f"-np {tp.np} -npernode {tp.npernode} --hostfile $HOSTFILE"
 
-                       f'{"-x FI_PROVIDER=efa -x FI_EFA_USE_DEVICE_RDMA=1 -x FI_EFA_FORK_SAFE=1 " if tp.cluster_type == "efa" else ""}' # for efa/AWS
-                       
-                       f'{"-x NCCL_DEBUG=INFO " if tp.debug else ""}'
-                       f'{"-x NCCL_MNNVL_ENABLE=1 " if tp.mnnvl else ""}'
-                       f"-np {tp.np} -npernode {tp.npernode} --hostfile $HOSTFILE -- "
-                       f"{NCCL_TEST_PATH} -n {tp.n} -b {tp.b} -e {tp.e} -f {tp.f} -g {tp.g}")
+            if tp.cluster_type == "aws-gb200":
+                mpirun = "/opt/amazon/openmpi/bin/mpirun"
+                ld_path = "/opt/amazon/openmpi/lib:/opt/nccl/build/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/nvidia/lib:/opt/amazon/ofi-nccl/lib/aarch64-linux-gnu"
+                path_extra = "/opt/amazon/efa/bin:/usr/bin"
+                efa_flags = "-x FI_PROVIDER=efa -x FI_EFA_USE_DEVICE_RDMA=1 -x FI_EFA_FORK_SAFE=1 "
+                command = (f"{mpirun} --allow-run-as-root --debug-devel -bind-to none "
+                           f"-mca plm_rsh_agent ssh_helper "
+                           f"--mca pml ^cm,ucx --mca btl tcp,self "
+                           f"--mca btl_tcp_if_exclude lo,docker0,veth_def_agent "
+                           f"-x LD_LIBRARY_PATH={ld_path} "
+                           f"-x PATH={path_extra} "
+                           f"{efa_flags}{env_flags}"
+                           f"{hostfile_args} -- {nccl_args}")
+            elif tp.cluster_type == "aws-gb300":
+                command = (f"unset NCCL_NET_PLUGIN && unset NCCL_TUNER_PLUGIN && "
+                           f"/usr/bin/env "
+                           f"-u OMPI_MCA_btl_tcp_if_include "
+                           f"-u OMPI_MCA_btl_tcp_if_exclude "
+                           f"-u OMPI_MCA_oob_tcp_if_include "
+                           f"-u OMPI_MCA_oob_tcp_if_exclude "
+                           f"/opt/amazon/openmpi/bin/mpirun "
+                           f"--allow-run-as-root "
+                           f"--prefix /opt/amazon/openmpi "
+                           f"-np {tp.np} "
+                           f"--hostfile $HOSTFILE "
+                           f"-N {tp.npernode} "
+                           f"--bind-to none "
+                           f"--mca plm_rsh_args \"-o StrictHostKeyChecking=no -o ConnectionAttempts=10\" "
+                           f"--mca orte_keep_fqdn_hostnames true "
+                           f"--mca pml ob1 "
+                           f"--mca btl tcp,self "
+                           f"--mca btl_tcp_if_include eth0 "
+                           f"--mca oob tcp "
+                           f"--mca oob_tcp_if_include eth0 "
+                           f"-x PATH "
+                           f"-x LD_LIBRARY_PATH "
+                           f"{env_flags}"
+                           f"-x NCCL_DEBUG_SUBSYS "
+                           f"-x NCCL_SOCKET_IFNAME "
+                           f"-x NCCL_IB_GID_INDEX "
+                           f"-x NCCL_NVLS_ENABLE=1 "
+                           f"-x NCCL_CUMEM_ENABLE=1 "
+                           f"-x NCCL_NET_GDR_C2C=1 "
+                           f"{NCCL_TEST_PATH} "
+                           f"-b {tp.b} "
+                           f"-e {tp.e} "
+                           f"-f {tp.f} "
+                           f"-n {tp.n} "
+                           f"-g {tp.g} "
+                           f"-N 10")
+            elif tp.cluster_type == "ncp-mlx5":
+                command = (f"mpirun --allow-run-as-root "
+                           f"--bind-to none "
+                           f"--map-by slot "
+                           f"--mca plm_rsh_agent ssh_helper "
+                           f"--mca routed direct "
+                           f"--mca plm_rsh_no_tree_spawn 1 "
+                           f"--mca pml ob1 "
+                           f"--mca btl tcp,self "
+                           f"--mca coll ^hcoll "
+                           f"-x LD_LIBRARY_PATH -x PATH "
+                           f"-x NCCL_NET_GDR_LEVEL=PHB "
+                           f"-x NCCL_IB_DISABLE=0 "
+                           f"-x NCCL_NVLS_DISABLE=1 "
+                           f"-x NCCL_IB_GID_INDEX=3 "
+                           f"{env_flags}"
+                           f"{hostfile_args} -- {nccl_args}")
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported cluster_type: '{tp.cluster_type}'. Must be 'aws-gb200', 'aws-gb300', or 'ncp-mlx5'."
+                )
         else:
             command = f"{NCCL_TEST_PATH} -n {tp.n} -b {tp.b} -e {tp.e} -f {tp.f} -g {tp.g}"
 

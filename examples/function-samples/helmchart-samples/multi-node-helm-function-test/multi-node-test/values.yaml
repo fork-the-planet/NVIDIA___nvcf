@@ -28,7 +28,7 @@ image:
   repository: nvcr.io/qdrlnbkss8u1/nccl-multi-node-test
   pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "0.0.4"
+  tag: "0.0.5"
 
 nameOverride: ""
 fullnameOverride: ""
@@ -64,6 +64,14 @@ resources:
     nvidia.com/gpu: 8
  requests:
     nvidia.com/gpu: 8
+
+resourceClaimTemplate:
+  enabled: false
+  name: nvcf-roce-channel-0
+  claimName: roce
+  allocationMode: ExactCount
+  count: 8
+  deviceClassName: roce.networking.k8s.aws
 
 autoscaling:
   enabled: false
