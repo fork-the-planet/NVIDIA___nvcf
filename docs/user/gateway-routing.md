@@ -320,7 +320,7 @@ The `<domain>` is your Gateway's load balancer address (e.g., `a1b2c3d4.us-west-
 </Note>
 
 <Tip>
-When the LLM invocation route is enabled, send OpenAI-compatible requests to supported paths under `https://llm.invocation.<domain>/v1/...` and set `model` to `<function-id>/<model-name>`.
+When the LLM invocation route is enabled in self-managed deployments, send OpenAI-compatible requests to `http://${GATEWAY_ADDR}/v1/...` with `Host: llm.invocation.${GATEWAY_ADDR}` and set `model` to `<function-id>/<model-name>`.
 
 </Tip>
 

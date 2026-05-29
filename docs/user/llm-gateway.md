@@ -4,10 +4,11 @@ The LLM Gateway handles OpenAI-compatible invocation for NVCF LLM functions in
 self-managed deployments. Use LLM functions when requests should enter through
 the LLM invocation route and NVCF should route them by function and model.
 
-Clients call the LLM invocation hostname:
+Self-managed deployments usually expose the LLM invocation route through the
+gateway load balancer and use the `Host` header for routing:
 
 ```bash
-https://llm.invocation.<domain>
+export GATEWAY_ADDR=<gateway-address>
 ```
 
 Requests use the OpenAI `model` field in this format:
@@ -26,7 +27,7 @@ The LLM Gateway path has these runtime components:
 
 ![LLM invocation path](images/nvcf-llm-invocation-path.svg)
 
-1. Client sends an OpenAI-compatible request to `llm.invocation.<domain>`.
+1. Client sends an OpenAI-compatible request to the LLM invocation route.
 2. LLM API Gateway extracts the routing key from the `model` field, validates authorization, applies request and token rate limits, and validates endpoint-specific request fields.
 3. LLM API Gateway forwards the request to LLM request router with routing metadata such as request ID, routing key, model name, routing method, token estimate, and cache affinity key when present.
 4. LLM request router selects a healthy backend for the requested function and model.
@@ -105,7 +106,8 @@ For request admission and rate limiting, the gateway uses request estimates unti
 Use `/v1/chat/completions` for OpenAI-compatible chat requests:
 
 ```bash
-curl -sS -X POST "https://llm.invocation.<domain>/v1/chat/completions" \
+curl -sS -X POST "http://${GATEWAY_ADDR}/v1/chat/completions" \
+  -H "Host: llm.invocation.${GATEWAY_ADDR}" \
   -H "Authorization: Bearer ${NVCF_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -127,7 +129,8 @@ When `stream` is `true`, the gateway relays server-sent events. When `stream` is
 Use `/v1/responses` for native Responses API requests:
 
 ```bash
-curl -sS -X POST "https://llm.invocation.<domain>/v1/responses" \
+curl -sS -X POST "http://${GATEWAY_ADDR}/v1/responses" \
+  -H "Host: llm.invocation.${GATEWAY_ADDR}" \
   -H "Authorization: Bearer ${NVCF_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -146,7 +149,8 @@ For upstream compatibility, the gateway sends native Responses requests to the r
 Use `/v1/embeddings` for OpenAI-compatible embeddings requests:
 
 ```bash
-curl -sS -X POST "https://llm.invocation.<domain>/v1/embeddings" \
+curl -sS -X POST "http://${GATEWAY_ADDR}/v1/embeddings" \
+  -H "Host: llm.invocation.${GATEWAY_ADDR}" \
   -H "Authorization: Bearer ${NVCF_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -192,7 +196,7 @@ Sticky routing only affects backend selection when the LLM request router is con
 
 ## Operational Notes
 
-- The LLM invocation route is served through `llm.invocation.<domain>`.
+- The LLM invocation route is served by the `llm.invocation.<domain>` hostname.
 - The LLM API Gateway chart and LLM request router chart are installed as self-managed stack components.
 - The Gateway Routes chart creates the external HTTPRoute for LLM invocation.
 - Token rate limits are evaluated per model when `llmConfig.tokenRateLimit` is set.
