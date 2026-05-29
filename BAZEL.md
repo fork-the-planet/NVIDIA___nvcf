@@ -256,7 +256,7 @@ echo 'build --config=remote' >> user.bazelrc
 personal defaults without polluting the shared `.bazelrc`.
 
 CI scope: the per-CLI Bazel jobs (`go-test`, `go-build`,
-`verify-agent-skill-manifest` in `src/clis/nvcf-cli/.gitlab-ci.yml`) pass
+`verify-agent-skill-manifest` in `tools/ci/nvcf-cli.yml`) pass
 `--config=remote`. The umbrella `bazel-smoke` and the manual
 `bazel-image-push` jobs also use it. Future service pipelines opt in
 the same way.
@@ -276,7 +276,7 @@ the same way.
   degrade to local execution on action errors but hard-fail on initial
   Capabilities RPC failure (e.g., backend storage shards down).
   CI guards against this in two layers (see `.bazel-remote-probe` in
-  `.gitlab-ci.yml` and `.bazel-cli` in `src/clis/nvcf-cli/.gitlab-ci.yml`):
+  `.gitlab-ci.yml` and `.bazel-cli` in `tools/ci/nvcf-cli.yml`):
   1. Each Bazel job's `before_script` does a 5-second TCP probe of
      `nvcfbarn.nvidia.com:8980`. If it fails, `--config=remote` is
      dropped for that run and the job continues with local cache only,
@@ -313,7 +313,7 @@ Two Bazel-aware jobs in the root `.gitlab-ci.yml`:
   //src/clis/nvcf-cli:image_push`. With the remote cache warm from the
   per-CLI build, the image layers come straight out of Buildbarn.
 
-Per-service jobs in `src/clis/nvcf-cli/.gitlab-ci.yml` (`go-test`, `go-build`)
+Per-service jobs in `tools/ci/nvcf-cli.yml` (`go-test`, `go-build`)
 were rewritten to use Bazel; the legacy `Makefile` was deleted. Downstream
 archive/package/publish/ngc-push stages still consume
 `src/clis/nvcf-cli/build/nvcf-cli-{platform}` files, which the bazel-driven

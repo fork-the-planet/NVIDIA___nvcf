@@ -215,8 +215,119 @@ func TestComputePlaneRegisterDryRunUsesInClusterScopeForControlPlaneCluster(t *t
 	require.NoError(t, rootCmd.Execute())
 	out := stdout.String()
 	assert.Contains(t, out, "endpointScope: in-cluster")
-	assert.Contains(t, out, "icmsURL: http://api.sis.svc.cluster.local:8080")
+	// Even when the in-cluster scope is selected (single-cluster register
+	// targeting the control-plane cluster itself), the CLI cannot dial the
+	// in-cluster service DNS. computePlaneRegisterICMSURL must prefer the
+	// compute-reachable URL so the SIS call goes through the gateway.
+	assert.Contains(t, out, "icmsURL: https://sis.example.test")
 	assert.Contains(t, out, "identitySource: psat")
+}
+
+func TestComputePlaneRegisterICMSURL_PrefersConfigFile(t *testing.T) {
+	resetComputePlaneFlags(t)
+	configureSelfHostedTestConfig(t, `
+icms_url: "http://configured-sis.example:8080"
+`)
+
+	profile := controlplaneprofile.ControlPlaneProfile{
+		ControlPlane: controlplaneprofile.ControlPlane{
+			ClusterName: "cp-cluster",
+			Endpoints: controlplaneprofile.Endpoints{
+				InCluster: controlplaneprofile.EndpointScope{
+					ICMSURL: "http://api.sis.svc.cluster.local:8080",
+				},
+				ComputeReachable: controlplaneprofile.EndpointScope{
+					ICMSURL: "https://sis.gateway.example",
+				},
+			},
+		},
+	}
+	selected := selfhosted.ControlPlaneProfileEndpointScopeSelection{
+		Name:      selfhosted.EndpointScopeInCluster,
+		Endpoints: profile.ControlPlane.Endpoints.InCluster,
+	}
+
+	got := computePlaneRegisterICMSURL(profile, selected)
+	assert.Equal(t, "http://configured-sis.example:8080", got)
+}
+
+func TestComputePlaneRegisterICMSURL_FallsBackToComputeReachableWhenInClusterSelected(t *testing.T) {
+	resetComputePlaneFlags(t)
+	configureSelfHostedTestConfig(t, "")
+
+	profile := controlplaneprofile.ControlPlaneProfile{
+		ControlPlane: controlplaneprofile.ControlPlane{
+			ClusterName: "cp-cluster",
+			Endpoints: controlplaneprofile.Endpoints{
+				InCluster: controlplaneprofile.EndpointScope{
+					ICMSURL: "http://api.sis.svc.cluster.local:8080",
+				},
+				ComputeReachable: controlplaneprofile.EndpointScope{
+					ICMSURL: "https://sis.gateway.example",
+				},
+			},
+		},
+	}
+	selected := selfhosted.ControlPlaneProfileEndpointScopeSelection{
+		Name:      selfhosted.EndpointScopeInCluster,
+		Endpoints: profile.ControlPlane.Endpoints.InCluster,
+	}
+
+	got := computePlaneRegisterICMSURL(profile, selected)
+	assert.Equal(t, "https://sis.gateway.example", got)
+}
+
+func TestComputePlaneRegisterICMSURL_KeepsComputeReachableWhenSelected(t *testing.T) {
+	resetComputePlaneFlags(t)
+	configureSelfHostedTestConfig(t, "")
+
+	profile := controlplaneprofile.ControlPlaneProfile{
+		ControlPlane: controlplaneprofile.ControlPlane{
+			ClusterName: "cp-cluster",
+			Endpoints: controlplaneprofile.Endpoints{
+				InCluster: controlplaneprofile.EndpointScope{
+					ICMSURL: "http://api.sis.svc.cluster.local:8080",
+				},
+				ComputeReachable: controlplaneprofile.EndpointScope{
+					ICMSURL: "https://sis.gateway.example",
+				},
+			},
+		},
+	}
+	selected := selfhosted.ControlPlaneProfileEndpointScopeSelection{
+		Name:      selfhosted.EndpointScopeComputeReachable,
+		Endpoints: profile.ControlPlane.Endpoints.ComputeReachable,
+	}
+
+	got := computePlaneRegisterICMSURL(profile, selected)
+	assert.Equal(t, "https://sis.gateway.example", got)
+}
+
+func TestComputePlaneRegisterICMSURL_FlagWinsOverProfile(t *testing.T) {
+	resetComputePlaneFlags(t)
+	configureSelfHostedTestConfig(t, "")
+	selfHostedICMSURL = "http://flag-sis.example:8080"
+
+	profile := controlplaneprofile.ControlPlaneProfile{
+		ControlPlane: controlplaneprofile.ControlPlane{
+			ClusterName: "cp-cluster",
+			Endpoints: controlplaneprofile.Endpoints{
+				InCluster: controlplaneprofile.EndpointScope{
+					ICMSURL: "http://api.sis.svc.cluster.local:8080",
+				},
+				ComputeReachable: controlplaneprofile.EndpointScope{
+					ICMSURL: "https://sis.gateway.example",
+				},
+			},
+		},
+	}
+	selected := selfhosted.ControlPlaneProfileEndpointScopeSelection{
+		Name:      selfhosted.EndpointScopeInCluster,
+		Endpoints: profile.ControlPlane.Endpoints.InCluster,
+	}
+
+	got := computePlaneRegisterICMSURL(profile, selected)
+	assert.Equal(t, "http://flag-sis.example:8080", got)
 }
 
 func TestComputePlaneRegisterDryRunRunsReachabilityCheck(t *testing.T) {

@@ -188,9 +188,17 @@ func (c *Client) makeSISRequest(ctx context.Context, method, sisURL, endpoint st
 	}
 	req.Header.Set("Accept", "application/json")
 
-	// Cluster-management calls target the SIS hostname. Preserve that host even
-	// when the shared client has an api_host override for NVCF API requests.
-	req.Host = req.URL.Host
+	// Host header: http.NewRequestWithContext already populates req.Host from
+	// req.URL.Host, so we only need to override when icms_host (NVCF_ICMS_HOST)
+	// is set explicitly. That setting is required for gateway-routed deployments
+	// where the URL must dial the bare ELB (DNS-resolvable) but the gateway
+	// HTTPRoute matches Host: sis.<gateway-addr>. The api_host transport in
+	// debug_transport.go respects this via its "req.Host != req.URL.Host"
+	// override-detected branch, so an explicit ICMSHost survives the transport
+	// without being rewritten to api_host.
+	if c.config != nil && c.config.ICMSHost != "" {
+		req.Host = c.config.ICMSHost
+	}
 
 	return c.httpClient.Do(req)
 }

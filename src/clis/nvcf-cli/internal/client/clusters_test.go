@@ -63,6 +63,28 @@ func TestMakeSISRequestPreservesSISHostWithAPIHostOverride(t *testing.T) {
 	assert.Equal(t, "application/json", receivedContentType)
 }
 
+func TestMakeSISRequestOverridesHostHeaderWithICMSHostConfig(t *testing.T) {
+	// Gateway-routed self-hosted: icms_url dials the bare ELB but the gateway
+	// HTTPRoute only matches Host: sis.<elb>. Setting Config.ICMSHost must
+	// rewrite the Host header without changing the dialed URL.
+	var receivedHost string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHost = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := newTestClient(server.Client())
+	c.config = &Config{ICMSHost: "sis.bare-elb.example.com"}
+
+	resp, err := c.makeSISRequest(context.Background(), "GET", server.URL, "/v1/accounts/nca-1/clusters", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, "sis.bare-elb.example.com", receivedHost)
+	assert.NotEqual(t, resp.Request.URL.Host, receivedHost)
+}
+
 func TestRegisterCluster(t *testing.T) {
 	t.Run("constructs correct request body and returns response", func(t *testing.T) {
 		var receivedBody RegisterClusterRequest

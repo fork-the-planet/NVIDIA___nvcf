@@ -62,8 +62,12 @@ func buildControlPlaneProfile(req controlPlaneProfileWriteRequest) controlplanep
 	gatewayHTTP := resolveProfileGatewayHTTPURL(req.Env, icmsURL)
 	gatewayGRPC := resolveProfileGatewayGRPCURL(req.Env)
 	apiHost := firstNonEmpty(os.Getenv("API_HOST"), hostnameFromURL(gatewayHTTP))
-	apiKeysHost := firstNonEmpty(os.Getenv("API_KEYS_HOST"), "api-keys."+domainFromHost(apiHost))
-	invocationHost := firstNonEmpty(os.Getenv("INVOKE_HOST"), "invocation."+domainFromHost(apiHost))
+	domain := domainFromHost(apiHost)
+	apiKeysHost := firstNonEmpty(os.Getenv("API_KEYS_HOST"), "api-keys."+domain)
+	invocationHost := firstNonEmpty(os.Getenv("INVOKE_HOST"), "invocation."+domain)
+	sisHost := firstNonEmpty(os.Getenv("NVCF_ICMS_HOST"), "sis."+domain)
+	revalHost := firstNonEmpty(os.Getenv("NVCF_REVAL_HOST"), "reval."+domain)
+	natsHost := firstNonEmpty(os.Getenv("NVCF_NATS_HOST"), "nats."+domain)
 
 	return controlplaneprofile.ControlPlaneProfile{
 		APIVersion: controlplaneprofile.APIVersion,
@@ -79,9 +83,9 @@ func buildControlPlaneProfile(req controlPlaneProfileWriteRequest) controlplanep
 					NATSURL:  "nats://nats.nats-system.svc.cluster.local:4222",
 				},
 				ComputeReachable: controlplaneprofile.EndpointScope{
-					ICMSURL:  computeEndpoints.ICMSServiceURL,
-					ReValURL: computeEndpoints.ReValServiceURL,
-					NATSURL:  computeEndpoints.NATSURL,
+					ICMSURL:  rewriteURLHost(computeEndpoints.ICMSServiceURL, sisHost),
+					ReValURL: rewriteURLHost(computeEndpoints.ReValServiceURL, revalHost),
+					NATSURL:  rewriteURLHost(computeEndpoints.NATSURL, natsHost),
 				},
 			},
 			Gateway: controlplaneprofile.Gateway{
@@ -91,13 +95,37 @@ func buildControlPlaneProfile(req controlPlaneProfileWriteRequest) controlplanep
 			Hosts: controlplaneprofile.Hosts{
 				API:        apiHost,
 				APIKeys:    apiKeysHost,
-				SIS:        firstNonEmpty(os.Getenv("NVCF_ICMS_HOST"), hostnameFromURL(computeEndpoints.ICMSServiceURL)),
-				ReVal:      firstNonEmpty(os.Getenv("NVCF_REVAL_HOST"), hostnameFromURL(computeEndpoints.ReValServiceURL)),
-				NATS:       firstNonEmpty(os.Getenv("NVCF_NATS_HOST"), hostnameFromURL(computeEndpoints.NATSURL)),
+				SIS:        sisHost,
+				ReVal:      revalHost,
+				NATS:       natsHost,
 				Invocation: invocationHost,
 			},
 		},
 	}
+}
+
+// rewriteURLHost replaces the hostname (preserving scheme, port, path, and
+// query) of rawURL with newHost. Returns rawURL unchanged when it cannot be
+// parsed, has no host, or when newHost is empty.
+//
+// This lets buildControlPlaneProfile project bare-ELB URLs back through the
+// canonical sis./reval./nats. service prefix that the gateway HTTPRoutes
+// match. For local k3d (rawURL already has sis./reval./nats. prefixes equal
+// to newHost) this is effectively a no-op.
+func rewriteURLHost(rawURL, newHost string) string {
+	if rawURL == "" || newHost == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	if port := u.Port(); port != "" {
+		u.Host = hostWithOptionalPort(newHost, port)
+	} else {
+		u.Host = newHost
+	}
+	return u.String()
 }
 
 func resolveProfileGatewayHTTPURL(env, icmsURL string) string {

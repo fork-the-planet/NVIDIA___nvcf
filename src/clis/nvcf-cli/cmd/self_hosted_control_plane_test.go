@@ -119,6 +119,111 @@ func removeLine(content, needle string) string {
 	return string(bytes.Join(out, []byte("\n")))
 }
 
+// resetViperForProfileTest isolates the profile tests from any developer config
+// file (~/.nvcf-cli.yaml) that LoadConfigWithoutAuth may otherwise pick up via
+// the running shell context. resolveProfileGatewayHTTPURL consults cfg.BaseHTTPURL
+// so leftover state (e.g. base_http_url=https://api.nvcf.nvidia.com) would
+// override the icmsURL-derived gateway URL the test wants to assert against.
+func resetViperForProfileTest(t *testing.T) {
+	t.Helper()
+	configureSelfHostedTestConfig(t, "")
+}
+
+func TestBuildControlPlaneProfile_LocalK3DKeepsServicePrefixedHosts(t *testing.T) {
+	resetViperForProfileTest(t)
+	t.Setenv("API_HOST", "")
+	t.Setenv("API_KEYS_HOST", "")
+	t.Setenv("INVOKE_HOST", "")
+	t.Setenv("NVCF_ICMS_HOST", "")
+	t.Setenv("NVCF_REVAL_HOST", "")
+	t.Setenv("NVCF_NATS_HOST", "")
+	t.Setenv("NVCF_BASE_HTTP_URL", "")
+	t.Setenv("NVCF_BASE_GRPC_URL", "")
+
+	prevEnv := selfHostedEnv
+	t.Cleanup(func() { selfHostedEnv = prevEnv })
+	selfHostedEnv = "local"
+
+	got := buildControlPlaneProfile(controlPlaneProfileWriteRequest{
+		ClusterName: "ncp-local",
+		NCAID:       "nvcf-default",
+		Region:      "us-west-1",
+		Env:         "local",
+		ICMSURL:     "http://sis.localhost:8080",
+	})
+
+	assert.Equal(t, "api.localhost", got.ControlPlane.Hosts.API)
+	assert.Equal(t, "api-keys.localhost", got.ControlPlane.Hosts.APIKeys)
+	assert.Equal(t, "sis.localhost", got.ControlPlane.Hosts.SIS)
+	assert.Equal(t, "reval.localhost", got.ControlPlane.Hosts.ReVal)
+	assert.Equal(t, "nats.localhost", got.ControlPlane.Hosts.NATS)
+	assert.Equal(t, "invocation.localhost", got.ControlPlane.Hosts.Invocation)
+	assert.Equal(t, "http://sis.localhost:8080", got.ControlPlane.Endpoints.ComputeReachable.ICMSURL)
+	assert.Equal(t, "http://reval.localhost:8080", got.ControlPlane.Endpoints.ComputeReachable.ReValURL)
+	assert.Equal(t, "nats://nats.localhost:4222", got.ControlPlane.Endpoints.ComputeReachable.NATSURL)
+}
+
+func TestBuildControlPlaneProfile_BareELBProjectsServicePrefixes(t *testing.T) {
+	// Simulate GATEWAY_ADDR-routed EKS where icms_url is a bare ELB hostname:
+	// the emitted hosts and computeReachable URLs must carry the canonical
+	// sis./reval./nats. service prefixes that the gateway HTTPRoutes match.
+	resetViperForProfileTest(t)
+	t.Setenv("API_HOST", "")
+	t.Setenv("API_KEYS_HOST", "")
+	t.Setenv("INVOKE_HOST", "")
+	t.Setenv("NVCF_ICMS_HOST", "")
+	t.Setenv("NVCF_REVAL_HOST", "")
+	t.Setenv("NVCF_NATS_HOST", "")
+	// In the bare-ELB topology the operator's base_http_url points at the same
+	// gateway ELB. Force resolveProfileGatewayHTTPURL to use it so the test
+	// does not pick up an unrelated default like https://api.nvcf.nvidia.com.
+	t.Setenv("NVCF_BASE_HTTP_URL", "http://abc123.elb.us-east-1.amazonaws.com")
+	t.Setenv("NVCF_BASE_GRPC_URL", "")
+
+	prevEnv := selfHostedEnv
+	t.Cleanup(func() { selfHostedEnv = prevEnv })
+	selfHostedEnv = "qa"
+
+	got := buildControlPlaneProfile(controlPlaneProfileWriteRequest{
+		ClusterName: "nvcf-cp-qa",
+		NCAID:       "nvcf-default",
+		Region:      "us-east-1",
+		Env:         "qa",
+		ICMSURL:     "http://abc123.elb.us-east-1.amazonaws.com",
+	})
+
+	assert.Equal(t, "abc123.elb.us-east-1.amazonaws.com", got.ControlPlane.Hosts.API)
+	assert.Equal(t, "api-keys.abc123.elb.us-east-1.amazonaws.com", got.ControlPlane.Hosts.APIKeys)
+	assert.Equal(t, "sis.abc123.elb.us-east-1.amazonaws.com", got.ControlPlane.Hosts.SIS)
+	assert.Equal(t, "reval.abc123.elb.us-east-1.amazonaws.com", got.ControlPlane.Hosts.ReVal)
+	assert.Equal(t, "nats.abc123.elb.us-east-1.amazonaws.com", got.ControlPlane.Hosts.NATS)
+	assert.Equal(t, "invocation.abc123.elb.us-east-1.amazonaws.com", got.ControlPlane.Hosts.Invocation)
+	assert.Equal(t, "http://sis.abc123.elb.us-east-1.amazonaws.com", got.ControlPlane.Endpoints.ComputeReachable.ICMSURL)
+	assert.Equal(t, "http://reval.abc123.elb.us-east-1.amazonaws.com", got.ControlPlane.Endpoints.ComputeReachable.ReValURL)
+	assert.Equal(t, "nats://nats.abc123.elb.us-east-1.amazonaws.com:4222", got.ControlPlane.Endpoints.ComputeReachable.NATSURL)
+}
+
+func TestRewriteURLHost(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		newHost string
+		want    string
+	}{
+		{name: "rewrites bare hostname", in: "http://x.elb.amazonaws.com", newHost: "sis.x.elb.amazonaws.com", want: "http://sis.x.elb.amazonaws.com"},
+		{name: "preserves port", in: "http://x.elb.amazonaws.com:8080", newHost: "sis.x.elb.amazonaws.com", want: "http://sis.x.elb.amazonaws.com:8080"},
+		{name: "preserves nats scheme and port", in: "nats://x.elb.amazonaws.com:4222", newHost: "nats.x.elb.amazonaws.com", want: "nats://nats.x.elb.amazonaws.com:4222"},
+		{name: "empty newHost is no-op", in: "http://sis.localhost:8080", newHost: "", want: "http://sis.localhost:8080"},
+		{name: "empty rawURL is no-op", in: "", newHost: "sis.localhost", want: ""},
+		{name: "no host is no-op", in: "/relative/path", newHost: "sis.localhost", want: "/relative/path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, rewriteURLHost(tc.in, tc.newHost))
+		})
+	}
+}
+
 func validControlPlaneProfileYAML() string {
 	return `apiVersion: nvcf.nvidia.com/v1alpha1
 kind: ControlPlaneProfile

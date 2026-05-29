@@ -226,6 +226,10 @@ func initConfig() {
 	viper.BindEnv("api_keys_host", "API_KEYS_HOST")
 	viper.BindEnv("api_host", "API_HOST")
 	viper.BindEnv("invoke_host", "INVOKE_HOST")
+	// icms_host uses the NVCF_-prefixed form to match the documented
+	// env var in clusters.go and the os.Getenv("NVCF_ICMS_HOST") read
+	// in self_hosted_control_plane_profile.go's sisHost resolution.
+	viper.BindEnv("icms_host", "NVCF_ICMS_HOST")
 
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil && viper.GetBool("debug") {

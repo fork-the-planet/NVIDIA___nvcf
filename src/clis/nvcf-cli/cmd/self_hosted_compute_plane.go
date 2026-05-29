@@ -203,7 +203,7 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	registrationICMSURL := computePlaneRegisterICMSURL(selected.Endpoints.ICMSURL)
+	registrationICMSURL := computePlaneRegisterICMSURL(validation.Profile, selected)
 	if err := computePlaneRegisterReachabilityCheck(c.Context(), reachability.CheckRequest{
 		TargetClusterName: computePlaneRegisterClusterName,
 		ICMSURL:           registrationICMSURL,
@@ -297,7 +297,19 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 	return nil
 }
 
-func computePlaneRegisterICMSURL(profileICMSURL string) string {
+// computePlaneRegisterICMSURL picks the ICMS endpoint the local CLI will use
+// to call SIS during cluster register, in priority order:
+//
+//  1. --icms-url flag (explicit operator override).
+//  2. NVCF_ICMS_URL env var.
+//  3. NVCF_SIS_URL env var (legacy quickstart name).
+//  4. icms_url from the CLI config file (Viper-resolved).
+//  5. Compute-reachable scope ICMS URL from the control-plane profile, even when
+//     SelectControlPlaneProfileEndpointScope returned in-cluster (because the
+//     operator host that runs `nvcf-cli` cannot dial in-cluster service DNS).
+//  6. The selected scope's ICMS URL as-is (last-resort fallback; multi-cluster
+//     already lands on compute-reachable via SelectControlPlaneProfileEndpointScope).
+func computePlaneRegisterICMSURL(profile controlplaneprofile.ControlPlaneProfile, selected selfhosted.ControlPlaneProfileEndpointScopeSelection) string {
 	if strings.TrimSpace(selfHostedICMSURL) != "" {
 		return selfHostedICMSURL
 	}
@@ -311,7 +323,18 @@ func computePlaneRegisterICMSURL(profileICMSURL string) string {
 	if err == nil && strings.TrimSpace(cfg.ICMSURL) != "" {
 		return cfg.ICMSURL
 	}
-	return profileICMSURL
+	// When SelectControlPlaneProfileEndpointScope returned in-cluster (single
+	// cluster where target cluster name == control-plane cluster name), the
+	// resulting URL is a Kubernetes service DNS name (e.g.
+	// http://api.sis.svc.cluster.local:8080) that the operator host cannot
+	// reach. Prefer the compute-reachable scope if it is populated, so the
+	// CLI dials the externally-routable URL instead.
+	if selected.Name == selfhosted.EndpointScopeInCluster {
+		if external := strings.TrimSpace(profile.ControlPlane.Endpoints.ComputeReachable.ICMSURL); external != "" {
+			return external
+		}
+	}
+	return selected.Endpoints.ICMSURL
 }
 
 func shouldProbeComputeRegisterHTTP(endpointScope selfhosted.ControlPlaneProfileEndpointScopeName) bool {
