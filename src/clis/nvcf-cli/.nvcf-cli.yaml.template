@@ -137,6 +137,26 @@ api_keys_owner_id: svc@nvcf-api.local
 # invoke_host: invocation.nvcf.example.com
 
 # ==============================================================================
+# Self-Hosted Cluster Validator
+# ==============================================================================
+
+# Image reference for the cluster-validator pod used by
+# `nvcf-cli self-hosted check`. The CLI runs this image as a Job in the
+# compute-plane cluster to verify NVCA prerequisites before install.
+#
+# Config key: cluster_validator_image
+# Environment variable: NVCF_CLI_CLUSTER_VALIDATOR_IMAGE
+# Command-line flag: --cluster-validator-image
+#
+# When the value has no tag, the latest tag is discovered from the
+# registry (preferring stable releases over rc). If unset everywhere,
+# the validator probe is skipped with a warning.
+#
+# Staging: stg.nvcr.io/nvidia/nvcf-byoc/cluster-validator
+# Prod:    nvcr.io/nvidia/nvcf-byoc/cluster-validator
+# cluster_validator_image: nvcr.io/nvidia/nvcf-byoc/cluster-validator
+
+# ==============================================================================
 # General Settings
 # ==============================================================================
 
@@ -171,6 +191,7 @@ api_keys_owner_id: svc@nvcf-api.local
 # base_grpc_url: grpc.shqa.stg.nvcf.nvidia.com:443
 # api_keys_service_url: https://api-keys.shqa.stg.nvcf.nvidia.com
 # invoke_url: https://invocation.shqa.stg.nvcf.nvidia.com
+# cluster_validator_image: stg.nvcr.io/nvidia/nvcf-byoc/cluster-validator
 
 # ==============================================================================
 # Notes

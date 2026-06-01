@@ -98,7 +98,9 @@ func init() {
 	selfHostedCmd.PersistentFlags().StringVar(&selfHostedOutput, "output", "text",
 		"Output format for check: text or json")
 	selfHostedCmd.PersistentFlags().StringVar(&selfHostedWait, "wait", "",
-		"Block on check until pass or duration elapses (e.g. 5m)")
+		"Block on check until pass or duration elapses (e.g. 5m). "+
+			"With --pre --compute-plane the cluster-validator's 5m budget dominates the 5s poll; "+
+			"pair with --skip-cluster-validation for a tight retry cadence.")
 	selfHostedCmd.PersistentFlags().StringVar(&selfHostedICMSURL, "icms-url", "",
 		"ICMS endpoint for cluster register (default: derived from base_http_url; env: NVCF_ICMS_URL)")
 	selfHostedCmd.PersistentFlags().StringVar(&selfHostedICMSURL, "sis-url", "",

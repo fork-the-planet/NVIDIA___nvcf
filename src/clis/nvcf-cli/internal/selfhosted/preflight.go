@@ -44,8 +44,9 @@ const (
 	binaryVersionMessage = "%s %s on PATH (%s required)"
 )
 
-// CheckResult is the outcome of one pre-flight check (one row in the linkerd-style
-// output). Mirrors the JSON schema from spec §6.2.
+// One row in the linkerd-style output. Logs is internal-only and is not
+// forwarded into the CheckCompleted JSONL wire event, so it never leaks
+// into the stable JSON contract.
 type CheckResult struct {
 	ID       string
 	Category string
@@ -55,6 +56,7 @@ type CheckResult struct {
 	Detail   string // optional: short version string or extra context (M+8.11)
 	HintURL  string
 	Err      error // populated only when the check itself failed to execute
+	Logs     string // optional: full check transcript for --show-logs; not emitted to JSON
 }
 
 // BinarySpec defines a tool that must be on PATH and a version constraint.
@@ -278,6 +280,15 @@ type RoleConfig struct {
 	// out via --skip-inotify-check or environments where the prober cannot be
 	// constructed). Production wires NewInotifyProber; tests pass fakes.
 	InotifyProber NodeInotifyProber
+
+	// Nil skips the cluster-validator check. The cmd layer emits a stderr
+	// notice when the operator explicitly opted out; the check schema
+	// stays clean so JSON consumers don't see a misleading "passed=true"
+	// row for a probe that never actually ran.
+	ClusterValidator           ClusterValidator
+	ClusterValidatorImage      string
+	ClusterValidatorPullSecret string
+	ClusterValidatorNoCleanup  bool
 }
 
 // categorySpec groups a set of checks under a named category. Categories run
@@ -359,8 +370,12 @@ func controlPlaneCheckCategory(_ RoleConfig) categorySpec {
 }
 
 // computePlaneCheckCategory returns the placeholder compute-plane checks.
-// Conditionally adds an SIS reachability probe when RoleConfig.SISURL is set
-// and a node-inotify-limits probe when RoleConfig.InotifyProber is set.
+// Conditionally adds an SIS reachability probe when RoleConfig.SISURL is set,
+// a node-inotify-limits probe when RoleConfig.InotifyProber is set, and a
+// containerized cluster-validator probe when RoleConfig.ClusterValidator is
+// set. Each conditional probe is opt-in via its own RoleConfig field so
+// callers that opted out via a --skip-* flag simply leave the corresponding
+// field nil/empty and the check is omitted from the category entirely.
 func computePlaneCheckCategory(rc RoleConfig) categorySpec {
 	cat := categorySpec{
 		name: "compute-plane-cluster",
@@ -375,6 +390,15 @@ func computePlaneCheckCategory(rc RoleConfig) categorySpec {
 	}
 	if rc.InotifyProber != nil {
 		cat.checks = append(cat.checks, nodeInotifyCheck(rc.InotifyProber, rc.KubeContext))
+	}
+	if rc.ClusterValidator != nil {
+		cat.checks = append(cat.checks, clusterValidatorCheck(
+			rc.ClusterValidator,
+			rc.KubeContext,
+			rc.ClusterValidatorImage,
+			rc.ClusterValidatorPullSecret,
+			rc.ClusterValidatorNoCleanup,
+		))
 	}
 	return cat
 }
@@ -477,6 +501,55 @@ func nodeInotifyCheck(prober NodeInotifyProber, kubeContext string) binaryCheckS
 			return r
 		},
 	}
+}
+
+// Severity mapping: runner errors (RBAC/pull/timeout) -> warning, since
+// they're operator-fixable infra issues; validator Passed=false ->
+// error (real check failures); Passed=true -> info.
+func clusterValidatorCheck(cv ClusterValidator, kubeContext, image, pullSecret string, noCleanup bool) binaryCheckSpec {
+	const id = "cluster-validator"
+	return binaryCheckSpec{
+		ID:         id,
+		HumanLabel: "running cluster-validator probe…",
+		Run: func(ctx context.Context) CheckResult {
+			r := CheckResult{
+				ID:      id,
+				HintURL: clusterValidatorHintURL,
+			}
+			result := cv(ctx, ClusterValidatorParams{
+				KubeContext: kubeContext,
+				Image:       image,
+				PullSecret:  pullSecret,
+				NoCleanup:   noCleanup,
+			})
+			r.Logs = result.Logs
+			r.Detail = clusterValidatorDetail(result.JobName)
+
+			if result.Err != nil {
+				r.Severity = "warning"
+				r.Message = "cluster-validator did not complete: " + result.Err.Error()
+				r.Err = result.Err
+				return r
+			}
+			r.Passed = result.Passed
+			if result.Passed {
+				r.Severity = "info"
+				r.Message = "cluster passed cluster-validator built-in checks"
+				return r
+			}
+			r.Severity = "error"
+			r.Message = fmt.Sprintf("cluster-validator reported failures (exit code %d)", result.ExitCode)
+			return r
+		},
+	}
+}
+
+func clusterValidatorDetail(jobName string) string {
+	hint := kubectlLogsHint(jobName)
+	if hint == "" {
+		return ""
+	}
+	return "logs: " + hint
 }
 
 // placeholderCheck returns a binaryCheckSpec that emits a passing "info"

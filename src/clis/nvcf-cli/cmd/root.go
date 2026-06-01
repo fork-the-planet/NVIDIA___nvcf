@@ -230,6 +230,11 @@ func initConfig() {
 	// env var in clusters.go and the os.Getenv("NVCF_ICMS_HOST") read
 	// in self_hosted_control_plane_profile.go's sisHost resolution.
 	viper.BindEnv("icms_host", "NVCF_ICMS_HOST")
+	// Cluster-validator image is sourced from the same config layer as the
+	// other endpoints so operators can flip between staging and prod by
+	// swapping --config files. The env name matches the historical
+	// NVCF_CLI_CLUSTER_VALIDATOR_IMAGE override.
+	viper.BindEnv("cluster_validator_image", "NVCF_CLI_CLUSTER_VALIDATOR_IMAGE")
 
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil && viper.GetBool("debug") {
