@@ -1465,6 +1465,84 @@ export NVCF_TOKEN="your-existing-token"
 
 ---
 
+## Admin Commands
+
+The CLI ships with a set of super-admin commands for operators of the
+self-managed NVCF stack. They operate across NVIDIA Cloud Accounts and
+require elevated privileges, so they are hidden from the default CLI menu.
+
+### Enabling
+
+Admin commands appear in the CLI menu only when the `NVCF_CLI_ENABLE_ADMIN`
+environment variable is set to a non-empty value:
+
+```bash
+export NVCF_CLI_ENABLE_ADMIN=1
+nvcf-cli admin --help
+```
+
+### Authentication
+
+All admin commands require `NVCF_TOKEN` with the appropriate admin scope.
+`NVCF_API_KEY` is not accepted; the CLI fails fast with a clear error if only
+an API key is configured.
+
+| Command group | Required scope |
+| :---- | :---- |
+| `admin accounts` | `account_setup` |
+| `admin secrets` | `admin:update_secrets` |
+| `admin queues` | `admin:queue_details` |
+
+### Commands
+
+| Command | What it does |
+| :---- | :---- |
+| `admin accounts list` | List all NVIDIA Cloud Accounts onboarded with Cloud Functions. |
+| `admin accounts update` | Update limits and name for one NCA. |
+| `admin secrets update-function` | Update secrets for a specific function version cross-account. |
+| `admin secrets update-telemetry` | Update secrets for a telemetry endpoint cross-account. |
+| `admin queues function` | Get cross-account queue details for all versions of a function. |
+| `admin queues version` | Get cross-account queue details for one specific function version. |
+
+All commands support `--json` for automation. Read commands emit the full
+response body; secret update commands emit a small status envelope since the
+backend returns 204 with no body.
+
+### Example
+
+```bash
+export NVCF_CLI_ENABLE_ADMIN=1
+export NVCF_TOKEN=${YOUR_ADMIN_JWT}
+
+# List all NCAs as a table
+nvcf-cli admin accounts list
+
+# List as JSON for piping into jq
+nvcf-cli admin accounts list --json | jq '.cloudAccounts[].ncaId'
+
+# Update an NCA's function limit
+nvcf-cli admin accounts update --nca-id nca-123 --max-functions 50
+```
+
+### Testing locally without a real backend
+
+`scripts/admin-mock/` is a small Go program that serves canned responses for
+the six admin endpoints so the commands can be exercised end to end without
+an NVCF backend or an admin token against a real environment:
+
+```bash
+# In one shell, start the mock
+go run ./scripts/admin-mock 9999
+
+# In another shell, point the CLI at it
+export NVCF_BASE_HTTP_URL=http://localhost:9999
+export NVCF_TOKEN=fake-admin-jwt
+export NVCF_CLI_ENABLE_ADMIN=1
+nvcf-cli admin accounts list --json
+```
+
+---
+
 ## **License**
 
 This project is licensed under the terms specified in the repository license file.
