@@ -31,6 +31,11 @@ src/compute-plane-services
 src/control-plane-services
 src/invocation-plane-services
 src/libraries/python
+# stargate rolled back to authoritative_source: upstream in !413; its
+# BUILD files load @rules_rust which the umbrella's Phase-1
+# MODULE.bazel does not declare. Re-include this line when stargate
+# goes native again.
+src/libraries/rust/stargate
 src/libraries/ts
 deploy
 docs
