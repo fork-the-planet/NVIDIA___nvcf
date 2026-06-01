@@ -560,6 +560,13 @@ func panicOnUnsetFields(t any) {
 	}
 }
 
+type ClusterIssuedTokenSource string
+
+const (
+	// ClusterIssuedTokenSourcePSAT configures the agent to use the projected service account token authz path.
+	ClusterIssuedTokenSourcePSAT ClusterIssuedTokenSource = "psat"
+)
+
 type AuthzConfig struct {
 	// ClientID must come from a secret and set in-memory.
 	// It will not be stored when the config is written.
@@ -579,11 +586,21 @@ type AuthzConfig struct {
 	// SelfManagedVaultSecretsJSONPath is the path to the secrets.json file created by Vault
 	// for self-managed environments.
 	SelfManagedVaultSecretsJSONPath string `yaml:",omitempty"`
+
+	// Cluster-issued JWT authz configuration
+
+	// ClusterIssuedTokenSource is the source of the cluster-issued JWT token.
+	ClusterIssuedTokenSource ClusterIssuedTokenSource `yaml:",omitempty"`
+	// ClusterIssuedTokenFilePath is the path to the cluster-issued token file.
+	ClusterIssuedTokenFilePath string `yaml:",omitempty"`
 }
 
 func (t AuthzConfig) Complete() AuthzConfig {
 	if t.TokenFetchFailureThreshold == 0 {
 		t.TokenFetchFailureThreshold = 3
+	}
+	if t.ClusterIssuedTokenSource == "" {
+		t.ClusterIssuedTokenSource = ClusterIssuedTokenSourcePSAT
 	}
 	return t
 }
