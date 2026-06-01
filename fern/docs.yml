@@ -23,15 +23,22 @@ navbar-links:
   value: https://github.com/NVIDIA/nvcf
 
 versions:
-- display-name: main
-  path: versions/main.yml
+- display-name: "Latest (0.5.0)"
+  path: versions/v0.5.yml
   slug: ""
-- display-name: "0.5"
+- display-name: dev
+  path: versions/dev.yml
+  slug: dev
+- display-name: "0.5.0"
   path: versions/v0.5.yml
   slug: "v0.5"
 
 redirects:
   - source: "/nvcf/index.html"
+    destination: "/nvcf/"
+  - source: "/nvcf/dev/index.html"
+    destination: "/nvcf/dev/"
+  - source: "/nvcf/latest/index.html"
     destination: "/nvcf/"
   - source: "/nvcf/v0.5/index.html"
     destination: "/nvcf/v0.5/"

@@ -4,19 +4,19 @@ Use this file when navigating or editing NVCF documentation under `docs/`.
 
 ## Layout
 
-- `docs/user/`: current customer-facing documentation for main.
+- `docs/user/`: top-of-tree customer-facing documentation published as `dev`.
 - `docs/v*/`: frozen versioned documentation. Do not edit these trees unless the user explicitly asks for a historical docs fix.
 - `docs/ngc-managed/`: legacy NGC-managed (BYOC) platform documentation. Separate from the self-hosted docs in `docs/user/`.
 - `docs/dev/`: developer and local workflow documentation.
-- `docs/version-catalog/main.yaml`: source of truth for generated artifact versions in current docs.
-- `fern/versions/main.yml`: source of truth for current docs navigation.
+- `docs/version-catalog/main.yaml`: source of truth for generated artifact versions in top-of-tree docs.
+- `fern/versions/dev.yml`: source of truth for top-of-tree docs navigation.
 - `fern/versions/<version>.yml`: source of truth for versioned docs navigation.
 
 ## Navigation
 
 Prefer the Fern navigation files and the filesystem over static route tables.
 
-1. For current docs, start with `fern/versions/main.yml`.
+1. For top-of-tree docs, start with `fern/versions/dev.yml`.
 2. For pinned release docs, use the matching file under `fern/versions/`.
 3. Confirm the mapped `path:` exists before answering.
 4. If a nav item uses `href:`, treat it as an external page. Do not invent a local file.
@@ -35,7 +35,7 @@ rg --files docs/v*
 
 ## Editing
 
-Use `docs/user/` for current customer docs and `docs/dev/` for developer workflows.
+Use `docs/user/` for top-of-tree customer docs and `docs/dev/` for developer workflows. The default published docs route points to the latest stable version, not `docs/user/`.
 
 ### SVG Assets
 

@@ -62,8 +62,10 @@ if [ -z "${gitlab_api_url}" ]; then
 fi
 gitlab_api_url="${gitlab_api_url%/}"
 
-curl --silent --fail --location \
+if ! curl --silent --fail --location \
   --header "PRIVATE-TOKEN: ${FERN_BOT}" \
   --header "Content-Type: application/json" \
   --url "${gitlab_api_url}/projects/${mr_project_id}/merge_requests/${mr_iid}/notes" \
-  --data-raw "{ \"body\": \"Preview your docs at ${preview_url}\" }"
+  --data-raw "{ \"body\": \"Preview your docs at ${preview_url}\" }"; then
+  echo "Skipping MR comment: GitLab API request failed." >&2
+fi

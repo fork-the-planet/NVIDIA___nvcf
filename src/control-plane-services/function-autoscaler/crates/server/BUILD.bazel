@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 load("@rs_autoscaler_crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 load("//rules/oci:defs.bzl", "rust_oci_image")
@@ -67,11 +68,19 @@ rust_test(
 # lanes (kaze, nv-ngc-devops, ncp-dev) are defined under
 # //nvidia-internal:* so the registry coordinates stay out of the
 # public OSS snapshot.
+pkg_tar(
+    name = "config_layer",
+    srcs = glob(["resources/*.yaml"]),
+    package_dir = "/etc/server/config",
+    visibility = ["//visibility:private"],
+)
+
 rust_oci_image(
     name = "image",
     base = "@distroless_cc",
     binary = ":server",
     binary_path = "/usr/local/bin/server",
+    extra_layers = [":config_layer"],
     tags = ["rs-autoscaler"],
     visibility = ["//visibility:public"],
 )

@@ -4,13 +4,13 @@ NVCF is built around three independently scalable planes connected through NATS 
 
 ## Three-Plane Overview
 
-The diagram below shows the primary components and how requests flow across planes. The control plane contains additional services beyond those shown — see the [manifest page](https://docs.nvidia.com/nvcf/manifest#control-plane-components-1) for the full component list.
+The diagram below shows the primary components and how requests flow across planes. The control plane contains additional services beyond those shown. See the [manifest page](https://docs.nvidia.com/nvcf/dev/manifest#control-plane-components-1) for the full component list.
 
 ![NVCF Three-Plane Architecture](assets/architecture-overview.svg)
 
 ## Component Responsibilities
 
-For a full breakdown of component responsibilities by plane, see the [manifest page](https://docs.nvidia.com/nvcf/manifest#control-plane-components-1).
+For a full breakdown of component responsibilities by plane, see the [manifest page](https://docs.nvidia.com/nvcf/dev/manifest#control-plane-components-1).
 
 ## Single Request Lifecycle
 
