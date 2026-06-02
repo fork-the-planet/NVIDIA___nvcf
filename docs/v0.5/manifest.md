@@ -204,7 +204,7 @@ Terraform and Helmfile resources for automated deployment.
 | Type | Component Name | Full Path |
 | --- | --- | --- |
 | Resource | nvcf-base | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-base:0.1.4` |
-| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.5.0` |
+| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.5.1` |
 | Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.24` |
 
 ### Component Descriptions
