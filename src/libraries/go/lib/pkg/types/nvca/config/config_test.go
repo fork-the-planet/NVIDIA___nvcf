@@ -469,6 +469,23 @@ func TestEncodeConfig(t *testing.T) {
 		assert.Contains(t, string(data), "app: nvca")
 		assert.Contains(t, string(data), "env: prod")
 	})
+
+	t.Run("service_host_overrides", func(t *testing.T) {
+		cfg := Config{
+			Agent: AgentConfig{
+				ICMSHostHeaderOverride:             "sis.gateway.example.test",
+				HelmReValServiceHostHeaderOverride: "reval.gateway.example.test",
+				NATSHostOverride:                   "nats.gateway.example.test",
+			},
+		}
+		data, err := EncodeConfig(cfg)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "icmsHostHeaderOverride: sis.gateway.example.test")
+		assert.Contains(t, string(data), "helmReValServiceHostHeaderOverride: reval.gateway.example.test")
+		assert.Contains(t, string(data), "NATSHostOverride: nats.gateway.example.test")
+		assert.NotContains(t, string(data), "icmshost:")
+		assert.NotContains(t, string(data), "helmrevalservicehost:")
+	})
 }
 
 func TestNewViperDecoderConfig(t *testing.T) {

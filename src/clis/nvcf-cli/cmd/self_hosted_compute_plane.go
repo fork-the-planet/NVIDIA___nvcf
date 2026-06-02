@@ -192,11 +192,8 @@ func computePlaneInstallEnv(valuesPath, clusterName, ncaID string) []string {
 }
 
 func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
-	if computePlaneRegisterProfile == "" {
-		return fmt.Errorf("--control-plane-profile is required")
-	}
-	if computePlaneRegisterClusterName == "" {
-		return fmt.Errorf("--cluster-name is required")
+	if err := validateComputePlaneRegisterFlags(); err != nil {
+		return err
 	}
 
 	validation, selected, err := loadControlPlaneProfileForComputeRegister(computePlaneRegisterProfile, computePlaneRegisterClusterName)
@@ -216,85 +213,163 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 		return err
 	}
 
-	oidcIssuer, jwks, identitySource, err := fetchClusterIdentity(c.Context(), computePlaneRegisterKubeContext)
+	identity, err := discoverComputePlaneRegisterIdentity(c.Context(), computePlaneRegisterKubeContext)
 	if err != nil {
-		return fmt.Errorf("discovering target cluster identity: %w", err)
+		return err
+	}
+
+	cp := validation.Profile.ControlPlane
+	registration, handoff, err := registerComputePlaneCluster(c, registrationICMSURL, cp, selected.Endpoints, identity)
+	if err != nil {
+		return err
+	}
+
+	writeComputePlaneRegisterSummary(c, computePlaneRegisterSummary{
+		ControlPlane:        cp,
+		Selected:            selected,
+		RegistrationICMSURL: registrationICMSURL,
+		Identity:            identity,
+		Registration:        registration,
+		Handoff:             handoff,
+		ComputePlaneKubeCtx: computePlaneRegisterKubeContext,
+		ComputePlaneRegion:  computePlaneRegisterRegion,
+		ComputePlaneCluster: computePlaneRegisterClusterName,
+		ComputePlaneDryRun:  computePlaneRegisterDryRun,
+	})
+	return nil
+}
+
+func validateComputePlaneRegisterFlags() error {
+	if computePlaneRegisterProfile == "" {
+		return fmt.Errorf("--control-plane-profile is required")
+	}
+	if computePlaneRegisterClusterName == "" {
+		return fmt.Errorf("--cluster-name is required")
+	}
+	return nil
+}
+
+type computePlaneClusterIdentity struct {
+	OIDCIssuer     string
+	JWKS           string
+	IdentitySource string
+}
+
+func discoverComputePlaneRegisterIdentity(ctx context.Context, kubeContext string) (computePlaneClusterIdentity, error) {
+	oidcIssuer, jwks, identitySource, err := fetchClusterIdentity(ctx, kubeContext)
+	if err != nil {
+		return computePlaneClusterIdentity{}, fmt.Errorf("discovering target cluster identity: %w", err)
 	}
 	if strings.TrimSpace(oidcIssuer) == "" {
-		return fmt.Errorf("discovering target cluster identity: OIDC issuer is empty")
+		return computePlaneClusterIdentity{}, fmt.Errorf("discovering target cluster identity: OIDC issuer is empty")
 	}
 	if strings.TrimSpace(jwks) == "" {
-		return fmt.Errorf("discovering target cluster identity: JWKS is empty")
+		return computePlaneClusterIdentity{}, fmt.Errorf("discovering target cluster identity: JWKS is empty")
 	}
 	if identitySource == "" {
 		identitySource = "psat"
 	}
+	return computePlaneClusterIdentity{
+		OIDCIssuer:     oidcIssuer,
+		JWKS:           jwks,
+		IdentitySource: identitySource,
+	}, nil
+}
 
-	cp := validation.Profile.ControlPlane
-	var handoff *computePlaneRegisterHandoff
-	var registration *selfhosted.RegisterResponse
-	if !computePlaneRegisterDryRun {
-		handoff, err = prepareComputePlaneRegisterHandoff(c, computePlaneRegisterClusterName)
-		if err != nil {
-			return err
-		}
-		cc, err := newClusterClientForSelfHosted(registrationICMSURL)
-		if err != nil {
-			return fmt.Errorf("constructing cluster client: %w", err)
-		}
-		defer cc.Close()
-		registration, err = cc.RegisterCluster(c.Context(), selfhosted.RegisterRequest{
-			ClusterName:    computePlaneRegisterClusterName,
-			NCAID:          cp.NCAID,
-			Region:         computePlaneRegisterRegion,
-			JWKS:           jwks,
-			OIDCIssuer:     oidcIssuer,
-			IdentitySource: identitySource,
-		})
-		if err != nil {
-			return fmt.Errorf("cluster register: %w", err)
-		}
-		if err := writeComputePlaneNVCAValues(handoff.ValuesPath, computePlaneRegisterClusterName, cp.NCAID, computePlaneRegisterRegion, identitySource, registration, selected.Endpoints); err != nil {
-			return err
-		}
+func registerComputePlaneCluster(
+	c *cobra.Command,
+	registrationICMSURL string,
+	cp controlplaneprofile.ControlPlane,
+	endpoints controlplaneprofile.EndpointScope,
+	identity computePlaneClusterIdentity,
+) (*selfhosted.RegisterResponse, *computePlaneRegisterHandoff, error) {
+	if computePlaneRegisterDryRun {
+		return nil, nil, nil
 	}
+	handoff, err := prepareComputePlaneRegisterHandoff(c, computePlaneRegisterClusterName)
+	if err != nil {
+		return nil, nil, err
+	}
+	cc, err := newClusterClientForSelfHosted(registrationICMSURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("constructing cluster client: %w", err)
+	}
+	defer cc.Close()
+	registration, err := cc.RegisterCluster(c.Context(), selfhosted.RegisterRequest{
+		ClusterName:    computePlaneRegisterClusterName,
+		NCAID:          cp.NCAID,
+		Region:         computePlaneRegisterRegion,
+		JWKS:           identity.JWKS,
+		OIDCIssuer:     identity.OIDCIssuer,
+		IdentitySource: identity.IdentitySource,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("cluster register: %w", err)
+	}
+	if err := writeComputePlaneNVCAValues(computePlaneNVCAValuesRequest{
+		Path:           handoff.ValuesPath,
+		ClusterName:    computePlaneRegisterClusterName,
+		NCAID:          cp.NCAID,
+		Region:         computePlaneRegisterRegion,
+		IdentitySource: identity.IdentitySource,
+		Registration:   registration,
+		Endpoints:      endpoints,
+		Hosts:          cp.Hosts,
+	}); err != nil {
+		return nil, nil, err
+	}
+	return registration, handoff, nil
+}
 
+type computePlaneRegisterSummary struct {
+	ControlPlane        controlplaneprofile.ControlPlane
+	Selected            selfhosted.ControlPlaneProfileEndpointScopeSelection
+	RegistrationICMSURL string
+	Identity            computePlaneClusterIdentity
+	Registration        *selfhosted.RegisterResponse
+	Handoff             *computePlaneRegisterHandoff
+	ComputePlaneKubeCtx string
+	ComputePlaneRegion  string
+	ComputePlaneCluster string
+	ComputePlaneDryRun  bool
+}
+
+func writeComputePlaneRegisterSummary(c *cobra.Command, summary computePlaneRegisterSummary) {
 	out := c.OutOrStdout()
-	fmt.Fprintf(out, "dryRun: %t\n", computePlaneRegisterDryRun)
-	fmt.Fprintf(out, "clusterName: %s\n", computePlaneRegisterClusterName)
-	fmt.Fprintf(out, "controlPlaneClusterName: %s\n", cp.ClusterName)
-	fmt.Fprintf(out, "ncaID: %s\n", cp.NCAID)
-	fmt.Fprintf(out, "region: %s\n", computePlaneRegisterRegion)
-	fmt.Fprintf(out, "kubeContext: %s\n", computePlaneRegisterKubeContext)
-	fmt.Fprintf(out, "endpointScope: %s\n", selected.Name)
-	fmt.Fprintf(out, "icmsURL: %s\n", registrationICMSURL)
-	fmt.Fprintf(out, "revalURL: %s\n", selected.Endpoints.ReValURL)
-	fmt.Fprintf(out, "natsURL: %s\n", selected.Endpoints.NATSURL)
-	fmt.Fprintf(out, "oidcIssuer: %s\n", oidcIssuer)
-	fmt.Fprintf(out, "identitySource: %s\n", identitySource)
-	if registration != nil {
-		fmt.Fprintf(out, "clusterID: %s\n", registration.ClusterID)
-		fmt.Fprintf(out, "clusterGroupID: %s\n", registration.ClusterGroupID)
+	fmt.Fprintf(out, "dryRun: %t\n", summary.ComputePlaneDryRun)
+	fmt.Fprintf(out, "clusterName: %s\n", summary.ComputePlaneCluster)
+	fmt.Fprintf(out, "controlPlaneClusterName: %s\n", summary.ControlPlane.ClusterName)
+	fmt.Fprintf(out, "ncaID: %s\n", summary.ControlPlane.NCAID)
+	fmt.Fprintf(out, "region: %s\n", summary.ComputePlaneRegion)
+	fmt.Fprintf(out, "kubeContext: %s\n", summary.ComputePlaneKubeCtx)
+	fmt.Fprintf(out, "endpointScope: %s\n", summary.Selected.Name)
+	fmt.Fprintf(out, "icmsURL: %s\n", summary.RegistrationICMSURL)
+	fmt.Fprintf(out, "revalURL: %s\n", summary.Selected.Endpoints.ReValURL)
+	fmt.Fprintf(out, "natsURL: %s\n", summary.Selected.Endpoints.NATSURL)
+	fmt.Fprintf(out, "oidcIssuer: %s\n", summary.Identity.OIDCIssuer)
+	fmt.Fprintf(out, "identitySource: %s\n", summary.Identity.IdentitySource)
+	if summary.Registration != nil && summary.Handoff != nil {
+		fmt.Fprintf(out, "clusterID: %s\n", summary.Registration.ClusterID)
+		fmt.Fprintf(out, "clusterGroupID: %s\n", summary.Registration.ClusterGroupID)
 		fmt.Fprintln(out, "sisMutation: completed")
-		fmt.Fprintf(out, "valuesPath: %s\n", handoff.ValuesPath)
+		fmt.Fprintf(out, "valuesPath: %s\n", summary.Handoff.ValuesPath)
 		fmt.Fprintln(out, "valuesWrite: completed")
 		fmt.Fprintln(out, "helmCommand:")
-		fmt.Fprintf(out, "  %s\n", shellCommand("helm", "upgrade", "--install", "nvca-operator", handoff.Chart, "--version", handoff.Version, "--namespace", "nvca-operator", "--create-namespace", "--values", handoff.ValuesPath))
+		fmt.Fprintf(out, "  %s\n", shellCommand("helm", "upgrade", "--install", "nvca-operator", summary.Handoff.Chart, "--version", summary.Handoff.Version, "--namespace", "nvca-operator", "--create-namespace", "--values", summary.Handoff.ValuesPath))
 		fmt.Fprintln(out, "computePlaneInstallCommand:")
 		installArgs := []string{"nvcf", "self-hosted", "compute-plane", "install"}
-		if handoff.StackArg != "" {
-			installArgs = append(installArgs, "--stack", handoff.StackArg)
+		if summary.Handoff.StackArg != "" {
+			installArgs = append(installArgs, "--stack", summary.Handoff.StackArg)
 		}
-		installArgs = append(installArgs, "--values", handoff.ValuesPath)
-		if computePlaneRegisterKubeContext != "" {
-			installArgs = append(installArgs, "--kube-context", computePlaneRegisterKubeContext)
+		installArgs = append(installArgs, "--values", summary.Handoff.ValuesPath)
+		if summary.ComputePlaneKubeCtx != "" {
+			installArgs = append(installArgs, "--kube-context", summary.ComputePlaneKubeCtx)
 		}
 		fmt.Fprintf(out, "  %s\n", shellCommand(installArgs...))
 	} else {
 		fmt.Fprintln(out, "sisMutation: skipped")
 		fmt.Fprintln(out, "valuesWrite: skipped")
 	}
-	return nil
 }
 
 // computePlaneRegisterICMSURL picks the ICMS endpoint the local CLI will use
@@ -404,18 +479,32 @@ func prepareComputePlaneRegisterHandoff(c *cobra.Command, clusterName string) (*
 	}, nil
 }
 
-func writeComputePlaneNVCAValues(path, clusterName, ncaID, region, identitySource string, registration *selfhosted.RegisterResponse, endpoints controlplaneprofile.EndpointScope) error {
-	return nvca.WriteFile(path, nvca.Values{
-		ClusterName:    clusterName,
-		ClusterID:      registration.ClusterID,
-		ClusterGroupID: registration.ClusterGroupID,
-		NCAID:          ncaID,
-		Region:         region,
+type computePlaneNVCAValuesRequest struct {
+	Path           string
+	ClusterName    string
+	NCAID          string
+	Region         string
+	IdentitySource string
+	Registration   *selfhosted.RegisterResponse
+	Endpoints      controlplaneprofile.EndpointScope
+	Hosts          controlplaneprofile.Hosts
+}
+
+func writeComputePlaneNVCAValues(req computePlaneNVCAValuesRequest) error {
+	return nvca.WriteFile(req.Path, nvca.Values{
+		ClusterName:    req.ClusterName,
+		ClusterID:      req.Registration.ClusterID,
+		ClusterGroupID: req.Registration.ClusterGroupID,
+		NCAID:          req.NCAID,
+		Region:         req.Region,
 		SelfManaged: nvca.SelfManagedValues{
-			IdentitySource:  identitySource,
-			ICMSServiceURL:  endpoints.ICMSURL,
-			ReValServiceURL: endpoints.ReValURL,
-			NATSURL:         endpoints.NATSURL,
+			IdentitySource:                 req.IdentitySource,
+			ICMSServiceURL:                 req.Endpoints.ICMSURL,
+			ICMSServiceHostHeaderOverride:  req.Hosts.SIS,
+			ReValServiceURL:                req.Endpoints.ReValURL,
+			ReValServiceHostHeaderOverride: req.Hosts.ReVal,
+			NATSURL:                        req.Endpoints.NATSURL,
+			NATSHostOverride:               req.Hosts.NATS,
 		},
 	})
 }

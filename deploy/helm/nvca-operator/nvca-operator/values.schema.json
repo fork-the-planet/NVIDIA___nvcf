@@ -711,6 +711,21 @@
                     "type": "string",
                     "description": "URL of the NATS service for self-managed clusters. Override with the endpoint generated during cluster registration.",
                     "default": "nats://nats.example.invalid:4222"
+                },
+                "icmsServiceHostHeaderOverride": {
+                    "type": "string",
+                    "description": "Optional Host header override for selfManaged.icmsServiceURL.",
+                    "default": ""
+                },
+                "revalServiceHostHeaderOverride": {
+                    "type": "string",
+                    "description": "Optional Host header override for selfManaged.revalServiceURL.",
+                    "default": ""
+                },
+                "natsHostOverride": {
+                    "type": "string",
+                    "description": "Optional TLS SNI host override for selfManaged.natsURL when using a tls or wss NATS URL.",
+                    "default": ""
                 }
             }
         },

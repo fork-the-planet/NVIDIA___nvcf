@@ -19,7 +19,7 @@
 ## @param image.pullPolicy K8s ImagePullPolicy
 image:
   repository: ""
-  tag: "3.0.0-rc.13"
+  tag: "3.0.0-rc.27"
   pullPolicy: IfNotPresent
 ## @param nvcaImage.repositoryOverride (Optional) Full NVCA container registry path, without tag. Only set this if the default needs to be overridden, for example "stg.nvcr.io/nvidia/nvcf-byoc/nvca". The tag is set in the cluster config
 ## @param nvcaImage.pullPolicy K8s ImagePullPolicy
@@ -265,7 +265,7 @@ helmManaged:
 ## All values below are under the 'selfManaged:' key, e.g. 'selfManaged.nvcaVersion'
 selfManaged:
   ## @param selfManaged.nvcaVersion (REQUIRED) Version of the NVCFBackend to use
-  nvcaVersion: "3.0.0-rc.13"
+  nvcaVersion: "3.0.0-rc.27"
   ## @param selfManaged.featureGateValues (Optional) List of feature gates to enable. Defaults to ["DynamicGPUDiscovery"] if not specified.
   featureGateValues: ["DynamicGPUDiscovery"]
   ## @param selfManaged.gpuManualInstanceConfigB64 (Optional) Base64 encoded GPU manual instance configuration. Leave blank if not required.
@@ -286,10 +286,16 @@ selfManaged:
     imageTag: 0.143.2
   ## @param selfManaged.icmsServiceURL URL of the ICMS service for self-managed clusters. Override with the endpoint generated during cluster registration.
   icmsServiceURL: "http://icms.example.invalid:8080"
+  ## @param selfManaged.icmsServiceHostHeaderOverride Optional Host header override for selfManaged.icmsServiceURL.
+  icmsServiceHostHeaderOverride: ""
   ## @param selfManaged.revalServiceURL URL of the ReVal service for self-managed clusters. Override with the endpoint generated during cluster registration.
   revalServiceURL: "http://reval.example.invalid:8080"
+  ## @param selfManaged.revalServiceHostHeaderOverride Optional Host header override for selfManaged.revalServiceURL.
+  revalServiceHostHeaderOverride: ""
   ## @param selfManaged.natsURL URL of the NATS service for self-managed clusters. Override with the endpoint generated during cluster registration.
   natsURL: "nats://nats.example.invalid:4222"
+  ## @param selfManaged.natsHostOverride Optional TLS SNI host override for selfManaged.natsURL when using a tls or wss NATS URL.
+  natsHostOverride: ""
   sharedStorage:
     imageTag: 1.0.5
 ## @section Node Selector Configuration

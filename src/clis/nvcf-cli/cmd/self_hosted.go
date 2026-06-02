@@ -59,9 +59,14 @@ var (
 )
 
 type registerEndpointValues struct {
-	ICMSServiceURL  string
-	ReValServiceURL string
-	NATSURL         string
+	ICMSServiceURL string
+	// Host overrides are populated by compute-plane registration from the
+	// ControlPlane profile. The self-hosted up/install helpers leave them empty.
+	ICMSServiceHostHeaderOverride  string
+	ReValServiceURL                string
+	ReValServiceHostHeaderOverride string
+	NATSURL                        string
+	NATSHostOverride               string
 }
 
 type localEndpointDefaults struct {

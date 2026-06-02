@@ -549,10 +549,13 @@ type helmValues struct {
 }
 
 type selfManagedValues struct {
-	IdentitySource  string `yaml:"identitySource"`
-	ICMSServiceURL  string `yaml:"icmsServiceURL,omitempty"`
-	ReValServiceURL string `yaml:"revalServiceURL,omitempty"`
-	NATSURL         string `yaml:"natsURL,omitempty"`
+	IdentitySource                 string `yaml:"identitySource"`
+	ICMSServiceURL                 string `yaml:"icmsServiceURL,omitempty"`
+	ICMSServiceHostHeaderOverride  string `yaml:"icmsServiceHostHeaderOverride,omitempty"`
+	ReValServiceURL                string `yaml:"revalServiceURL,omitempty"`
+	ReValServiceHostHeaderOverride string `yaml:"revalServiceHostHeaderOverride,omitempty"`
+	NATSURL                        string `yaml:"natsURL,omitempty"`
+	NATSHostOverride               string `yaml:"natsHostOverride,omitempty"`
 }
 
 // printRegistrationOutput prints the registration result and helm values YAML.
@@ -597,15 +600,15 @@ func newSelfManagedValues(identitySource, icmsServiceURL, natsURL string) selfMa
 }
 
 func newSelfManagedValuesFromEndpoints(identitySource string, endpoints registerEndpointValues) selfManagedValues {
-	vals := selfManagedValues{
-		IdentitySource: identitySource,
-		ICMSServiceURL: endpoints.ICMSServiceURL,
-		NATSURL:        endpoints.NATSURL,
+	return selfManagedValues{
+		IdentitySource:                 identitySource,
+		ICMSServiceURL:                 endpoints.ICMSServiceURL,
+		ICMSServiceHostHeaderOverride:  endpoints.ICMSServiceHostHeaderOverride,
+		ReValServiceURL:                endpoints.ReValServiceURL,
+		ReValServiceHostHeaderOverride: endpoints.ReValServiceHostHeaderOverride,
+		NATSURL:                        endpoints.NATSURL,
+		NATSHostOverride:               endpoints.NATSHostOverride,
 	}
-	if endpoints.ReValServiceURL != "" {
-		vals.ReValServiceURL = endpoints.ReValServiceURL
-	}
-	return vals
 }
 
 // lookupExistingCluster finds an existing cluster by name via the ICMS

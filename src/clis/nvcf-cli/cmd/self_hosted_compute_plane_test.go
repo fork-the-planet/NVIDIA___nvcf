@@ -533,8 +533,11 @@ func TestComputePlaneRegisterWritesNVCAValuesAndHandoffCommands(t *testing.T) {
 	assert.Contains(t, values, "ncaID: nvcf-default")
 	assert.Contains(t, values, "region: eu-west-1")
 	assert.Contains(t, values, "icmsServiceURL: https://sis.example.test")
+	assert.Contains(t, values, "icmsServiceHostHeaderOverride: sis.example.test")
 	assert.Contains(t, values, "revalServiceURL: https://reval.example.test")
+	assert.Contains(t, values, "revalServiceHostHeaderOverride: reval.example.test")
 	assert.Contains(t, values, "natsURL: tls://nats.example.test:4222")
+	assert.Contains(t, values, "natsHostOverride: nats.example.test")
 
 	out := stdout.String()
 	assert.Contains(t, out, "valuesPath: "+valuesPath)

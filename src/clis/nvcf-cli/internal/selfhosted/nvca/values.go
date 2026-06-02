@@ -35,10 +35,13 @@ type Values struct {
 }
 
 type SelfManagedValues struct {
-	IdentitySource  string `yaml:"identitySource"`
-	ICMSServiceURL  string `yaml:"icmsServiceURL,omitempty"`
-	ReValServiceURL string `yaml:"revalServiceURL,omitempty"`
-	NATSURL         string `yaml:"natsURL,omitempty"`
+	IdentitySource                 string `yaml:"identitySource"`
+	ICMSServiceURL                 string `yaml:"icmsServiceURL,omitempty"`
+	ICMSServiceHostHeaderOverride  string `yaml:"icmsServiceHostHeaderOverride,omitempty"`
+	ReValServiceURL                string `yaml:"revalServiceURL,omitempty"`
+	ReValServiceHostHeaderOverride string `yaml:"revalServiceHostHeaderOverride,omitempty"`
+	NATSURL                        string `yaml:"natsURL,omitempty"`
+	NATSHostOverride               string `yaml:"natsHostOverride,omitempty"`
 }
 
 func WriteFile(path string, values Values) error {
