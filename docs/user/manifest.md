@@ -113,9 +113,9 @@ Components that run on GPU nodes to manage function execution, including the NVC
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
-| Image | nvca | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvca:3.0.0-rc.13` |
-| Image | nvca-operator | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvca-operator:3.0.0-rc.13` |
-| Chart (OCI) | helm-nvca-operator | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator:1.11.1` |
+| Image | nvca | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvca:3.0.0-rc.27` |
+| Image | nvca-operator | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvca-operator:3.0.0-rc.27` |
+| Chart (OCI) | helm-nvca-operator | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator:1.12.0` |
 | Image | nvcf_worker_utils | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_utils:2.101.0` |
 | Image | nvcf_worker_init | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_init:2.102.0` |
 | Image | nvcf_worker_niclls | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_niclls:2.105.7` |
@@ -224,7 +224,7 @@ Helmfile and CLI resources for deployment.
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
-| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.54` |
+| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.56` |
 | Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |
 
 {/* docs-version-sync:END manifest-artifact-registry-paths */}

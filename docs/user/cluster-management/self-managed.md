@@ -59,7 +59,7 @@ bootstrap process:
 
 | **Chart** | `helm-nvca-operator` |
 | --- | --- |
-| **Version** | `1.11.1` |
+| **Version** | `1.12.0` |
 | **Namespace** | `nvca-operator` |
 | **Depends on** | All control plane services and gateway must be running |
 
@@ -95,7 +95,7 @@ ngcConfig:
 
 # Self-managed backend configuration
 selfManaged:
-  nvcaVersion: "3.0.0-rc.13"  # NVCA agent version to deploy
+  nvcaVersion: "3.0.0-rc.27"  # NVCA agent version to deploy
   featureGateValues: ["DynamicGPUDiscovery", "SelfHosted", "KAIScheduler"]
   imageCredHelper:
     imageRepository: "nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-image-credential-helper"
@@ -256,7 +256,7 @@ helm upgrade --install nvca-operator \
   --namespace nvca-operator --create-namespace \
   --wait --timeout 10m \
   -f nvca-operator-values.yaml \
-  --version 1.11.1
+  --version 1.12.0
 ```
 
 During installation, the chart will:

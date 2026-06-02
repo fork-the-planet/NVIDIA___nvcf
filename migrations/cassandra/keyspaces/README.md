@@ -19,12 +19,12 @@ pinned version reference is bumped accordingly.
 
 ## Schema Sources
 
-| Keyspace       | Source Repository                                                                                                                                                                                           | Pinned Version | Commit     |
-|----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------|------------|
-| `api_keys_api` | [local_env/cassandra/schema.cql](https://github.com/NVIDIA/kaizen/auth/ncp-auth/nv-api-keys-service/-/blob/01eae99b48c2d1235ff4662055824c3037565bce/local_env/cassandra/schema.cql)                  | `main`         | `01eae99b` |
-| `ess_api`      | [src/main/resources/models/schema.cql](https://github.com/NVIDIA/ngc/cloud/secrets/ess-api-service/-/blob/200fd74d7543c4aad5973676525cbe0ec4bcf62b/src/main/resources/models/schema.cql)             | `v0.48.26`     | `200fd74d` |
-| `nvcf_api`     | [local_env/cassandra/schema/0001_initial_schema.cql](https://github.com/NVIDIA/nvcf/nvcf-service/-/blob/273d54325ec131b746fbeace764303113b82c0f7/local_env/cassandra/schema/0001_initial_schema.cql) | `v2.234.0`     | `273d5432` |
-| `sis_api`      | [spot_local_env/cassandra/schema/schema.cql](https://github.com/NVIDIA/nvcf/nvcf-spot/spot/-/blob/8a492a2e3b38f9c3c4f2c2ee7ac680788954b49d/spot_local_env/cassandra/schema/schema.cql)               | `v1.531.2`     | `8a492a2e` |
+| Keyspace       | Source Repository                                  | Pinned Version | Commit     |
+|----------------|----------------------------------------------------|----------------|------------|
+| `api_keys_api` | `local_env/cassandra/schema.cql`                   | `main`         | `01eae99b` |
+| `ess_api`      | `src/main/resources/models/schema.cql`             | `v0.48.26`     | `200fd74d` |
+| `nvcf_api`     | `local_env/cassandra/schema/0001_initial_schema.cql` | `v2.234.0`   | `273d5432` |
+| `sis_api`      | `spot_local_env/cassandra/schema/schema.cql`       | `v1.531.2`     | `8a492a2e` |
 
 > **Note — `sis_api`:** The upstream SoT is under active clarification. The schema
 > was sourced from `nvcf/nvcf-spot/spot@v1.517.0`. A competing source
@@ -68,11 +68,11 @@ upstream:
 
 1. Identify the target upstream service version/tag.
 2. Fetch the canonical schema file from the upstream repo at that tag via the
-   GitLab API:
+   repository API:
 
    ```bash
    curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-     "https://github.com/NVIDIA/api/v4/projects/<encoded-path>/repository/files/<encoded-file-path>/raw?ref=<tag>" \
+     "$SCHEMA_RAW_URL" \
      -o /tmp/upstream_schema.cql
    ```
 
