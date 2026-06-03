@@ -1,12 +1,12 @@
 # Agent Skills Repository Guidelines
 
-This subtree contains public Agent Skills for NVIDIA Cloud Functions (NVCF). All skills must comply with the [Agent Skills specification](https://agentskills.io/specification) with NVCARPS-specific extensions. This repository is compatible with the [Vercel Skills CLI](https://github.com/vercel-labs/skills).
+This subtree contains public Agent Skills for NVIDIA Cloud Functions (NVCF). All skills must comply with the [Agent Skills specification](https://agentskills.io/specification) plus the repo-specific public skill metadata contract. This repository is compatible with the [Vercel Skills CLI](https://github.com/vercel-labs/skills).
 
 ## Instructions
 
 Use this file as the authoring contract for every public skill in `user/skills/` and `dev/skills/`. Keep private skills in the private subtree.
 
-When adding or editing a skill, keep the external skill spec fields at the top level of the frontmatter, retain the required NVCARPS fields under `metadata`, and include a concise `## Instructions` section in the body.
+When adding or editing a skill, keep the external skill spec fields at the top level of the frontmatter, retain the required repo-specific fields under `metadata`, and include a concise `## Instructions` section in the body.
 
 ## Skill Structure
 
@@ -79,9 +79,9 @@ metadata:
 |-------|------|-------------|
 | `license` | string | License name or reference to bundled license file |
 | `compatibility` | string | Max 500 chars. Environment requirements |
-| `metadata` | object | NVCARPS metadata fields (see below) |
+| `metadata` | object | Repo-specific public skill metadata fields (see below) |
 
-### NVCARPS Metadata Fields (Required)
+### Public Skill Metadata Fields (Required)
 
 These fields must be placed inside the `metadata` object:
 
@@ -168,24 +168,14 @@ Before committing changes, verify:
 - [ ] All relative links are valid
 - [ ] No `alwaysApply` or `globs` fields present
 
-## Existing Skills
+## Skill Inventory
 
-| Skill | Purpose | Domain |
-|-------|---------|--------|
-| `bazel-go-gazelle` | Wire Go modules into Bazel with rules_go and Gazelle | build-systems |
-| `bazel-java-maven` | Wire Java and Spring Boot services into Bazel with Maven artifacts | build-systems |
-| `bazel-monorepo-bootstrap` | Bootstrap Bazel in an existing polyglot monorepo | build-systems |
-| `bazel-oci-images` | Build multi-arch OCI images from Bazel binaries | build-systems |
-| `bazel-rust-crate-universe` | Wire Rust services into Bazel with crate_universe | build-systems |
-| `bazel-synthetic-import-strategy` | Plan Bazel rollout for NVCF synthetic imports | build-systems |
-| `documentation-style` | NVCF documentation conventions for public repo prose | documentation |
-| `nvcf-explore-stack` | Navigate self-hosted stack topology, helmfile deployment order, chart ownership, and dependencies | cloud-infrastructure |
-| `official-docs-style` | External-facing NVCF user documentation voice and structure | documentation |
-| `nvcf-self-managed-installation` | Install and deploy the nvcf-self-managed-stack helmfile bundle: installation, teardown, values overrides, pull secrets, debugging | cloud-infrastructure |
-| `nvcf-self-managed-cli` | Standalone NVCF CLI for self-managed/self-hosted deployments: function lifecycle, deployment, invocation, API keys, and registry credentials | cloud-infrastructure |
+Root `AGENTS.md` is the fanout index for public and private dev skills exposed
+through `.cursor/skills/`, `.codex/skills/`, and `.claude/skills/`. Keep this
+file focused on the public skill authoring contract. Use `README.md` for the
+public catalog users browse in this subtree.
 
 ## References
 
 - [Agent Skills Specification](https://agentskills.io/specification)
 - [Vercel Skills CLI](https://github.com/vercel-labs/skills)
-- [NVCARPS Skill Contribution Guide](https://nvidia.atlassian.net/wiki/spaces/GAIT/pages/2992484731/HOW-To-Contribute-Skills)

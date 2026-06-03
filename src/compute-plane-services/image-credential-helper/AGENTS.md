@@ -1,189 +1,47 @@
-# AGENTS.md - Guide for AI Coding Agents
+# AGENTS.md - image-credential-helper
 
-Quick reference for working with **nvcf-image-credential-helper**, a Kubernetes utility (Go) that automates container registry credential management for NVCF BYOC clusters.
+Native Go service for Kubernetes image pull credential management in NVCF
+bring-your-own-compute clusters.
 
-## Quick Start
+## Layout
 
-**Repository structure:**
-- `cmd/image-credential-helper/` - Main binary entrypoint
-- `vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/imagecredential/` - Vendored shared credential helper logic
-- `examples/` - Sample Kubernetes manifests
-- `docker/` - Dockerfile for local/CI use (not shipped yet)
+- `cmd/image-credential-helper/`: main binary entrypoint
+- `vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/imagecredential/`:
+  vendored shared registry credential logic
+- `examples/`: sample Kubernetes manifests
+- `docker/`: local Dockerfile
 
-## Build & Test Commands
+Registry-provider logic is owned in the monorepo shared library at
+`src/libraries/go/lib/pkg/imagecredential`. Make provider changes there first,
+then update this subtree's module/vendor state.
 
-**Quick check before commit:**
+## Build and Test
+
 ```bash
-make test    # Unit tests
-make lint    # golangci-lint (goheader, etc.)
+make build
+make test
+make lint
+make vendor-update
 ```
 
-**Run specific tests:**
+Useful focused checks:
+
 ```bash
-go test ./cmd/image-credential-helper                    # Main package tests
-go test ./cmd/image-credential-helper -run Test_runGlobal # Single test function
-go test -v ./...                                         # Verbose output
+go test ./cmd/image-credential-helper
+go test ./cmd/image-credential-helper -run Test_runGlobal
+make shellcheck
 ```
 
-**Build:**
-```bash
-make build    # Build binary to _output/bin/image-credential-helper
-```
+CI subproject id: `image-credential-helper`. Native CI and release wiring live
+in `tools/ci/subproject-validations.yaml`.
 
-`make test` runs `go test` with coverage (report at `_output/cover/coverage.html`) and `make vendor-update` runs `go mod vendor`. Optional: `make shellcheck` for scripts in `./scripts`.
+## Local Gotchas
 
-## Testing Instructions
-
-**Before committing:**
-```bash
-make test    # Must pass
-make lint    # Must pass (golangci-lint with goheader)
-```
-
-**Test structure:**
-- Tests live next to code: `foo.go` → `foo_test.go`
-- Use table-driven tests for multiple scenarios
-- Test naming: `TestFunctionName` or `TestStructName_MethodName`
-
-**Example test pattern:**
-```go
-func TestECRHelper_Matches(t *testing.T) {
-    tests := []struct {
-        name     string
-        url      string
-        wantECR  bool
-        wantPub  bool
-    }{
-        {name: "private ECR", url: "123456789012.dkr.ecr.us-east-1.amazonaws.com", wantECR: true, wantPub: false},
-        {name: "public ECR", url: "public.ecr.aws", wantECR: true, wantPub: true},
-    }
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            // test implementation
-        })
-    }
-}
-```
-
-## Code Style
-
-**Go standards:**
-- All exported symbols need godoc comments
-- Use `logrus` for logging
-- Handle all errors explicitly
-- Follow standard Go formatting (gofmt)
-- License headers required on all Go files (enforced by goheader linter)
-
-**Credential helper behavior:**
-- Registry helper support lives in the shared nvcf-go `imagecredential` package.
-- Make registry-provider changes upstream in nvcf-go, then update `go.mod` and `vendor/` here.
-
-**Package structure:**
-```
-cmd/image-credential-helper/  - Binary entrypoint
-vendor/github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/imagecredential/
-  credhelper.go      - Core CredHelper interface and registry
-  ecr.go             - AWS ECR helper
-  volcengine.go      - Volcengine helper
-  k8shelper.go       - Kubernetes secret update logic
-  imagecredential.go - K8s object builders
-```
-
-## Commit & PR Instructions
-
-**Commit format (Conventional Commits v1.0.0 required):**
-```
-<type>(<scope>): <short description>
-
-[optional body]
-
-Closes #<issue-number>  # or use NO-REF if no ticket
-```
-
-**Types:**
-- **End user** (in release notes): `feat`, `fix`, `perf` - **scope required**
-- **Foundational** (not in release notes): `docs`, `build`, `test`, `refactor`, `ci`, `chore`, `style`, `revert`
-
-**Examples:**
-```
-feat(imagecredential): add support for Azure Container Registry
-fix(ecr): handle FIPS endpoint correctly
-test(volcengine): add unit tests for token refresh
-```
-
-**Before committing:**
-```bash
-gofmt -w $(find . -name '*.go' -not -path './vendor/*')  # Format Go files
-make test    # Unit tests must pass
-make lint    # golangci-lint must pass
-```
-
-**PR checklist:**
-1. Fork repo, create feature branch
-2. Add tests for your changes
-3. Run `gofmt -w` on all modified Go files
-4. Run `make test && make lint`
-5. If dependencies changed, update the root third-party license index in `NOTICE`
-6. Commit with conventional format
-7. Create PR to `main` branch
-8. Fill in PR template
-9. Wait for CI to pass
-10. Address review feedback
-
-## Security Considerations
-
-**Critical rules:**
-- NEVER commit credentials, API keys, or secrets
-- Validate all inputs
-- Use TLS for all external communications
-- Run containers as non-root when possible
-
-**Reporting vulnerabilities - DO NOT use GitHub issues:**
-- Web: https://www.nvidia.com/object/submit-security-vulnerability.html
-- Email: psirt@nvidia.com
-- Include: product/version, vulnerability type, repro steps, PoC code, impact
-
-## NOTICE File Maintenance
-
-The root `NOTICE` file contains attribution and third-party license paths from vendored dependencies. This subtree no longer keeps its own `NOTICE` file.
-
-When to update:
-- After running `make vendor-update`
-- After adding, removing, or updating dependencies in `go.mod`
-
-How to update:
-```bash
-./tools/scripts/update-license
-```
-
-## Common Gotchas
-
-1. Dependency changes = update vendor + root NOTICE: run `make vendor-update` after changing go.mod, then run `./tools/scripts/update-license` from the repository root
-2. **ECR public vs private** - `public.ecr.aws` is treated as public (no auth needed)
-3. **Volcengine region extraction** - Region is parsed from the registry hostname
-4. **K8s secret naming** - Pull secrets follow pattern `workload-{id}-regcred-{index}` or `worker-{id}-regcred-{index}`
-5. **Credential caching** - Credentials are cached per registry host to avoid repeated API calls
-
-## Supported Registry Providers
-
-| Provider | Pattern | Notes |
-|----------|---------|-------|
-| AWS ECR | `*.dkr.ecr.*.amazonaws.com` | Uses AWS SDK for token refresh |
-| AWS ECR Public | `public.ecr.aws` | Treated as public, no auth |
-| Volcengine | `*.cr.volces.com` | Uses Volcengine SDK |
-
-## Adding New Registry Support
-
-Add registry-provider support in the shared nvcf-go `imagecredential` package first. Then update this repo's nvcf-go module version, run `make vendor-update`, and keep the vendored tests/build files in sync.
-
-## Quick Links
-
-- [CONTRIBUTING.md](./CONTRIBUTING.md) - Contribution guidelines
-- [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) - Community guidelines
-- [SECURITY.md](./SECURITY.md) - Security policies
-- [Conventional Commits](https://www.conventionalcommits.org/)
-- Maintainers: nvidia/nvca-maintainers
-
-## Agent Expectations
-- Keep changes scoped to this repo.
-- Check for existing local changes before editing, and do not overwrite user work or generated artifacts without confirming the need.
+- Dependency changes require `make vendor-update`, then root license
+  attribution refresh via `./tools/scripts/update-license`.
+- AWS ECR private registries match `*.dkr.ecr.*.amazonaws.com`.
+- AWS ECR Public uses `public.ecr.aws` and is treated as public.
+- Volcengine regions are parsed from `*.cr.volces.com` hostnames.
+- Pull secret names follow `workload-{id}-regcred-{index}` or
+  `worker-{id}-regcred-{index}`.
+- Never commit real registry credentials or kubeconfigs.

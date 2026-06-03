@@ -152,8 +152,6 @@ Feature: Install a single-cluster NVCF stack on a pre-provisioned EKS cluster wi
         | sis              |
         | vault-system     |
         | nvca-operator    |
-        | nvca-system      |
-        | nvcf-backend     |
         | cert-manager     |
 
     Scenario: User installs the control plane through Helmfile on the EKS cluster

@@ -70,8 +70,6 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
         | sis              |
         | vault-system     |
         | nvca-operator    |
-        | nvca-system      |
-        | nvcf-backend     |
         | cert-manager     |
 
     @control-plane @llm-gateway
@@ -145,8 +143,6 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
         | sis              |
         | vault-system     |
         | nvca-operator    |
-        | nvca-system      |
-        | nvcf-backend     |
         | cert-manager     |
       # Reuse the previous scenario's install rather than re-running it
       # if it already succeeded in this suite. Cache key is the resolved
@@ -191,8 +187,6 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
 
       And the "nvcr-pull-secret" image pull secret exists in namespaces:
         | nvca-operator |
-        | nvca-system   |
-        | nvcf-backend  |
 
       When I run command:
         """

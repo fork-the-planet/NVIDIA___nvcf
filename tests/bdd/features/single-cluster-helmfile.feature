@@ -63,8 +63,6 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
         | sis              |
         | vault-system     |
         | nvca-operator    |
-        | nvca-system      |
-        | nvcf-backend     |
         | cert-manager     |
 
     @llm-gateway
@@ -128,8 +126,6 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
         | sis              |
         | vault-system     |
         | nvca-operator    |
-        | nvca-system      |
-        | nvcf-backend     |
         | cert-manager     |
       And command has succeeded:
         """
@@ -211,8 +207,6 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
         | sis              |
         | vault-system     |
         | nvca-operator    |
-        | nvca-system      |
-        | nvcf-backend     |
         | cert-manager     |
       And command has succeeded:
         """

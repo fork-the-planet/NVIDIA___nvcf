@@ -10,8 +10,9 @@ in `AGENTS.md`.
 ## Directory layout
 
 ```
-features/   Gherkin feature files. Three suites: single-cluster CLI,
-            multi-cluster CLI, single-cluster Helmfile.
+features/   Gherkin feature files: single-cluster CLI, multi-cluster CLI,
+            single/multi-cluster Helmfile (k3d), and single/multi-cluster
+            EKS Helmfile (non-local).
 fixtures/   Starting environment YAML and CLI config the features copy from.
 harness/    Suite lifecycle: Config, CommandRunner, Ledger, CommandCache,
             Suite. Builds nvcf-cli at suite start; exports NVCF_CLI and
@@ -23,7 +24,8 @@ steps/      Godog step handlers. Every handler is a thin wrapper around a
             dsl helper or CommandRunner.Run; no domain validation.
 godog_test.go
             Live entry points (TestSingleClusterUp, TestMultiClusterUp,
-            TestSingleClusterHelmfile, TestMultiClusterHelmfile) and
+            TestSingleClusterHelmfile, TestMultiClusterHelmfile,
+            TestSingleClusterEKSHelmfile, TestMultiClusterEKSHelmfile) and
             wiring tests with a fake CommandRunner.
 .golangci.yml
 .goheader.tmpl
@@ -73,6 +75,35 @@ NGC_API_KEY=<key> SAMPLE_NGC_ORG=<org> SAMPLE_NGC_TEAM=<team> \
 NGC_API_KEY=<key> SAMPLE_NGC_ORG=<org> SAMPLE_NGC_TEAM=<team> \
   go test -run '^TestMultiClusterHelmfile$' -timeout 90m -v
 ```
+
+### EKS Helmfile features (non-local)
+
+These run against pre-provisioned EKS clusters instead of k3d. They install
+the control plane via Helmfile and provision the gateway/ELB in the feature.
+They require the NGC env vars plus the EKS kube contexts.
+
+```sh
+cd tests/bdd
+
+# Single-cluster EKS Helmfile feature: control plane + NVCA on one EKS
+# cluster.
+EKS_CONTEXT=<ctx> EKS_CLUSTER_NAME=<name> EKS_REGION=<region> \
+  NGC_API_KEY=<key> SAMPLE_NGC_ORG=<org> SAMPLE_NGC_TEAM=<team> \
+  go test -run '^TestSingleClusterEKSHelmfile$' -timeout 120m -v
+
+# Multi-cluster EKS Helmfile feature: control plane on EKS_CONTEXT, then
+# register + NVCA + function smoke on a separate compute EKS cluster
+# (EKS_COMPUTE_CONTEXT). Uses HELMFILE_ENV=eks-bdd-multi to isolate its
+# environment, secrets, and CLI-config files from the single-cluster EKS
+# feature (eks-bdd).
+EKS_CONTEXT=<cp-ctx> EKS_COMPUTE_CONTEXT=<compute-ctx> \
+  EKS_COMPUTE_CLUSTER_NAME=<compute-name> EKS_REGION=<region> \
+  NGC_API_KEY=<key> SAMPLE_NGC_ORG=<org> SAMPLE_NGC_TEAM=<team> \
+  go test -run '^TestMultiClusterEKSHelmfile$' -timeout 150m -v
+```
+
+Pre-suite cleanup for the EKS features is operator-run (there is no
+`BDD_CLEANUP_MODE` entry for EKS); see the Cleanup section.
 
 Live runs install golangci-lint pass; the wiring tests cover handler
 registration and the strict-DSL contract.
@@ -190,6 +221,22 @@ Governing rule:
   groups, EBS CSI driver, fake GPU operator, and cert-manager are
   still off-limits because they belong to cluster provisioning,
   not to the BDD suite.
+
+Non-local (EKS) cleanup is operator-run, not wired into `BDD_CLEANUP_MODE`.
+`tests/bdd/scripts/destroy-nonlocal-stack.sh` takes one
+`--control-plane-context` and one or more `--compute-context` flags, so it
+covers both the single-cluster (same context for both) and multi-cluster
+(distinct control-plane and compute contexts) EKS features:
+
+```sh
+# Single-cluster EKS: control plane and compute share one context
+tests/bdd/scripts/destroy-nonlocal-stack.sh \
+  --control-plane-context <ctx> --compute-context <ctx> --clean-out
+
+# Multi-cluster EKS: control plane on one cluster, compute on another
+tests/bdd/scripts/destroy-nonlocal-stack.sh \
+  --control-plane-context <cp-ctx> --compute-context <compute-ctx> --clean-out
+```
 
 Operator notes:
 

@@ -58,8 +58,6 @@ Feature: Bring up a local multi-cluster NVCF stack with the CLI
         | sis              |
         | vault-system     |
         | nvca-operator    |
-        | nvca-system      |
-        | nvcf-backend     |
         | cert-manager     |
 
     Scenario: Operator installs the control plane on a multi-cluster ncp-local stack

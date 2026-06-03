@@ -9,9 +9,10 @@ This repo is an umbrella layout: upstream services appear as ordinary directorie
 Use `python3`, not `python`, when Python is needed. Use the nearest nested `AGENTS.md` for subtree-specific guidance.
 
 Useful pointers:
-- `BAZEL.md` for the contributor-facing Bazel build path (Phase 1: native
-  Go subtrees in `src/clis/nvcf-cli` and `src/libraries/go/lib`)
+- `BAZEL.md` for the contributor-facing Bazel build path
 - `tools/AGENTS.md` for repo tooling
+- `deploy/helm/AGENTS.md` for native Helm chart guidance
+- `migrations/AGENTS.md` for native migration image guidance
 - `.cursor/skills/add-synthetic-import/SKILL.md` for synthetic imports
 - `.cursor/skills/documentation-style/SKILL.md` for docs style
 - `.cursor/skills/nvcf-gitlab-subproject-ci/SKILL.md` for native subproject CI
@@ -21,6 +22,25 @@ Useful pointers:
 - `ai-tooling/user/skills/` and `ai-tooling/dev/skills/` for public skills
 
 If a referenced skill is outdated, update it before finishing.
+
+## Cross-repo and stack routing
+
+Use `imports.yaml` to decide whether a subtree is monorepo-native or still
+owned by an upstream synthetic import. Native subprojects are edited here.
+Upstream-owned synthetic imports usually need the change in the upstream repo
+and a later `tools/sync-synthetic-imports` pin update.
+
+For self-managed stack ownership, deployment order, chart/image-source mapping,
+or "which subtree owns this" questions, use:
+- `.cursor/skills/nvcf-explore-stack/SKILL.md` for the in-repo Helmfile,
+  dependency, chart, hook, and image-source map
+- `.cursor/skills/nvcf-workspace-router/SKILL.md` when private workspace
+  routing metadata is relevant
+
+Do not copy workspace routing boilerplate into subtree `AGENTS.md` files. Local
+guidance should only record subtree-specific ownership exceptions, adjacent
+subtrees that commonly need follow-up, and commands that must be run from that
+subtree.
 
 ## Local QA and Testing Environment Safety
 
@@ -82,6 +102,10 @@ tools:
 
 The `description` must say both what the skill does (actions it enables) and when to use it (trigger phrases, keywords). This is how agents decide whether to invoke the skill.
 
+For public skills under `ai-tooling/user/skills/` or `ai-tooling/dev/skills/`,
+follow `ai-tooling/AGENTS.md`. That file is the full public skill authoring contract
+and includes the required public metadata fields.
+
 ### Where skills live
 
 Skills are split by visibility and audience:
@@ -122,6 +146,7 @@ Tool-specific hook config files, such as `.cursor/hooks.json`, `.codex/hooks.jso
 |-------|----------|---------|
 | `bazel-go-gazelle` | `ai-tooling/dev/skills/` | Wire Go modules into Bazel with rules_go and Gazelle |
 | `bazel-java-maven` | `ai-tooling/dev/skills/` | Wire Java and Spring Boot services into Bazel with Maven artifacts |
+| `bazel-gitlab-child-pipelines` | `ai-tooling/dev/skills/` | Generic Bazel parent-child pipeline pattern; for this repo prefer `nvcf-gitlab-subproject-ci` |
 | `bazel-monorepo-bootstrap` | `ai-tooling/dev/skills/` | Bootstrap Bazel in an existing polyglot monorepo |
 | `bazel-oci-images` | `ai-tooling/dev/skills/` | Build multi-arch OCI images from Bazel binaries |
 | `bazel-rust-crate-universe` | `ai-tooling/dev/skills/` | Wire Rust services into Bazel with crate_universe |
@@ -132,6 +157,7 @@ Tool-specific hook config files, such as `.cursor/hooks.json`, `.codex/hooks.jso
 | `official-docs-style` | `ai-tooling/dev/skills/` | External-facing NVCF user documentation voice and structure |
 | `nvcf-self-managed-cli` | `ai-tooling/user/skills/` | Install, operate, and manage self-managed NVCF through `nvcf-cli` |
 | `nvcf-self-managed-installation` | `ai-tooling/user/skills/` | Install and deploy the self-managed NVCF stack |
+| `nvcf-self-managed-prerequisite` | `ai-tooling/user/skills/` | Install cluster-level prerequisites such as KAI Scheduler and SMB CSI driver |
 
 Private skill inventory lives in the private subtree guidance.
 

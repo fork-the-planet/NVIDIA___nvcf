@@ -627,6 +627,86 @@ func TestSingleClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	}
 }
 
+// TestMultiClusterEKSHelmfileFeatureFileWiresToSteps runs the
+// multi-cluster EKS Helmfile feature against a fake CommandRunner.
+// Canned outputs cover the control-plane gateway-address jsonpath, the
+// control-plane helm-list, the api HTTPRoute hostname, the compute
+// nvca-operator helm-list, and the function invoke. The helm-list keys
+// carry distinct --kube-context values so the test exercises the
+// control-plane vs compute split. @gateway-setup's export step captures
+// EKS_GATEWAY_ADDR from the canned gateway stdout.
+func TestMultiClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
+	const (
+		cpContext          = "arn:aws:eks:us-east-1:000000000000:cluster/wiring-cp"
+		computeContext     = "arn:aws:eks:us-east-1:000000000000:cluster/wiring-compute"
+		computeClusterName = "wiring-compute"
+		eksRegion          = "us-east-1"
+		wiringGatewayLB    = "wiring-cp-elb.example.test"
+	)
+	t.Setenv("NGC_API_KEY", "test-key")
+	t.Setenv("SAMPLE_NGC_ORG", "test-org")
+	t.Setenv("SAMPLE_NGC_TEAM", "test-team")
+	t.Setenv("NVCF_CLI", "/usr/bin/nvcf-cli")
+	t.Setenv("REPO_ROOT", "/repo-root-placeholder")
+	t.Setenv("EKS_CONTEXT", cpContext)
+	t.Setenv("EKS_COMPUTE_CONTEXT", computeContext)
+	t.Setenv("EKS_COMPUTE_CLUSTER_NAME", computeClusterName)
+	t.Setenv("EKS_REGION", eksRegion)
+	// EKS_GATEWAY_ADDR is intentionally NOT preset: @gateway-setup's
+	// export step captures it from the canned gateway stdout below.
+
+	suite := newWiringSuite(t, newFakeRunner(map[string]harness.Result{
+		// @gateway-setup: control-plane gateway address -> EKS_GATEWAY_ADDR.
+		"kubectl --context " + cpContext + " get gateway nvcf-gateway -n envoy-gateway -o jsonpath={.status.addresses[0].value}": {ExitCode: 0, Stdout: wiringGatewayLB},
+		// control-plane helm list assertion.
+		"helm list --all-namespaces --kube-context " + cpContext + " -o json": {ExitCode: 0, Stdout: helmListAllNamespacesJSON()},
+		// control-plane api HTTPRoute hostname assertion.
+		"kubectl --context " + cpContext + " get httproute nvcf-api -n envoy-gateway -o jsonpath={.spec.hostnames[0]}": {ExitCode: 0, Stdout: "api." + wiringGatewayLB},
+		// compute nvca-operator helm list assertion.
+		"helm list -n nvca-operator --kube-context " + computeContext + " -o json": {ExitCode: 0, Stdout: helmListNVCAJSON()},
+		// @function-lifecycle: function invoke returns the echo payload.
+		"/usr/bin/nvcf-cli --config /repo-root-placeholder/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml function invoke --request-body '{\"message\":\"bdd-echo\",\"repeats\":1}' --timeout 120 --poll-duration 5": {
+			ExitCode: 0,
+			Stdout:   "Function invocation completed!\n\nResponse:\n{\"rawResponse\":\"bdd-echo\"}\n",
+		},
+	}))
+	seedStackBaseYaml(t, suite.Config.RepoRoot)
+	seedStackSecretsTemplate(t, suite.Config.RepoRoot)
+	seedNVCFCLINonlocalTemplate(t, suite.Config.RepoRoot)
+	writeEKSRegisterValues(t, suite.Config.RepoRoot, computeClusterName, eksRegion)
+
+	sc := steps.NewScenarioContext(suite)
+	featurePath := mustResolveFeaturePath(t, "multi-cluster-eks-helmfile.feature")
+	var out strings.Builder
+	status := godog.TestSuite{
+		Name: "multi-cluster-eks-helmfile-wiring",
+		ScenarioInitializer: func(ctx *godog.ScenarioContext) {
+			steps.RegisterAll(ctx, sc)
+		},
+		Options: &godog.Options{
+			Format: "pretty",
+			Paths:  []string{featurePath},
+			Strict: true,
+			Output: &out,
+		},
+	}.Run()
+	if status != 0 {
+		t.Fatalf("godog suite status = %d\n%s", status, out.String())
+	}
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "install HELMFILE_ENV=eks-bdd-multi") {
+		t.Fatal("helmfile install make target was never invoked")
+	}
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "cluster register --name") {
+		t.Fatal("nvcf-cli cluster register was never invoked")
+	}
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "install-nvca-operator") {
+		t.Fatal("install-nvca-operator make target was never invoked")
+	}
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "function invoke") {
+		t.Fatal("function invoke CLI command was never invoked")
+	}
+}
+
 // TestSingleClusterUp is the live entry point for the single-cluster
 // CLI feature. Skipped under -short.
 func TestSingleClusterUp(t *testing.T) {
@@ -667,10 +747,6 @@ func TestMultiClusterHelmfile(t *testing.T) {
 
 // TestSingleClusterEKSHelmfile is the live entry point for the
 // single-cluster EKS Helmfile feature. Skipped under -short.
-// Other EKS live entries (TestSingleClusterEKS, TestMultiClusterEKS,
-// TestMultiClusterEKSHelmfile) live on the sibling worktree branch
-// worktree-sb+bdd-eks-features; this branch is focused on getting the
-// single-cluster Helmfile path green.
 func TestSingleClusterEKSHelmfile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("live run skipped under -short")
@@ -678,10 +754,38 @@ func TestSingleClusterEKSHelmfile(t *testing.T) {
 	runLiveFeature(t, "single-cluster-eks-helmfile.feature")
 }
 
+// TestMultiClusterEKSHelmfile is the live entry point for the
+// multi-cluster EKS Helmfile feature: control-plane install on one EKS
+// cluster, then register + NVCA install on a separate compute EKS
+// cluster. Skipped under -short.
+//
+// The @function-lifecycle scenario is excluded from the live run via
+// ~@skip: cross-cluster function execution is not supported by the
+// current nvca-operator chart/agent (worker pods receive the control
+// plane's in-cluster service FQDNs, which do not resolve on a separate
+// compute cluster). The wiring test still exercises that scenario
+// against the fake runner. Drop the tag filter once worker FQDNs can be
+// externalized.
+func TestMultiClusterEKSHelmfile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("live run skipped under -short")
+	}
+	runLiveFeatureTags(t, "multi-cluster-eks-helmfile.feature", "~@skip")
+}
+
 // runLiveFeature is the shared live-run path: build CLI, register
-// every step, drive the feature, restore the ledger. The two live
-// entry points differ only in the feature file they name.
+// every step, drive the feature, restore the ledger. Most live entry
+// points differ only in the feature file they name.
 func runLiveFeature(t *testing.T, feature string) {
+	t.Helper()
+	runLiveFeatureTags(t, feature, "")
+}
+
+// runLiveFeatureTags is runLiveFeature with an optional godog tag
+// expression (for example "~@skip" to exclude a scenario from the
+// live run while leaving it in the feature file for documentation and
+// for the wiring test). An empty tags string runs every scenario.
+func runLiveFeatureTags(t *testing.T, feature, tags string) {
 	t.Helper()
 	suite, err := harness.NewSuite(t)
 	if err != nil {
@@ -702,6 +806,7 @@ func runLiveFeature(t *testing.T, feature string) {
 		Options: &godog.Options{
 			Format:        "pretty",
 			Paths:         []string{featurePath},
+			Tags:          tags,
 			Strict:        true,
 			StopOnFailure: true,
 		},
