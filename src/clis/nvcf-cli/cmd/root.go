@@ -114,17 +114,22 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
-// GetCurrentConfigName returns the name of the current config file for state management
-func GetCurrentConfigName() string {
+func activeConfigFileForState() string {
 	if cfgFile != "" {
 		return cfgFile
 	}
-	return "" // Use default state
+	return viper.ConfigFileUsed()
+}
+
+// GetCurrentConfigName returns the name of the current config file for state management
+func GetCurrentConfigName() string {
+	return activeConfigFileForState()
 }
 
 // GetStateManagerForCurrentCommand returns the appropriate state manager for the current config context
 func GetStateManagerForCurrentCommand() *state.StateManager {
-	if cfgFile == "" {
+	configFile := activeConfigFileForState()
+	if configFile == "" {
 		return state.DefaultStateManager
 	}
 
@@ -132,12 +137,12 @@ func GetStateManagerForCurrentCommand() *state.StateManager {
 	if err != nil {
 		home = ""
 	}
-	key := home + "\x00" + cfgFile
+	key := home + "\x00" + configFile
 	if configStateManager != nil && configStateManagerKey == key {
 		return configStateManager
 	}
 
-	configStateManager = state.GetStateManagerForConfig(cfgFile)
+	configStateManager = state.GetStateManagerForConfig(configFile)
 	configStateManagerKey = key
 	return configStateManager
 }
@@ -151,11 +156,12 @@ func LoadStateForCurrentCommand() error {
 // SaveStateForCurrentCommand saves state using the current config context
 func SaveStateForCurrentCommand() error {
 	sm := GetStateManagerForCurrentCommand()
+	configFile := activeConfigFileForState()
 
-	// Update config file path in state when using --config
-	if cfgFile != "" {
+	// Update config file path in state when a config file is active.
+	if configFile != "" {
 		currentState := sm.GetState()
-		sm.SetConfig(cfgFile, currentState.KubeconfigPath, currentState.ClusterMode)
+		sm.SetConfig(configFile, currentState.KubeconfigPath, currentState.ClusterMode)
 	}
 
 	return sm.Save()
