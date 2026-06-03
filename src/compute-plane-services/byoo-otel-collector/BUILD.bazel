@@ -51,8 +51,9 @@ gazelle(
 # in //otelcol:BUILD.bazel. Both images compose via rules_pkg.pkg_tar
 # so the genrule output flows through unchanged.
 #
-# Image push targets (kaze / ncp_dev) live under //nvidia-internal so
-# the NGC registry coordinates stay off the OSS mirror.
+# Release publishing is split: source CI builds these public image
+# indexes and emits release-manifest.json; nvcf-internal owns NVCR
+# destination config and promotion.
 # ============================================================================
 
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 apiVersion: v2
-name: reval
+name: helm-reval
 description: Helm chart for the NVCF Helm ReVal HTTP service
 type: application
 version: 0.2.0

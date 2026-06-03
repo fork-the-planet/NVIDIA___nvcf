@@ -397,37 +397,6 @@
                                     }
                                 }
                             }
-                        },
-                        "rolloverService": {
-                            "type": "object",
-                            "properties": {
-                                "stage": {
-                                    "type": "object",
-                                    "properties": {
-                                        "tokenURL": {
-                                            "type": "string",
-                                            "default": ""
-                                        },
-                                        "publicKeysetEndpoint": {
-                                            "type": "string",
-                                            "default": ""
-                                        }
-                                    }
-                                },
-                                "prod": {
-                                    "type": "object",
-                                    "properties": {
-                                        "tokenURL": {
-                                            "type": "string",
-                                            "default": ""
-                                        },
-                                        "publicKeysetEndpoint": {
-                                            "type": "string",
-                                            "default": ""
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -702,25 +671,25 @@
                     "description": "URL of the ICMS service for self-managed clusters. Override with the endpoint generated during cluster registration.",
                     "default": "http://icms.example.invalid:8080"
                 },
-                "revalServiceURL": {
-                    "type": "string",
-                    "description": "URL of the ReVal service for self-managed clusters. Override with the endpoint generated during cluster registration.",
-                    "default": "http://reval.example.invalid:8080"
-                },
-                "natsURL": {
-                    "type": "string",
-                    "description": "URL of the NATS service for self-managed clusters. Override with the endpoint generated during cluster registration.",
-                    "default": "nats://nats.example.invalid:4222"
-                },
                 "icmsServiceHostHeaderOverride": {
                     "type": "string",
                     "description": "Optional Host header override for selfManaged.icmsServiceURL.",
                     "default": ""
                 },
+                "revalServiceURL": {
+                    "type": "string",
+                    "description": "URL of the ReVal service for self-managed clusters. Override with the endpoint generated during cluster registration.",
+                    "default": "http://reval.example.invalid:8080"
+                },
                 "revalServiceHostHeaderOverride": {
                     "type": "string",
                     "description": "Optional Host header override for selfManaged.revalServiceURL.",
                     "default": ""
+                },
+                "natsURL": {
+                    "type": "string",
+                    "description": "URL of the NATS service for self-managed clusters. Override with the endpoint generated during cluster registration.",
+                    "default": "nats://nats.example.invalid:4222"
                 },
                 "natsHostOverride": {
                     "type": "string",

@@ -14,7 +14,7 @@
 # undefined-timeline work; the genrule is a pragmatic alternative that
 # loses Bazel's per-package dep tracking but keeps the binary inside
 # Bazel's output graph so it can flow into //:nvcf-otel-collector-image
-# and //nvidia-internal:image_push_* targets.
+# and the source-side release manifest job.
 #
 # Cache invalidation contract: Bazel rebuilds the genrule when any of
 # the globbed inputs (otelcol/**/*.go, go.mod, go.sum) change. Pinned
@@ -33,9 +33,8 @@
 # context where it is not visible (Datadog OTLP attribute mapping and
 # friends). Fixing the cascade is undefined-timeline work. Until that
 # lands, this genrule keeps the binary inside Bazel's output graph so
-# it can flow into //:nvcf-otel-collector-image and into the
-# //nvidia-internal:image_push_* lanes that ship via the umbrella's
-# auto-versioned release pipeline.
+# it can flow into //:nvcf-otel-collector-image and the source-side
+# release manifest job.
 #
 # We tried `tools = ["@rules_go//go"]` first, but rules_go explicitly
 # refuses to expose its bundled Go SDK as a genrule tool ("//go is only

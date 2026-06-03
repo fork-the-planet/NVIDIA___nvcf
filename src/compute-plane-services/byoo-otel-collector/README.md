@@ -24,13 +24,8 @@ bazel build //:nvcf-otel-collector-image
 # Run unit tests with auto-retry on timing-sensitive failures.
 bazel test //cmd/byoo-otel-collector/... //internal/... --flaky_test_attempts=3
 
-# Push to internal NGC registries (CI runs this on default-branch and
-# tag pipelines). DOCKER_CONFIG must point at a docker config.json
-# containing the right NGC token for each target.
-bazel run //nvidia-internal:image_push_byoo_nv_cf_prd
-bazel run //nvidia-internal:image_push_byoo_ncp_dev
-bazel run //nvidia-internal:image_push_nvcf_otel_collector_nv_cf_prd
-bazel run //nvidia-internal:image_push_nvcf_otel_collector_ncp_dev
+# Release publishing is split: source CI stages these image indexes and
+# emits release-manifest.json; nvcf-internal owns NVCR promotion.
 ```
 
 ### Regenerating the collector source tree

@@ -172,13 +172,6 @@ agent:
       prod:
         tokenURL: ""
         publicKeysetEndpoint: ""
-    rolloverService:
-      stage:
-        tokenURL: ""
-        publicKeysetEndpoint: ""
-      prod:
-        tokenURL: ""
-        publicKeysetEndpoint: ""
   resources:
     limits:
       cpu: 1000m
