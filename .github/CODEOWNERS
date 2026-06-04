@@ -62,5 +62,6 @@
 /tools/ncp-local-cluster/                               @NVIDIA/nvcf-dev
 
 # Documentation. Listed last so *.md takes precedence over service rules above.
-/docs/                                                  @NVIDIA/nvcf-admin
-*.md                                                    @NVIDIA/nvcf-admin
+/docs/                                                  @NVIDIA/nvcf-admin @pdmack
+/fern/                                                  @NVIDIA/nvcf-admin @pdmack
+*.md                                                    @NVIDIA/nvcf-admin @pdmack

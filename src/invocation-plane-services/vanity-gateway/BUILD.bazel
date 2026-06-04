@@ -31,6 +31,16 @@ go_oci_image(
     visibility = ["//visibility:public"],
 )
 
+# Regression guard for the rules_pkg default-0644 startup-failure pattern: if
+# rules_pkg ever stops applying mode 0755 to the entrypoint, this test
+# catches it before the image is pushed.
+sh_test(
+    name = "image_entrypoint_mode_test",
+    srcs = ["image_entrypoint_mode_test.sh"],
+    args = ["$(location :image.tar)"],
+    data = [":image.tar"],
+)
+
 go_library(
     name = "ai-api-gateway-service_lib",
     srcs = [
