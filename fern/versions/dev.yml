@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 navigation:
+  # No-op docs preview trigger for Fern bot alias validation.
   - page: Overview
     path: ../../docs/user/index.md
   - page: Quickstart
