@@ -16,8 +16,8 @@
 /deploy/helm/                                           @jmcnamee
 
 # Cassandra and OpenBao infrastructure charts.
-/deploy/helm/cassandra/                                 @mikeyrcamp @nvjmcnamee @kferris-nvidia @along-2017 @vrv3814 @gausharma @bvernon-nv
-/deploy/helm/openbao/                                   @mikeyrcamp @nvjmcnamee @kferris-nvidia @along-2017 @vrv3814 @gausharma @bvernon-nv
+/deploy/helm/cassandra/                                 @mikeyrcamp @nvjmcnamee @kferris-nvidia @along-2017 @vrv3814 @bvernon-nv
+/deploy/helm/openbao/                                   @mikeyrcamp @nvjmcnamee @kferris-nvidia @along-2017 @vrv3814 @gsharma-nvidia @bvernon-nv
 
 # Control-plane application charts.
 /deploy/helm/admin-token-issuer-proxy/                  @jmcnamee @NVIDIA/nvcf-control-plane-dev
@@ -30,8 +30,8 @@
 /deploy/stacks/                                         @jmcnamee
 
 # Cassandra and OpenBao migrations.
-/migrations/cassandra/                                  @mikeyrcamp @nvjmcnamee @kferris-nvidia @along-2017 @vrv3814 @gausharma @bvernon-nv
-/migrations/openbao/                                    @mikeyrcamp @nvjmcnamee @kferris-nvidia @along-2017 @vrv3814 @gausharma @bvernon-nv
+/migrations/cassandra/                                  @mikeyrcamp @nvjmcnamee @kferris-nvidia @along-2017 @vrv3814 @bvernon-nv
+/migrations/openbao/                                    @mikeyrcamp @nvjmcnamee @kferris-nvidia @along-2017 @vrv3814 @gsharma-nvidia @bvernon-nv
 
 # Compute-plane service: nvca agent and operator (upstream: nvca).
 /src/compute-plane-services/nvca/                       @NVIDIA/nvca-dev
