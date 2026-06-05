@@ -26,23 +26,12 @@ RUN apk add --no-cache curl tar && \
 
 FROM alpine:${ALPINE_VERSION} AS kubectl-downloader
 
-ARG TARGETARCH
-ARG KUBECTL_VERSION=v1.31.0
+ARG KUBECTL_APK_VERSION=1.33.1-r5
 
-# kubectl publishes checksum, signature, and certificate sidecars.
-RUN apk add --no-cache curl cosign && \
-    KUBECTL_BASE_URL="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}" && \
+# apk verifies the signed repository index and package checksums.
+RUN apk add --no-cache "kubectl=${KUBECTL_APK_VERSION}" && \
     mkdir -p /out && \
-    curl -fsSLo /out/kubectl "${KUBECTL_BASE_URL}/kubectl" && \
-    curl -fsSLo /tmp/kubectl.sha256 "${KUBECTL_BASE_URL}/kubectl.sha256" && \
-    printf '%s  %s\n' "$(cat /tmp/kubectl.sha256)" /out/kubectl | sha256sum -c - && \
-    curl -fsSLo /tmp/kubectl.sig "${KUBECTL_BASE_URL}/kubectl.sig" && \
-    curl -fsSLo /tmp/kubectl.cert "${KUBECTL_BASE_URL}/kubectl.cert" && \
-    cosign verify-blob /out/kubectl \
-        --signature /tmp/kubectl.sig \
-        --certificate /tmp/kubectl.cert \
-        --certificate-identity krel-staging@k8s-releng-prod.iam.gserviceaccount.com \
-        --certificate-oidc-issuer https://accounts.google.com && \
+    cp /usr/bin/kubectl /out/kubectl && \
     chmod +x /out/kubectl
 
 FROM openbao/openbao:2.5.4
