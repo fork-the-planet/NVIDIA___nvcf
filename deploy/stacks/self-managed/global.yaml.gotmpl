@@ -266,6 +266,7 @@ natsAuthCalloutService:
 {{- $llmRouterClientImageDefault := printf "%s/%s/stargate-client:0.3.0" .Values.global.image.registry .Values.global.image.repository }}
 {{- $llmRouterClientImage := dig "NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE" $llmRouterClientImageDefault $apiEnvOverrides }}
 {{- $essWorkerBaseURL := dig "global" "workerEndpoints" "essServiceURL" "" .Values }}
+{{- $invocationWorkerBaseURL := dig "global" "workerEndpoints" "invocationServiceURL" "" .Values }}
 api:
   fullnameOverride: nvcf-api
   {{- if .Values.global.imagePullSecrets }}
@@ -372,6 +373,9 @@ invocation:
     {{- if .Values.rateLimiter.enabled }}
     RATE_LIMIT_ENABLED: "true"
     RATE_LIMIT_ADDRESS: "http://ratelimiter.nvcf.svc.cluster.local:7777"
+    {{- end }}
+    {{- with $invocationWorkerBaseURL }}
+    WORKER_STREAM_PROPERTIES__SELF_ADDRESS: {{ . | quote }}
     {{- end }}
   
 nvctApi:

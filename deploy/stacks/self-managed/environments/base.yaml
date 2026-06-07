@@ -43,6 +43,7 @@ global:
   # environment when worker clusters need externally reachable endpoints.
   workerEndpoints:
     essServiceURL: ""
+    invocationServiceURL: ""
 
   nodeSelectors:
     enabled: false
