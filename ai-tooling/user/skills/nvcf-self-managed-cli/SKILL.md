@@ -109,6 +109,8 @@ nvcf-cli self-hosted uninstall --no-apply --compute-plane --cluster-name=ncp-loc
 
 Use `functionType: "LLM"` for OpenAI-compatible models served through the self-managed LLM Gateway. LLM functions must define at least one `models[]` entry with `name` and `llmConfig.uris`; the supported upstream paths are `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings`.
 
+LLM function type is independent of workload packaging. For a Helm-chart backed LLM function, keep `functionType: "LLM"` and `models[].llmConfig`, then set `helmChart` and `helmChartServiceName` in the create request. `helmChartServiceName` must match the Kubernetes Service exposed by the chart, and `inferencePort` must be that Service port.
+
 Invocation uses the LLM route, for example `https://llm.invocation.<domain>/v1/chat/completions`. The OpenAI `model` value must be `<function-id>/<model-name>`; the function ID is the routing key and the model name is forwarded upstream.
 
 Update mutable per-model routing settings with `nvcf-cli function update --llm-model-update='name=<model>,routingMethod=<round_robin|power_of_two|random>,tokenRateLimit=<limit>'`, or put the same fields under `modelUpdates[].llmConfig` in an update JSON file. `tokenRateLimit` supports positive integer limits for `S`, `M`, `H`, `D`, and `W`; use JSON input for combined limits such as `1000-S,5000-M,100000-H,500000-D,1000000-W`. Do not include `uris` in model updates.
@@ -207,6 +209,8 @@ nvcf-cli cluster register …                   # register cluster
 nvcf-cli api-key generate --description=…     # mint API key for invoke
 nvcf-cli function create --input-file=…       # create function
 nvcf-cli function create --function-type=LLM --llm-model=<spec>  # create LLM function metadata
+nvcf-cli function create --name=llm-helm --inference-url=/ --inference-port=8000 \
+  --function-type=LLM --helm-chart=<chart> --helm-chart-service=<service> --llm-model=<spec>
 nvcf-cli function update --llm-model-update=<spec>  # update LLM routing/token limits
 nvcf-cli function deploy create --input-file=…
 nvcf-cli function invoke --input-file=…

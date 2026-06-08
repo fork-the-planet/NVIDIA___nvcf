@@ -83,6 +83,72 @@ nvcf-cli function update \
 Use this for mutable `routingMethod` and `tokenRateLimit`; create-time `uris` stay in `models[].llmConfig`.
 `tokenRateLimit` supports positive integer token limits for `S`, `M`, `H`, `D`, and `W`. Use `1000-S` for a single inline CLI limit. Use input JSON for combined limits, such as `1000-S,5000-M,100000-H,500000-D,1000000-W`, because inline model specs use commas as field separators.
 
+### Helm chart LLM function variant
+
+LLM function type is independent of workload packaging. For a Helm-chart backed LLM function, keep the same `functionType` and `models[].llmConfig` fields, then set `helmChart` and `helmChartServiceName`. The service name must match a Kubernetes Service rendered by the chart, and `inferencePort` must be that Service port.
+
+```json
+{
+  "name": "llm-helm-test",
+  "inferenceUrl": "/",
+  "inferencePort": 8000,
+  "functionType": "LLM",
+  "health": {
+    "protocol": "HTTP",
+    "uri": "/health",
+    "port": 8000,
+    "timeout": "PT30S",
+    "expectedStatusCode": 200
+  },
+  "helmChart": "https://helm.ngc.nvidia.com/example/team/charts/openai-compatible-0.1.0.tgz",
+  "helmChartServiceName": "openai-compatible",
+  "models": [
+    {
+      "name": "dummy-model",
+      "llmConfig": {
+        "uris": ["/v1/chat/completions", "/v1/responses", "/v1/embeddings"],
+        "routingMethod": "round_robin",
+        "tokenRateLimit": "1000-S"
+      }
+    }
+  ]
+}
+```
+
+Equivalent CLI flag form:
+
+```sh
+nvcf-cli function create \
+  --name=llm-helm-test \
+  --inference-url=/ \
+  --inference-port=8000 \
+  --function-type=LLM \
+  --helm-chart=https://helm.ngc.nvidia.com/example/team/charts/openai-compatible-0.1.0.tgz \
+  --helm-chart-service=openai-compatible \
+  --llm-model='name=dummy-model,uris=/v1/chat/completions|/v1/responses|/v1/embeddings,routingMethod=round_robin,tokenRateLimit=1000-S'
+```
+
+Deploy is unchanged. Put chart-specific values under `deploymentSpecifications[].configuration` only when the chart needs value overrides:
+
+```json
+{
+  "functionId": "<fn_id>",
+  "versionId": "<ver_id>",
+  "deploymentSpecifications": [{
+    "gpu": "H100",
+    "instanceType": "NCP.GPU.H100_1x",
+    "minInstances": 1,
+    "maxInstances": 1,
+    "maxRequestConcurrency": 10,
+    "configuration": {
+      "serving": {
+        "tensorParallelSize": 1
+      }
+    }
+  }]
+}
+```
+
 LLM Gateway routes requests by the OpenAI `model` value. Use `<function-id>/<model-name>`: the function ID selects the NVCF function, and the model name is forwarded to the upstream container through `stargate-client`.
 
 Supported LLM paths:
