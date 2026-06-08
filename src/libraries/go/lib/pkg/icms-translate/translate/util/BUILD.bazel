@@ -36,10 +36,16 @@ go_library(
 
 go_test(
     name = "util_test",
-    srcs = ["iso8601_duration_test.go"],
+    srcs = [
+        "container_test.go",
+        "encode_test.go",
+        "iso8601_duration_test.go",
+    ],
     embed = [":util"],
     deps = [
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
     ],
 )

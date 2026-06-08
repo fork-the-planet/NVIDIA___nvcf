@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "task",
@@ -33,6 +33,23 @@ go_library(
         "//src/libraries/go/lib/pkg/otelconfig/backendconfig",
         "@com_github_google_shlex//:shlex",
         "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+    ],
+)
+
+go_test(
+    name = "task_test",
+    srcs = [
+        "translate_all_test.go",
+        "types_test.go",
+    ],
+    embed = [":task"],
+    deps = [
+        "//src/libraries/go/lib/pkg/icms-translate/translate/common",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/resource",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
     ],
 )

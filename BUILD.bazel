@@ -15,6 +15,11 @@
 
 load("@gazelle//:def.bzl", "gazelle")
 
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//src/libraries/go/lib:__pkg__"],
+)
+
 # Phase 1 scope: only the two native Go subtrees are managed by Bazel.
 # Everything else is excluded so Gazelle does not descend into vendored
 # directories of synthetic-import subtrees (whose source is owned upstream

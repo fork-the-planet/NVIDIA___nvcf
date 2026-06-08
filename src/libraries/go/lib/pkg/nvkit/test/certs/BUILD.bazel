@@ -21,7 +21,10 @@ filegroup(
     name = "certs",
     srcs = glob(
         ["**"],
-        exclude = ["README.md", "BUILD.bazel"],
+        exclude = [
+            "README.md",
+            "BUILD.bazel",
+        ],
     ),
     visibility = ["//src/libraries/go/lib:__subpackages__"],
 )

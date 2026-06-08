@@ -51,7 +51,7 @@ go_test(
         "tokenstore_test.go",
     ],
     data = glob(["testdata/**"]) + [
-        "//src/libraries/go/lib/pkg/nvkit/test/certs:certs",
+        "//src/libraries/go/lib/pkg/nvkit/test/certs",
     ],
     embed = [":auth"],
     deps = [

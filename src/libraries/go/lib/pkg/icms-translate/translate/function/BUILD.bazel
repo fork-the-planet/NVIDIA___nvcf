@@ -53,6 +53,7 @@ go_test(
         "llm_test.go",
         "lls_test.go",
         "translate_tolerations_test.go",
+        "types_test.go",
     ],
     embed = [":function"],
     deps = [
