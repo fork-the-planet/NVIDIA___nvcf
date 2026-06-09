@@ -150,10 +150,11 @@ grpc_client.ModelInfer.with_call(next_request, metadata=metadata)
 ### What happens when resumption fails
 
 If the session has expired or the worker is no longer available, the proxy
-returns a 404 (NotFound) error with the message "no existing session found" and
-clears the `nvcf-request-id` cookie. This error does not indicate a
-control-plane problem. The client should discard the stale request ID and
-reconnect without it to start a new session.
+returns gRPC NotFound (`grpc-status: 5`) with the message "no existing session
+found" and clears the `nvcf-request-id` cookie. The HTTP status remains 200 for
+gRPC responses. This error does not indicate a control-plane problem. The
+client should discard the stale request ID and reconnect without it to start a
+new session.
 
 See [Troubleshooting](./troubleshooting.md#grpc-session-resumption-fails)
 for diagnosis steps.
