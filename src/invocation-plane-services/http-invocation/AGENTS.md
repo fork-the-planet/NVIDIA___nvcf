@@ -49,5 +49,5 @@ tokens out of committed config and examples.
   `rules_oci`, and the distroless base image.
 - OSS mirror builds may need a public replacement for the `nvcr.io` distroless
   base image before `bazel build //...` works without NGC credentials.
-- Changes to request/response API shape may need follow-up in
-  `src/clis/nvcf-cli`.
+- Changes to request/response API shape may need follow-up changes in
+  `src/clis/nvcf-cli` so the CLI keeps parity with the service.

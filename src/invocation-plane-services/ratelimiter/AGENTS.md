@@ -33,4 +33,4 @@ live in `tools/ci/subproject-validations.yaml`.
 - `protoc` is required for proto regeneration.
 - Package tests under `ratelimiter/cmd` bind fixed local ports such as
   `127.0.0.1:3320`; address conflicts are usually environmental.
-- New hand-authored Go files should use the existing SPDX Apache-2.0 header.
+- New hand-authored Go files must use the existing SPDX Apache-2.0 header.
