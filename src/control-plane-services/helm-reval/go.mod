@@ -3,7 +3,7 @@ module github.com/NVIDIA/nvcf/src/control-plane-services/helm-reval
 go 1.25.1
 
 require (
-	github.com/NVIDIA/nvcf/src/libraries/go/lib v0.0.0-20260514233945-67568a2d4f00
+	github.com/NVIDIA/nvcf/src/libraries/go/lib v0.0.0-20260609153951-84087770a569
 	github.com/felixge/httpsnoop v1.0.4
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/go-chi/render v1.0.3
