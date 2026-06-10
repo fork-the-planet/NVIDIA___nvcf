@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "service",
+    srcs = ["service.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/worker-llm-credentials/service",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//configs",
+        "//internal/worker",
+        "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/nvkit/config",
+        "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/nvkit/tracing",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//types",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//utils",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
+        "@org_uber_go_zap//:zap",
+    ],
+)

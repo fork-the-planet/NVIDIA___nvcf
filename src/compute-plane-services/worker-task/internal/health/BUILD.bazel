@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "health",
+    srcs = ["health.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/worker-task/internal/health",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//nvct",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//proto/nvct",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//utils",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":health",
+    visibility = ["//:__subpackages__"],
+)

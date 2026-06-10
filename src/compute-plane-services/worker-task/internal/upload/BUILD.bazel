@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "upload",
+    srcs = [
+        "mock_uploader.go",
+        "upload.go",
+    ],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/worker-task/internal/upload",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/metrics",
+        "//internal/secrets",
+        "//pkg/ngc",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//utils",
+        "@com_github_samber_lo//:lo",
+        "@com_github_valyala_bytebufferpool//:bytebufferpool",
+        "@org_golang_x_sync//errgroup",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":upload",
+    visibility = ["//:__subpackages__"],
+)

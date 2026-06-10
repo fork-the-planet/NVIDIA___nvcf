@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "worker",
+    srcs = ["worker.go"],
+    importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/worker-task/internal/worker",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//configs",
+        "//internal/health",
+        "//internal/progress",
+        "//internal/secrets",
+        "//internal/types",
+        "//internal/upload",
+        "@com_github_google_uuid//:uuid",
+        "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/nvkit/logs",
+        "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/nvkit/servers",
+        "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/nvkit/tracing",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//metering",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//metrics",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//nvct",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//proto/nvct",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//types",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//utils",
+        "@org_golang_google_grpc//:grpc",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":worker",
+    visibility = ["//:__subpackages__"],
+)
