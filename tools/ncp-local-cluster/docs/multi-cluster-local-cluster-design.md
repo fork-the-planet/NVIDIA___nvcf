@@ -41,7 +41,7 @@ clusters can run at the same time.
 | Compute aliases for SIS/ReVal/NATS | no | no | yes |
 | CSI SMB driver | yes | no | yes |
 | fake GPU operator | yes | no | yes |
-| private-image sample validation | yes | no | yes |
+| sample workload validation | yes | yes | yes |
 
 ## Endpoint Model
 

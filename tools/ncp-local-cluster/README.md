@@ -61,7 +61,7 @@ Addon placement:
 | nginx route validation | yes | no |
 | CSI SMB driver | no | yes |
 | fake GPU operator | no | yes |
-| private-image sample validation | no | yes |
+| sample workload validation | yes | yes |
 
 The compute-plane clusters get local aliases for worker-facing control-plane
 service DNS names: API, API gRPC, ESS, invocation, SIS, ReVal, and NATS. Those

@@ -19,6 +19,15 @@
 CLUSTER_NAME := ncp-local
 K3D_CONFIG_FILE := k3d-config.yaml
 
+# Optional local overrides from tools/ncp-local-cluster/.env.
+# Command-line variables (make VAR=value) still win over this file;
+# shell-environment variables do NOT — use command-line overrides or remove
+# the .env entry to unset a value.
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
 # === Multi-Cluster Configuration ===
 CONTROL_PLANE_CLUSTER_NAME ?= ncp-local-cp
 CONTROL_PLANE_CONFIG_FILE ?= k3d-config-control-plane.yaml
@@ -69,13 +78,8 @@ KSM_NAMESPACE := observability
 KSM_RELEASE := kube-state-metrics
 KSM_CHART := prometheus-community/kube-state-metrics
 
-# === Credential provider sample image ===
-SAMPLE_IMAGE_REGISTRY ?= nvcr.io
-SAMPLE_NGC_ORG ?= ngc-org
-SAMPLE_NGC_TEAM ?= ngc-team
-SAMPLE_IMAGE_NAME ?= alpine-k8s
-SAMPLE_IMAGE_TAG ?= 1.30.12
-SAMPLE_IMAGE ?=
+# === Sample workload image (public, multi-arch) ===
+SAMPLE_IMAGE ?= registry.k8s.io/e2e-test-images/agnhost:2.53
 
 # === Tool Check Macro ===
 # Usage: $(call require,<tool>,<install hint>)
@@ -317,16 +321,24 @@ check-gateway-api:
 
 # --- Application & Provider Deployment ---
 deploy-sample: # Depends on the cluster being up
-	@echo "========== CREDENTIAL PROVIDER VALIDATION =========="
+	@echo "========== SAMPLE WORKLOAD DEPLOYMENT =========="
 	@echo "Building and deploying sample application from ./sample directory..."
 	@SAMPLE_IMAGE="$(SAMPLE_IMAGE)" \
-		SAMPLE_IMAGE_REGISTRY="$(SAMPLE_IMAGE_REGISTRY)" \
-		SAMPLE_NGC_ORG="$(SAMPLE_NGC_ORG)" \
-		SAMPLE_NGC_TEAM="$(SAMPLE_NGC_TEAM)" \
-		SAMPLE_IMAGE_NAME="$(SAMPLE_IMAGE_NAME)" \
-		SAMPLE_IMAGE_TAG="$(SAMPLE_IMAGE_TAG)" \
 		bash ./scripts/render-sample.sh | kubectl apply -f -
 	@echo "Sample application deployment complete."
+
+validate-deployment: deploy-sample wait-for-deployment ## Deploy public sample and validate the cluster runs it
+	@echo "OK Sample deployment is ready"
+	@echo ""
+	@echo "OK The sample pod is serving HTTP using $(SAMPLE_IMAGE)"
+	@echo "OK This confirms that:"
+	@echo "   - The cluster can schedule and run a multi-arch sample workload"
+	@echo "   - Readiness and liveness probes against the HTTP server are passing"
+	@echo ""
+	@echo "INFO Deployment Details:"
+	@kubectl get deployment/sample -n sample -o wide
+	@echo ""
+	@kubectl get pods -l app=sample -n sample -o wide
 
 deploy-nginx:
 	@echo "Building and deploying nginx application from ./apps/nginx directory..."
@@ -368,20 +380,6 @@ wait-for-deployment: ## Wait for sample deployment to be ready (with polling loo
 		echo "ERROR Timeout waiting for deployment to be ready"; \
 		exit 1; \
 	fi
-
-validate-deployment: deploy-sample wait-for-deployment ## Deploy sample and validate credential provider is working
-	@echo "OK Deployment is ready and credential provider configuration is validated"
-	@echo ""
-	@echo "OK The sample pod successfully pulled the image from nvcr.io using the credential provider"
-	@echo "OK This confirms that:"
-	@echo "   - The credential provider binary is correctly mounted and executable"
-	@echo "   - The kubelet can communicate with the credential provider"
-	@echo "   - Authentication to NVIDIA Container Registry is working"
-	@echo ""
-	@echo "INFO Deployment Details:"
-	@kubectl get deployment/sample -n sample -o wide
-	@echo ""
-	@kubectl get pods -l app=sample -n sample -o wide
 
 wait-for-gateway: ## Wait for Gateway to be ready and HTTPRoute to be attached
 	@echo "Waiting for Gateway to be ready..."

@@ -280,39 +280,29 @@ for unsupported_alias in "api.${custom_domain}" "api-keys.${custom_domain}" "ess
   fi
 done
 
-if ! grep -q 'SAMPLE_NGC_ORG' "$ROOT_DIR/Makefile"; then
-  fail "Makefile must expose SAMPLE_NGC_ORG for sample image configuration"
+if ! grep -q 'SAMPLE_IMAGE' "$ROOT_DIR/Makefile"; then
+  fail "Makefile must expose SAMPLE_IMAGE for sample image configuration"
 fi
 if ! grep -q 'scripts/render-sample.sh' "$ROOT_DIR/Makefile"; then
   fail "deploy-sample must render the sample image from Makefile inputs"
 fi
 
-tmp_output="$(mktemp)"
-if SAMPLE_IMAGE= SAMPLE_NGC_ORG=ngc-org SAMPLE_NGC_TEAM=ngc-team "$ROOT_DIR/scripts/render-sample.sh" --dry-run >"$tmp_output" 2>&1; then
-  cat "$tmp_output" >&2
-  rm -f "$tmp_output"
-  fail "sample render must fail when ngc-org/ngc-team placeholders are not replaced"
+default_sample_yaml="$(SAMPLE_IMAGE=registry.k8s.io/e2e-test-images/agnhost:2.53 "$ROOT_DIR/scripts/render-sample.sh" --dry-run)"
+if ! grep -q 'image: registry.k8s.io/e2e-test-images/agnhost:2.53' <<<"$default_sample_yaml"; then
+  fail "sample render must use the default agnhost image"
 fi
-if grep -q 'Internal example' "$tmp_output"; then
-  cat "$tmp_output" >&2
-  rm -f "$tmp_output"
-  fail "sample render placeholder error must not include internal examples"
-fi
-if ! grep -q 'SAMPLE_NGC_ORG=my-org SAMPLE_NGC_TEAM=my-team' "$tmp_output"; then
-  cat "$tmp_output" >&2
-  rm -f "$tmp_output"
-  fail "sample render placeholder error must include a generic example"
-fi
-rm -f "$tmp_output"
-
-sample_yaml="$(SAMPLE_NGC_ORG=my-org SAMPLE_NGC_TEAM=my-team "$ROOT_DIR/scripts/render-sample.sh" --dry-run)"
-if ! grep -q 'image: nvcr.io/my-org/my-team/alpine-k8s:1.30.12' <<<"$sample_yaml"; then
-  fail "sample render must use SAMPLE_NGC_ORG and SAMPLE_NGC_TEAM overrides"
+if ! grep -q 'netexec' <<<"$default_sample_yaml"; then
+  fail "default sample render must run agnhost netexec"
 fi
 
-custom_sample_yaml="$(SAMPLE_IMAGE=registry.example.com/custom/team/image SAMPLE_IMAGE_TAG=v1 "$ROOT_DIR/scripts/render-sample.sh" --dry-run)"
+custom_sample_yaml="$(SAMPLE_IMAGE=registry.example.com/custom/team/image:v1 "$ROOT_DIR/scripts/render-sample.sh" --dry-run)"
 if ! grep -q 'image: registry.example.com/custom/team/image:v1' <<<"$custom_sample_yaml"; then
-  fail "sample render must allow SAMPLE_IMAGE to override the NGC path"
+  fail "sample render must allow SAMPLE_IMAGE overrides"
+fi
+
+digest_sample_yaml="$(SAMPLE_IMAGE=registry.example.com/custom/team/image@sha256:deadbeef "$ROOT_DIR/scripts/render-sample.sh" --dry-run)"
+if ! grep -q 'image: registry.example.com/custom/team/image@sha256:deadbeef' <<<"$digest_sample_yaml"; then
+  fail "sample render must preserve digest-pinned SAMPLE_IMAGE references"
 fi
 
 echo "PASS: multicluster Makefile dry tests"
