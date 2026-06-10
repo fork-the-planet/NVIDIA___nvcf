@@ -558,6 +558,67 @@ async fn test_rate_limited_sync_check() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn test_rate_limit_request_carries_client_auth_subject() -> anyhow::Result<()> {
+    let (_localstack, _nats, _mock_nvcf_api, mut config) = fixtures().await;
+
+    let captured_subject = Arc::new(Mutex::new(None::<String>));
+    let mock_rate_limit = rate_limit_mock::RateLimitMock {
+        callback: {
+            let captured_subject = captured_subject.clone();
+            Box::new(move |req| {
+                *captured_subject.lock().expect("lock poisoned") =
+                    Some(req.client_auth_subject.clone());
+                Ok(Response::new(RateLimitResponse {
+                    result: RateLimitResult::Allow.into(),
+                }))
+            })
+        },
+    }
+    .into_server()
+    .await;
+
+    config.rate_limit_enabled = true;
+    config.rate_limit_address = format!("http://{}", mock_rate_limit.address());
+    let mut app = app(config.clone(), None).await?;
+    let app = ServiceExt::<http::Request<Body>>::ready(&mut app).await?;
+
+    let _worker = Worker::new(
+        config.nats_properties.clone(),
+        WorkerProperties {
+            function_id: FUNCTION_ID_2_RATELIMIT_SYNC,
+            function_version_id: VERSION_ID_3,
+            instance_id: INSTANCE_ID.into(),
+        },
+        Box::new(DefaultWorkHandler {}),
+        PublishMode::Attach(app.clone()),
+    )
+    .await?
+    .into_background_task();
+
+    let request = axum::http::Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/v2/nvcf/pexec/functions/{FUNCTION_ID_2_RATELIMIT_SYNC}/versions/{VERSION_ID_3}"
+        ))
+        .header(AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::from("a body"))?;
+    let response = app.call(request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The nvcf api mock returns "test-subject" as client_auth_subject; the
+    // invocation service must forward that into the RateLimitRequest so the
+    // ratelimiter can apply per-user (caller-tier) limits when configured.
+    let captured = captured_subject
+        .lock()
+        .expect("lock poisoned")
+        .clone()
+        .expect("ratelimiter mock should have received a request");
+    assert_eq!(captured, "test-subject");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_drop_mid_request() -> anyhow::Result<()> {
     let (_localstack, _nats, _mock_nvcf_api, config) = fixtures().await;
 

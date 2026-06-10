@@ -253,7 +253,13 @@ pub async fn pexec(
 
     if has_rate_limit
         && rate_limit_service
-            .check_rate_limit(nca_id.clone(), function_id, function_version_id, sync_check)
+            .check_rate_limit(
+                allowed_functions.authed_client_subject.clone(),
+                nca_id.clone(),
+                function_id,
+                function_version_id,
+                sync_check,
+            )
             .await
             == LimitResult::Limited
     {
