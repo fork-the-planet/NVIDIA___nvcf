@@ -52,7 +52,8 @@ CREATE TYPE IF NOT EXISTS nvcf_api.ratelimit_udt_v2 (
     rate             TEXT,
     exempted_nca_ids FROZEN<SET<TEXT>>,
     per_nca_id_rate  FROZEN<MAP<TEXT, TEXT>>,
-    sync_check       BOOLEAN
+    sync_check       BOOLEAN,
+    per_user_rate    TEXT
 );
 
 CREATE TYPE IF NOT EXISTS nvcf_api.telemetries_udt (
