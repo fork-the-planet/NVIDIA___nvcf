@@ -70,7 +70,7 @@ The following control-plane services expose metrics and logs for monitoring:
 - **NVCF API**: Main API for function management and invocation
 - **Invocation Service**: Handles function invocation requests
 - **SPOT Instance Service (SIS)**: Manages worker pod and cluster state
-- **State Metrics Service**: *(Available in GA)* Aggregates and exports NVCF-specific metrics
+- **State Metrics Service**: Aggregates and exports NVCF-specific metrics
 
 **Supporting Services:**
 
@@ -161,6 +161,44 @@ spec:
 
 Or configure Prometheus scrape targets manually in your prometheus.yml.
 
+#### Application-level NVCF stats
+
+The State Metrics Service exposes per-function signals you can query in
+Prometheus. The following PromQL examples cover the three most common
+operator questions. Metric names and labels are sourced from
+[State Metrics Service metrics](./metrics/state-metrics/metrics).
+
+Number of registered functions:
+
+```promql
+# nvcf_function_info is emitted per function with descriptive labels.
+# Dedupe by function_id so multiple label series do not inflate the count.
+count(count by (function_id) (nvcf_function_info))
+```
+
+Queue depth per function:
+
+```promql
+# nvcf_function_queue_depth is a gauge keyed by function_id.
+sum by (function_id, name) (nvcf_function_queue_depth)
+```
+
+Function request latency (p50 and p95) over a 5 minute window:
+
+```promql
+# p50
+histogram_quantile(
+  0.50,
+  sum by (le, function_id) (rate(function_request_latency_bucket[5m]))
+)
+
+# p95
+histogram_quantile(
+  0.95,
+  sum by (le, function_id) (rate(function_request_latency_bucket[5m]))
+)
+```
+
 ### Log Collection
 
 Deploy a log collector as a DaemonSet to ship logs to your backend:
@@ -238,7 +276,7 @@ Reference Grafana dashboards are provided for control-plane services showing cri
   - Note: Worker Pods are deployed in the backend cluster, not the control-plane
     cluster, but their configuration is globally controlled as part of the control-plane
 
-- State Metrics Service (Available in GA)
+- State Metrics Service
 
 **Dashboard Location:**
 
