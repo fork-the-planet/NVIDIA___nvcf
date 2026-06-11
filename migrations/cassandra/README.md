@@ -86,7 +86,7 @@ The version number `<N>` in the error matches the numeric prefix of a file under
 
 ```bash
 cqlsh -u "$CASSANDRA_USER" -p "$CASSANDRA_PASSWORD" "$CASSANDRA_HOSTS" \
-  -e "SELECT version, dirty FROM <service>.schema_migrations;"
+  -e "SELECT version, dirty FROM schema_migrations.<service>;"
 ```
 
 #### 2. Reconcile partial state

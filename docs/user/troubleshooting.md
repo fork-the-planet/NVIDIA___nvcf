@@ -509,6 +509,87 @@ If `helmfile destroy` hangs on NVCA cleanup (typically when functions are still 
 
 ## Database Issues
 
+### Cassandra Pods OOM During Initialization
+
+Symptoms:
+
+- Cassandra pods restart with `OOMKilled` or exit code `137`.
+- The `cassandra-migrations` job fails with a consistency-level error such as `Cannot achieve consistency level ALL`.
+- The install does not continue to OpenBao or NVCF services.
+
+Diagnosis:
+
+Check Cassandra pod restarts and the previous container state:
+
+```bash
+kubectl -n cassandra-system get pods
+kubectl -n cassandra-system describe pod cassandra-0 | grep -E "OOMKilled|Exit Code: 137|Last State"
+```
+
+Check the migration job log for the first failed keyspace:
+
+```bash
+kubectl -n cassandra-system logs job/cassandra-helm-nvcf-cassandra-migrations
+```
+
+Root cause:
+
+The Cassandra resource preset is too small for first boot, commit-log replay, or migration startup. The `small` preset is not recommended for cloud installs, and environments that still OOM on `xlarge` should move to `2xlarge`.
+
+Solution:
+
+Increase the preset in your environment file, then resync Cassandra:
+
+```yaml
+cassandra:
+  resourcesPreset: "2xlarge"
+```
+
+```bash
+HELMFILE_ENV=<environment-name> helmfile --selector name=cassandra sync
+```
+
+If Cassandra was interrupted during migration, also check for dirty migration state before rerunning the full install.
+
+### Cassandra Migrations Fail After Dirty Migration State
+
+Symptoms:
+
+- The `cassandra-migrations` job fails repeatedly after Cassandra restarts during a previous migration attempt.
+- Logs show an error similar to `no migration found for version 0`, or another migration error that does not identify the failed keyspace state.
+- A row in a `schema_migrations.<keyspace>` table has `dirty=true`.
+
+Diagnosis:
+
+The migration bookkeeping tables live in the `schema_migrations` keyspace, with one table per application keyspace. Check the keyspace named in the migration logs:
+
+```bash
+CPASS=$(kubectl -n cassandra-system get secret cassandra \
+  -o jsonpath='{.data.cassandra-password}' | base64 -d)
+
+kubectl -n cassandra-system exec cassandra-0 -c cassandra -- \
+  /opt/bitnami/cassandra/bin/cqlsh -u cassandra -p "$CPASS" localhost \
+  -e "SELECT version, dirty FROM schema_migrations.<keyspace>;"
+```
+
+Root cause:
+
+`golang-migrate` marks a keyspace dirty when a migration attempt is interrupted. Cassandra DDL statements may already have committed, but the migration marker remains dirty and blocks the next run.
+
+Solution:
+
+First verify whether the failed migration's DDL was applied or needs manual reconciliation. After the schema matches the dirty version, clear the dirty flag and rerun the migration job:
+
+```bash
+kubectl -n cassandra-system exec cassandra-0 -c cassandra -- \
+  /opt/bitnami/cassandra/bin/cqlsh -u cassandra -p "$CPASS" localhost \
+  -e "UPDATE schema_migrations.<keyspace> SET dirty = false WHERE version = <version>;"
+
+HELMFILE_ENV=<environment-name> helmfile --selector name=cassandra sync
+```
+
+If more than one keyspace is dirty, repeat the diagnosis and reconciliation for each affected `schema_migrations.<keyspace>` table.
+
 ### Cassandra Migration Stuck Due to Missing ConfigMap
 
 **Symptoms:**

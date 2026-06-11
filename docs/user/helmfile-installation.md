@@ -338,27 +338,24 @@ nodeSelectors:
 
 #### `cassandra` Resource Tuning
 
-The default Cassandra resource limits may be insufficient for clusters with large instance types (e.g., `p5.48xlarge`), causing Cassandra pods to be OOM-killed during initialization. If you observe Cassandra pods restarting with `OOMKilled` status, increase the Cassandra resource requests and limits using a Helmfile release values override (see [overriding-helm-chart-values](./helmfile-installation.md)).
+Cassandra needs enough memory to complete first boot, commit-log replay, and the schema migration hooks. The default self-managed stack uses `cassandra.resourcesPreset: xlarge`, which maps to a Bitnami Cassandra preset with a 3 GiB memory request and a 6 GiB memory limit. Do not use the `small` preset for cloud installs. It can OOM-kill Cassandra during initialization and cause migration failures.
 
-Add a `values` block to the cassandra release in `helmfile.d/01-dependencies.yaml.gotmpl`:
+Common preset values:
+
+| Preset | Requests | Limits |
+| --- | --- | --- |
+| `small` | 500m CPU, 512Mi memory | 750m CPU, 768Mi memory |
+| `large` | 1 CPU, 2048Mi memory | 1.5 CPU, 3072Mi memory |
+| `xlarge` | 1 CPU, 3072Mi memory | 3 CPU, 6144Mi memory |
+| `2xlarge` | 1 CPU, 3072Mi memory | 6 CPU, 12288Mi memory |
+
+All listed presets include a 50Mi ephemeral-storage request and 2Gi ephemeral-storage limit.
+
+If Cassandra pods restart with `OOMKilled`, or the `cassandra-migrations` job fails with a consistency-level error while Cassandra pods are restarting, increase the preset in your environment file:
 
 ```yaml
-- name: cassandra
-  version: 0.9.0
-  condition: cassandra.enabled
-  namespace: cassandra-system
-  <<: *dependency
-  values:
-    - ../global.yaml.gotmpl
-    - ../secrets/{{ requiredEnv "HELMFILE_ENV" }}-secrets.yaml
-    - cassandra:
-        resources:
-          limits:
-            cpu: "8"
-            memory: 8192Mi
-          requests:
-            cpu: "2"
-            memory: 4096Mi
+cassandra:
+  resourcesPreset: "2xlarge"
 ```
 
 Then apply the change to just Cassandra:
@@ -368,7 +365,7 @@ HELMFILE_ENV=<environment-name> helmfile --selector name=cassandra sync
 ```
 
 <Note>
-When overriding `values` on a release that uses `<<: *dependency`, you must re-include `global.yaml.gotmpl` and the secrets file in your `values` list because YAML merge replaces lists entirely. Adjust CPU and memory values to suit your workload.
+For local development, a lower preset may be acceptable when the environment also reduces Cassandra to one replica. For cloud installs, start with `xlarge` or higher and tune from there.
 
 </Note>
 
