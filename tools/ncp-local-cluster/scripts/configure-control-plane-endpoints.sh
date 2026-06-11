@@ -99,6 +99,19 @@ subsets:
 apiVersion: v1
 kind: Endpoints
 metadata:
+  name: nvct-api
+  namespace: nvcf
+subsets:
+  - addresses:
+      - ip: ${lb_ip}
+    ports:
+      - name: http
+        port: ${http_port}
+        protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
   name: invocation
   namespace: nvcf
 subsets:

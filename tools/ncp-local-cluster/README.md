@@ -64,10 +64,10 @@ Addon placement:
 | sample workload validation | yes | yes |
 
 The compute-plane clusters get local aliases for worker-facing control-plane
-service DNS names: API, API gRPC, ESS, invocation, SIS, ReVal, and NATS. Those
-aliases route through the control-plane k3d load balancer so pods can use the
-expected in-cluster service names while the traffic crosses local k3d
-clusters.
+service DNS names: API, API gRPC, NVCT API, ESS, invocation, SIS, ReVal, and
+NATS. Those aliases route through the control-plane k3d load balancer so pods
+can use the expected in-cluster service names while the traffic crosses local
+k3d clusters.
 
 Create the default split topology, with one control-plane cluster and one
 compute-plane cluster:
@@ -161,8 +161,8 @@ make build-and-deploy-multicluster \
 
 The domain is applied to the legacy compute-plane CoreDNS aliases and to the
 local control-plane Gateway route hostnames for SIS and ReVal. Worker-facing
-API, API gRPC, ESS, and invocation aliases use the stack service-DNS hostnames
-directly. The NATS Gateway route is owned by the self-managed stack
+API, API gRPC, NVCT API, ESS, and invocation aliases use the stack service-DNS
+hostnames directly. The NATS Gateway route is owned by the self-managed stack
 `nvcf-gateway-routes` chart; ncp-local only provides the Gateway TCP listener
 and the compute-plane DNS alias.
 
