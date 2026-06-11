@@ -100,6 +100,9 @@ persistentVolumeClaim:
 service:
   type: NodePort
   port: 30345
+
+# Proxy service (nvcf-proxy-cache ClusterIP) configuration.
+proxyService:
   # Optional fixed ClusterIP. Set per-CSP so the IP is stable and can be
   # referenced in Kyverno egress allow-list policies without dynamic discovery.
   # Leave empty ("") to let Kubernetes assign one automatically.
