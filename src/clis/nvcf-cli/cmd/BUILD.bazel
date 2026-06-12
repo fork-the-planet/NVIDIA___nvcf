@@ -23,6 +23,7 @@ go_library(
         "apikey.go",
         "cluster.go",
         "cluster_agent.go",
+        "cluster_agent_maintenance.go",
         "cluster_registration.go",
         "cluster_utils.go",
         "deploy.go",
@@ -90,6 +91,7 @@ go_test(
     name = "cmd_test",
     srcs = [
         "agent_skill_test.go",
+        "cluster_agent_maintenance_test.go",
         "cluster_agent_test.go",
         "cluster_registration_test.go",
         "exit_code_error_test.go",
@@ -116,6 +118,7 @@ go_test(
         "//src/clis/nvcf-cli/internal/selfhosted/teardown",
         "//src/clis/nvcf-cli/internal/state",
         "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@in_gopkg_yaml_v3//:yaml_v3",

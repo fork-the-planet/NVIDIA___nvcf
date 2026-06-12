@@ -55,6 +55,13 @@ func TestMatchICMSCluster(t *testing.T) {
 		}
 	})
 
+	t.Run("id not found does not fall back to name", func(t *testing.T) {
+		got := matchICMSCluster(clusters, "missing-id", "alpha")
+		if got != nil {
+			t.Fatalf("got %+v, want nil: ID miss must not fall back to name", got)
+		}
+	})
+
 	t.Run("no match", func(t *testing.T) {
 		if got := matchICMSCluster(clusters, "missing", "missing"); got != nil {
 			t.Fatalf("got %+v, want nil", got)

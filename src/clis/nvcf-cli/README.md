@@ -1619,6 +1619,52 @@ nvcf-cli cluster agent list-functions --compute-plane-context edge-1 --phase DRA
 nvcf-cli cluster agent get-function func-abc ver-def --compute-plane-context edge-1 --json
 ```
 
+## Cluster Agent Maintenance
+
+The maintenance commands mutate the cluster. They select the cluster the same way
+as the inspection commands (`--compute-plane-context`, then `--kubeconfig` /
+`KUBECONFIG` / `~/.kube/config`) and read the `NVCFBackend` CR to discover the
+cluster identity and the system and requests namespaces.
+
+| Command | What it does |
+| :---- | :---- |
+| `cluster agent cordon-and-drain` (alias `drain`) | Put the cluster into CordonAndDrain maintenance: stop new deployments, let in-flight requests finish, and drain instances to zero. |
+| `cluster agent uncordon` (alias `undrain`) | Reverse a drain and re-enable the cluster. |
+
+### How drain works
+
+`cordon-and-drain` adds the `CordonAndDrainMaintenance` feature flag and sets
+`maintenanceMode: CordonAndDrain` on the NVCA `agent-config` ConfigMap, then
+restarts the NVCA deployment so the change takes effect. `uncordon` reverses
+both. The command returns once NVCA has been told to drain and (unless `--force`)
+the restart has rolled out; it does not wait for every instance to reach zero.
+Watch progress with `cluster agent list-functions --phase DRAINING`. `--timeout`
+bounds the rollout wait (default 5m); a timeout is reported as a warning because
+the config change is already persisted and re-running is a no-op.
+
+### Confirmation and safety
+
+`cordon-and-drain` and `uncordon` prompt for a `y/N` confirmation; pass `--yes`
+to skip it in automation.
+
+All maintenance commands accept `--dry-run` to preview without mutating, and
+`--expect-cluster-id <id>` to refuse to act unless the connected cluster's id or
+name matches (guards against a wrong `--compute-plane-context`).
+
+These commands need write access to the target cluster: get/update on the
+`agent-config` ConfigMap and the `nvca` Deployment.
+
+### Examples
+
+```bash
+# Preview a drain, then drain for real
+nvcf-cli cluster agent cordon-and-drain --compute-plane-context edge-1 --dry-run
+nvcf-cli cluster agent cordon-and-drain --compute-plane-context edge-1
+
+# Re-enable the cluster
+nvcf-cli cluster agent uncordon --compute-plane-context edge-1
+```
+
 ---
 
 ## **License**

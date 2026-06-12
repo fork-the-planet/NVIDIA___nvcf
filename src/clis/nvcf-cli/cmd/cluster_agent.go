@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"nvcf-cli/internal/client"
 	"nvcf-cli/internal/clusteragent"
@@ -91,6 +92,7 @@ func initClusterAgentCmds() {
 	clusterAgentCmd.AddCommand(clusterAgentStatusCmd)
 	clusterAgentCmd.AddCommand(clusterAgentListFunctionsCmd)
 	clusterAgentCmd.AddCommand(clusterAgentGetFunctionCmd)
+	initClusterAgentMaintenanceCmds()
 
 	for _, c := range []*cobra.Command{clusterAgentStatusCmd, clusterAgentListFunctionsCmd, clusterAgentGetFunctionCmd} {
 		c.Flags().String(flagComputePlaneContext, "", "Kube context for the target compute-plane cluster")
@@ -130,7 +132,14 @@ func runClusterAgentStatus(cmd *cobra.Command, args []string) error {
 
 	namespace, _ := cmd.Flags().GetString(flagNamespace)
 	ctxOverride, _ := cmd.Flags().GetString(flagComputePlaneContext)
-	ctx := context.Background()
+
+	cfg, _ := client.LoadConfig()
+	timeout := 30 * time.Second
+	if cfg != nil {
+		timeout = cfg.DefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
 	status, err := inspector.Status(ctx, namespace)
 	if err != nil {
@@ -258,7 +267,10 @@ func enrichStatusFromICMS(cmd *cobra.Command, ctx context.Context, ncaID string,
 	return info
 }
 
-// matchICMSCluster finds the cluster by ID first, then by name.
+// matchICMSCluster finds the cluster by ID when clusterID is non-empty, or by
+// name when clusterID is empty. When an ID is provided but not found the
+// function returns nil; it does not fall through to name matching, which would
+// silently return a different cluster sharing the same name.
 func matchICMSCluster(clusters []client.ICMSCluster, clusterID, clusterName string) *client.ICMSCluster {
 	if clusterID != "" {
 		for i := range clusters {
@@ -266,6 +278,7 @@ func matchICMSCluster(clusters []client.ICMSCluster, clusterID, clusterName stri
 				return &clusters[i]
 			}
 		}
+		return nil
 	}
 	if clusterName != "" {
 		for i := range clusters {

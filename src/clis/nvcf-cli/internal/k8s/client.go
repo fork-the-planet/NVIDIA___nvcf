@@ -79,6 +79,13 @@ func (c *Client) Dynamic() dynamic.Interface {
 	return c.dynamicClient
 }
 
+// Clientset returns the typed Kubernetes clientset for core and apps resources
+// (for example ConfigMaps and Deployments). It is returned as the interface type
+// so tests can inject a fake clientset.
+func (c *Client) Clientset() kubernetes.Interface {
+	return c.clientset
+}
+
 // buildRestConfig builds the Kubernetes REST config with the same priority as kubectl:
 // 1. Explicit kubeconfig path (highest priority)
 // 2. KUBECONFIG environment variable
