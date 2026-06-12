@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -77,6 +78,48 @@ func TestNVCFCLINonlocalFixtureMatchesCLITemplate(t *testing.T) {
 		if !pattern.MatchString(cliBody) {
 			t.Errorf("BDD fixture key %q not referenced in CLI template at %s; the CLI may have renamed or removed it", key, cliTemplatePath)
 		}
+	}
+}
+
+func TestNVCTTaskSmokeUsesTaskSimpleSample(t *testing.T) {
+	for _, path := range []string{
+		"../../examples/task-samples/task-simple-sample/Dockerfile",
+		"../../examples/task-samples/task-simple-sample/main.py",
+		"../../examples/task-samples/task-simple-sample/requirements.txt",
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("task-simple-sample fixture missing %s: %v", path, err)
+		}
+	}
+
+	scriptBytes, err := os.ReadFile("scripts/run-nvct-task-smoke.sh")
+	if err != nil {
+		t.Fatalf("read NVCT task smoke script: %v", err)
+	}
+	script := string(scriptBytes)
+	for _, want := range []string{
+		"task-simple-sample",
+		"NVCT_BDD_TASK_IMAGE_TAG:-local",
+		"containerEnvironment",
+		"NUM_OF_RESULTS",
+		"DELAY_BETWEEN_RESULTS_IN_MINUTES",
+		".token // empty",
+		"audience_service_ids",
+		"account-tasks",
+		"Key-Issuer-Service",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("NVCT task smoke script does not reference %q", want)
+		}
+	}
+	if strings.Contains(script, ".apiKey // empty") {
+		t.Fatal("NVCT task smoke script reads the function API key from nvcf-cli state")
+	}
+	if strings.Contains(script, "task_simple_sample") {
+		t.Fatal("NVCT task smoke script uses the unpublished underscore image name")
+	}
+	if strings.Contains(script, "docker.io/library/busybox") {
+		t.Fatal("NVCT task smoke script still uses the synthetic busybox sample")
 	}
 }
 

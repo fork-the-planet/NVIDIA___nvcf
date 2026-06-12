@@ -108,6 +108,9 @@ subsets:
       - name: http
         port: ${http_port}
         protocol: TCP
+      - name: grpc
+        port: ${grpc_port}
+        protocol: TCP
 ---
 apiVersion: v1
 kind: Endpoints

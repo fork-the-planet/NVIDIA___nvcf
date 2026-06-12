@@ -9,6 +9,7 @@ resources:
   - httproute-ess.yaml
   - httproute-api.yaml
   - grpcroute-api.yaml
+  - grpcroute-nvct-api.yaml
   - httproute-nvct-api.yaml
   - httproute-invocation.yaml
   - httproute-sis.yaml

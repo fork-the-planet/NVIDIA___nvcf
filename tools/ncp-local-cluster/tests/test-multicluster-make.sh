@@ -144,6 +144,9 @@ fi
 if ! grep -q 'service-nvct-api.yaml' "$ROOT_DIR/apps/compute-control-plane-endpoints/kustomization.yaml"; then
   fail "compute control-plane endpoint aliases must include the NVCT API Service"
 fi
+if ! grep -q 'targetPort: grpc' "$ROOT_DIR/apps/compute-control-plane-endpoints/service-nvct-api.yaml"; then
+  fail "compute NVCT API alias Service must expose the worker gRPC port"
+fi
 
 if ! grep -q 'name: nats' "$ROOT_DIR/apps/envoy-gateway/gateway.yaml"; then
   fail "control-plane Gateway must define a nats TCP listener"
@@ -230,11 +233,17 @@ fi
 if ! grep -q "nvcf-api-control-plane-grpc" <<<"$rendered_routes"; then
   fail "control-plane API gRPC route must expose the in-cluster API gRPC port used by workers"
 fi
+if ! grep -q "nvct-api-control-plane-grpc" <<<"$rendered_routes"; then
+  fail "control-plane NVCT gRPC route must expose the in-cluster NVCT gRPC port used by task workers"
+fi
 if ! grep -q "kind: GRPCRoute" <<<"$rendered_routes"; then
   fail "control-plane API gRPC route must use GRPCRoute for worker gRPC clients"
 fi
 if ! grep -A12 "nvcf-api-control-plane-grpc" <<<"$rendered_routes" | grep -q "sectionName: http"; then
   fail "control-plane API gRPC route must attach to the HTTP listener"
+fi
+if ! grep -A14 "nvct-api-control-plane-grpc" <<<"$rendered_routes" | grep -q "sectionName: http"; then
+  fail "control-plane NVCT gRPC route must attach to the HTTP listener"
 fi
 if grep -A4 'name: nats' <<<"$rendered_routes" | grep -q "kind: TCPRoute"; then
   fail "ncp-local must not render the NATS TCPRoute; nvcf-gateway-routes owns that route"
@@ -252,6 +261,9 @@ if ! grep -q "port: 18080" <<<"$endpoints_yaml"; then
 fi
 if ! grep -A12 "name: nvct-api" <<<"$endpoints_yaml" | grep -q "port: 18080"; then
   fail "compute NVCT endpoint dry-run must use CONTROL_PLANE_LB_HTTP_PORT"
+fi
+if ! grep -A16 "name: nvct-api" <<<"$endpoints_yaml" | grep -q "port: 19090"; then
+  fail "compute NVCT endpoint dry-run must use CONTROL_PLANE_LB_GRPC_PORT"
 fi
 if ! grep -q "port: 19090" <<<"$endpoints_yaml"; then
   fail "compute gRPC endpoint dry-run must use CONTROL_PLANE_LB_GRPC_PORT"

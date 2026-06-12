@@ -10,6 +10,7 @@ Top-level groups:
 
 - `function-samples/`: long-running services (FastAPI echo, streaming, multi-endpoint, gRPC echo, secrets, vLLM with OTLP, load tester).
 - `function-samples/helmchart-samples/`: Helm charts that wrap the FastAPI and multi-node samples.
+- `task-samples/`: one-shot NVCT task containers and task Helm charts.
 - `load-tests/`: k6 scripts for `functions/` (HTTP, gRPC, SSE, streaming).
 - `cluster-monitoring-sample/`: Prometheus ServiceMonitor and OTEL collector configs for NVCA.
 
@@ -30,6 +31,18 @@ docker run --rm -p 8000:8000 <sample>
 ```
 
 Smoke-test with `curl`. See each sample's `README.md` for endpoint paths and payloads.
+
+### Python task containers
+
+```
+cd examples/task-samples/<sample>
+docker build -t <sample> .
+docker run --rm -v ${PWD}:/tmp/output -e NVCT_RESULTS_DIR=/tmp/output <sample>
+```
+
+The container should write progress JSON to `${NVCT_PROGRESS_FILE_PATH}` or
+`${NVCT_RESULTS_DIR}/progress`. See each sample's `README.md` for task-specific
+environment variables.
 
 ### Helm charts
 
@@ -79,7 +92,7 @@ If a change does not lend itself to an automated test (docs only, configuration-
 
 ## Adding a new example
 
-1. Pick a directory under the matching group (`function-samples/`, etc.) or create a new group if none fits.
+1. Pick a directory under the matching group (`function-samples/`, `task-samples/`, etc.) or create a new group if none fits.
 2. Write a `README.md` describing what the sample does, its prerequisites, and how to run it.
 3. Add SPDX headers to every source file.
 4. Update the top-level `examples/README.md` table for the new sample.

@@ -20,6 +20,14 @@ Functions are long-running services that respond to HTTP or gRPC invocations.
 | [Multi-Node Helm Function](function-samples/helmchart-samples/multi-node-helm-function-test/) | Multi-node Helm chart for running NCCL and GPU bandwidth tests via NVCF. |
 | [Load Tester Supreme](function-samples/load-tester-supreme/) | HTTP and gRPC echo servers designed for load and throughput testing. |
 
+## Task Samples
+
+Tasks are one-shot workloads that run to completion and surface progress and results through the NVCT API.
+
+| Sample | Description |
+|--------|-------------|
+| [Task Simple](task-samples/task-simple-sample/) | Minimal task that writes progress updates until completion. |
+
 ## Load Tests
 
 k6 load testing scripts for NVCF function endpoints are in the [load-tests/](load-tests/) directory.

@@ -442,6 +442,10 @@ func TestMultiClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 			ExitCode: 0,
 			Stdout:   "Function invocation completed!\n\nResponse:\n{\"rawResponse\":\"bdd-echo\"}\n",
 		},
+		"tests/bdd/scripts/run-nvct-task-smoke.sh": {
+			ExitCode: 0,
+			Stdout:   "Task bdd-nvct-task-smoke status: COMPLETED\n",
+		},
 		// Conflict precheck: feature asserts the conflicting
 		// single-cluster is absent.
 		"k3d cluster get ncp-local": {ExitCode: 1},
@@ -473,6 +477,12 @@ func TestMultiClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	}
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "function invoke") {
 		t.Fatal("function invoke CLI command was never invoked")
+	}
+	if commandRanThatContains(suite.Runner.(*fakeRunner).runs, "api-key generate --description bdd-nvct-task-smoke") {
+		t.Fatal("NVCT task smoke should not use nvcf-cli api-key generate because it emits function resources")
+	}
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "tests/bdd/scripts/run-nvct-task-smoke.sh") {
+		t.Fatal("NVCT task API smoke script was never invoked")
 	}
 }
 

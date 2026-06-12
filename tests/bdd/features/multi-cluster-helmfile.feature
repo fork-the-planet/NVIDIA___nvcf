@@ -220,11 +220,20 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
       When I run command "kubectl wait nvcfbackend ncp-local-compute-1 -n nvca-operator --context k3d-ncp-local-compute-1 --for=jsonpath={.status.agentStatus}=healthy --timeout=10m"
       Then the command exit code should be 0
 
-  Rule: Helmfile-installed multi-cluster NVCF can run a sample function
+  Rule: Helmfile-installed multi-cluster NVCF can run workloads
 
     # This scenario intentionally has no Background. It depends on the
     # earlier control-plane install and NVCA registration scenarios in
     # this feature run, and is not a standalone tag target.
+    @nvct-task-api
+    Scenario: Operator launches an NVCT task and waits for it to complete
+      When I run command:
+        """
+        tests/bdd/scripts/run-nvct-task-smoke.sh
+        """
+      Then the command exit code should be 0
+      And the command output should contain "COMPLETED"
+
     @function-lifecycle
     Scenario: Operator creates, deploys, and invokes the Load Tester Supreme sample function
       When I run command:

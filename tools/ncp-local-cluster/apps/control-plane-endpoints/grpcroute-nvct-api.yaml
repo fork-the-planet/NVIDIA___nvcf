@@ -4,16 +4,16 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: GRPCRoute
 metadata:
-  name: nvcf-api-control-plane-grpc
+  name: nvct-api-control-plane-grpc
   namespace: nvcf
 spec:
   hostnames:
-    - api.nvcf.svc.cluster.local
+    - nvct-api.nvcf.svc.cluster.local
   parentRefs:
     - name: api-grpc-gw
       namespace: envoy-gateway-system
       sectionName: http
   rules:
     - backendRefs:
-        - name: api
+        - name: nvct-api
           port: 9090
