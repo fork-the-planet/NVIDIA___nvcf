@@ -33,7 +33,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/semaphore"
 
-	mw "ai-api-gateway-service/middleware"
+	"ai-api-gateway-service/middleware"
 )
 
 const (
@@ -67,7 +67,7 @@ func NewTrafficShadower(maxConcurrent int, timeout time.Duration) *TrafficShadow
 func (s *TrafficShadower) Shadow(req *http.Request, handler http.Handler) error {
 	if !s.sem.TryAcquire(1) {
 		err := fmt.Errorf("%w: max_concurrent=%d", errShadowConcurrencyLimit, s.maxConcurrent)
-		zap.L().Debug("shadow request dropped", append(mw.TraceFields(req.Context()), zap.Error(err))...)
+		zap.L().Debug("shadow request dropped", append(middleware.TraceFields(req.Context()), zap.Error(err))...)
 		return err
 	}
 

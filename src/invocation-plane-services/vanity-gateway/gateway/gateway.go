@@ -25,6 +25,7 @@ import (
 
 	gatewayConfig "ai-api-gateway-service/gateway_config"
 	"ai-api-gateway-service/internal/reloadableconfig"
+	"ai-api-gateway-service/middleware"
 	"ai-api-gateway-service/router"
 
 	"github.com/goccy/go-json"
@@ -98,6 +99,10 @@ func NewNVCFGateway(logger *logs.ZapLogger, config Config) (*NVCFGateway, error)
 	otelUrl, err := url.Parse(config.OTELExporterOTLPEndpoint)
 	if err != nil {
 		return nil, err
+	}
+
+	if err := middleware.SetupHTTPMetrics(); err != nil {
+		return nil, fmt.Errorf("failed to setup HTTP metrics: %w", err)
 	}
 
 	mappings, err := gatewayConfig.SetupConfigWithConfigPath(config.MappingPath)

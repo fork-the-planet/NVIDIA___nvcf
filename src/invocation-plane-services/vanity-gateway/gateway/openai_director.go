@@ -19,6 +19,7 @@ package gateway
 
 import (
 	config "ai-api-gateway-service/gateway_config"
+	"ai-api-gateway-service/middleware"
 	"bytes"
 	"cmp"
 	"context"
@@ -513,6 +514,9 @@ func (d *OpenAIDirector) GetModel(writer http.ResponseWriter, request *http.Requ
 		d.imageEdits.modelNameToNVCFUrl,
 		d.imageVariations.modelNameToNVCFUrl,
 	)
+	if ok {
+		middleware.AddOpenAIRequestMetricAttributes(request.Context(), modelName, funcInfo.functionId)
+	}
 	if ok && writeFunctionStatusError(writer, funcInfo.offlineMessage, funcInfo.eol, modelName) {
 		return
 	}
@@ -611,6 +615,7 @@ func (d *OpenAIDirector) resolveModelMappedRequest(writer http.ResponseWriter, r
 		http.NotFound(writer, request)
 		return resolvedOpenAIRequest{}, true
 	}
+	middleware.AddOpenAIRequestMetricAttributes(request.Context(), body.Model, nvcfUrl.functionId)
 
 	if writeFunctionStatusError(writer, nvcfUrl.offlineMessage, nvcfUrl.eol, body.Model) {
 		_ = request.Body.Close()

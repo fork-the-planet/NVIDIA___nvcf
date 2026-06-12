@@ -34,6 +34,8 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -285,6 +287,43 @@ func TestBuildModelMapping(t *testing.T) {
 
 	_, shadowIsPublic := mapping.modelNameToModelInfo["private/facebook/opt-125m-shadow"]
 	assert.False(t, shadowIsPublic)
+}
+
+func TestResolveModelMappedRequestAddsMetricAttributes(t *testing.T) {
+	director := &OpenAIDirector{}
+	modelToNVCFURL := map[string]FunctionInfo{
+		"facebook/opt-125m": {
+			functionId: "func-123",
+		},
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"facebook/opt-125m"}`),
+	)
+	labeler := &otelhttp.Labeler{}
+	req = req.WithContext(otelhttp.ContextWithLabeler(req.Context(), labeler))
+	rec := httptest.NewRecorder()
+
+	resolved, handled := director.resolveModelMappedRequest(rec, req, modelToNVCFURL)
+	require.False(t, handled)
+	require.NoError(t, resolved.request.Body.Close())
+
+	assertLabelerHasAttribute(t, labeler.Get(), "openai_model_name", attribute.StringValue("facebook/opt-125m"))
+	assertLabelerHasAttribute(t, labeler.Get(), "function_id", attribute.StringValue("func-123"))
+}
+
+func assertLabelerHasAttribute(t *testing.T, attrs []attribute.KeyValue, key attribute.Key, want attribute.Value) {
+	t.Helper()
+
+	for _, attr := range attrs {
+		if attr.Key == key {
+			require.Equal(t, want, attr.Value)
+			return
+		}
+	}
+	t.Fatalf("missing metric attribute %q in %#v", key, attrs)
 }
 
 func TestBuildModelMappingPreservesMultipleShadowTargets(t *testing.T) {
