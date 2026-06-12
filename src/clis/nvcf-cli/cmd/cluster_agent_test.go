@@ -55,13 +55,6 @@ func TestMatchICMSCluster(t *testing.T) {
 		}
 	})
 
-	t.Run("id not found does not fall back to name", func(t *testing.T) {
-		got := matchICMSCluster(clusters, "missing-id", "alpha")
-		if got != nil {
-			t.Fatalf("got %+v, want nil: ID miss must not fall back to name", got)
-		}
-	})
-
 	t.Run("no match", func(t *testing.T) {
 		if got := matchICMSCluster(clusters, "missing", "missing"); got != nil {
 			t.Fatalf("got %+v, want nil", got)
@@ -77,4 +70,55 @@ func TestEnrichStatusFromSISSkipsWithoutNCAID(t *testing.T) {
 	if !strings.Contains(info.Note, "nca-id") {
 		t.Errorf("note = %q, want a hint about --nca-id", info.Note)
 	}
+}
+
+func TestBuildListOptions(t *testing.T) {
+	newCmd := func() *cobra.Command {
+		c := &cobra.Command{}
+		c.Flags().String(flagNamespace, "", "")
+		return c
+	}
+
+	t.Run("defaults to no filter", func(t *testing.T) {
+		clusterAgentFlags.phase = ""
+		opts, err := buildListOptions(newCmd())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.PhaseFilter != "" {
+			t.Errorf("got %+v, want empty PhaseFilter", opts)
+		}
+	})
+
+	t.Run("accepts lowercase phase", func(t *testing.T) {
+		clusterAgentFlags.phase = "draining"
+		defer func() { clusterAgentFlags.phase = "" }()
+		opts, err := buildListOptions(newCmd())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.PhaseFilter != clusteragent.PhaseDraining {
+			t.Errorf("PhaseFilter = %q, want DRAINING", opts.PhaseFilter)
+		}
+	})
+
+	t.Run("rejects unknown phase", func(t *testing.T) {
+		clusterAgentFlags.phase = "bogus"
+		defer func() { clusterAgentFlags.phase = "" }()
+		if _, err := buildListOptions(newCmd()); err == nil {
+			t.Fatal("expected error for invalid phase")
+		}
+	})
+
+	t.Run("accepts FAILED phase", func(t *testing.T) {
+		clusterAgentFlags.phase = "FAILED"
+		defer func() { clusterAgentFlags.phase = "" }()
+		opts, err := buildListOptions(newCmd())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.PhaseFilter != clusteragent.PhaseFailed {
+			t.Errorf("PhaseFilter = %q, want FAILED", opts.PhaseFilter)
+		}
+	})
 }

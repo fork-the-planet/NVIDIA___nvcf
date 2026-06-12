@@ -64,8 +64,6 @@ func nvcfBackend(namespace, name string) *unstructured.Unstructured {
 	}}
 }
 
-// icmsRequest builds a fake ICMSRequest object. It is also used by
-// k8s_maintainer_test.go in this package.
 func icmsRequest(namespace, name, functionID, versionID, action, status string, useLegacy bool) *unstructured.Unstructured {
 	spec := map[string]interface{}{"action": action}
 	if useLegacy {
@@ -120,5 +118,104 @@ func TestStatusErrorsWhenNoBackend(t *testing.T) {
 	insp := newFakeInspector()
 	if _, err := insp.Status(context.Background(), "nvca-operator"); err == nil {
 		t.Fatal("expected error when no NVCFBackend exists")
+	}
+}
+
+func TestListFunctionsAcrossNamespaces(t *testing.T) {
+	insp := newFakeInspector(
+		icmsRequest("ns-b", "r2", "fn-2", "v1", "", statusCompleted, false),
+		icmsRequest("ns-a", "r1", "fn-1", "v1", "", statusInProgress, true),
+		icmsRequest("ns-a", "r3", "fn-1", "v2", "", statusFailed, false),
+	)
+
+	got, err := insp.ListFunctions(context.Background(), ListOptions{})
+	if err != nil {
+		t.Fatalf("ListFunctions returned error: %v", err)
+	}
+	// FAILED functions are included by default; deterministic order fn-1 then fn-2.
+	if len(got) != 3 {
+		t.Fatalf("got %d functions, want 3 (failed included): %+v", len(got), got)
+	}
+	if got[0].FunctionID != "fn-1" || got[1].FunctionID != "fn-1" || got[2].FunctionID != "fn-2" {
+		t.Errorf("order = %s,%s,%s want fn-1,fn-1,fn-2", got[0].FunctionID, got[1].FunctionID, got[2].FunctionID)
+	}
+	if got[0].Phase != PhaseDeploying {
+		t.Errorf("fn-1 phase = %q, want DEPLOYING", got[0].Phase)
+	}
+	if got[0].InstanceCount != 1 {
+		t.Errorf("fn-1 instance count = %d, want 1", got[0].InstanceCount)
+	}
+}
+
+func TestListFunctionsFailedPhaseFilter(t *testing.T) {
+	insp := newFakeInspector(
+		icmsRequest("ns-a", "r1", "fn-1", "v1", "", statusCompleted, false),
+		icmsRequest("ns-a", "r2", "fn-2", "v1", "", statusFailed, false),
+	)
+
+	got, err := insp.ListFunctions(context.Background(), ListOptions{PhaseFilter: PhaseFailed})
+	if err != nil {
+		t.Fatalf("ListFunctions returned error: %v", err)
+	}
+	if len(got) != 1 || got[0].FunctionID != "fn-2" {
+		t.Fatalf("got %+v, want only fn-2 with --phase FAILED", got)
+	}
+}
+
+func TestListFunctionsPhaseFilter(t *testing.T) {
+	insp := newFakeInspector(
+		icmsRequest("ns-a", "r1", "fn-1", "v1", "", statusCompleted, false),
+		icmsRequest("ns-a", "r2", "fn-2", "v1", "", statusInProgress, false),
+		icmsRequest("ns-a", "r3", "fn-3", "v1", actionTermination, statusCompleted, false),
+	)
+
+	got, err := insp.ListFunctions(context.Background(), ListOptions{PhaseFilter: PhaseDraining})
+	if err != nil {
+		t.Fatalf("ListFunctions returned error: %v", err)
+	}
+	if len(got) != 1 || got[0].FunctionID != "fn-3" {
+		t.Fatalf("phase filter DRAINING = %+v, want only fn-3", got)
+	}
+}
+
+func TestGetFunctionMatchesVersion(t *testing.T) {
+	insp := newFakeInspector(
+		icmsRequest("ns-a", "r1", "fn-1", "v1", "", statusCompleted, false),
+		icmsRequest("ns-a", "r2", "fn-1", "v2", "", statusInProgress, false),
+	)
+
+	d, err := insp.GetFunction(context.Background(), "fn-1", "v2")
+	if err != nil {
+		t.Fatalf("GetFunction returned error: %v", err)
+	}
+	if d.FunctionVersionID != "v2" || d.Phase != PhaseDeploying {
+		t.Errorf("got version %q phase %q, want v2 DEPLOYING", d.FunctionVersionID, d.Phase)
+	}
+	if len(d.Instances) != 1 || d.Instances[0].ID != "inst-a" {
+		t.Errorf("instances = %+v, want one inst-a", d.Instances)
+	}
+}
+
+func TestGetFunctionDeterministicWithoutVersion(t *testing.T) {
+	// Same functionID, two versions in different namespaces. With versionID
+	// omitted, the result must be stable (lowest version by sort order).
+	insp := newFakeInspector(
+		icmsRequest("ns-b", "r2", "fn-x", "v2", "", statusCompleted, false),
+		icmsRequest("ns-a", "r1", "fn-x", "v1", "", statusInProgress, false),
+	)
+
+	d, err := insp.GetFunction(context.Background(), "fn-x", "")
+	if err != nil {
+		t.Fatalf("GetFunction returned error: %v", err)
+	}
+	if d.FunctionVersionID != "v1" {
+		t.Errorf("GetFunction(fn-x, \"\") = version %q, want deterministic v1", d.FunctionVersionID)
+	}
+}
+
+func TestGetFunctionNotFound(t *testing.T) {
+	insp := newFakeInspector(icmsRequest("ns-a", "r1", "fn-1", "v1", "", statusCompleted, false))
+	if _, err := insp.GetFunction(context.Background(), "missing", ""); err == nil {
+		t.Fatal("expected error for missing function")
 	}
 }

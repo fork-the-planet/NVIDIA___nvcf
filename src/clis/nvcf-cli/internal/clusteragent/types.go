@@ -29,6 +29,19 @@ package clusteragent
 
 import "context"
 
+// Phase is the collapsed, user-facing lifecycle phase for a scheduled function.
+// The NVCA tracks eight granular ICMSRequest statuses; DerivePhase folds them
+// into these.
+type Phase string
+
+const (
+	PhaseDeploying Phase = "DEPLOYING"
+	PhaseActive    Phase = "ACTIVE"
+	PhaseDraining  Phase = "DRAINING"
+	// PhaseFailed covers RequestFailed/RequestFailureAcknowledged.
+	PhaseFailed Phase = "FAILED"
+)
+
 // GPUUsage is one GPU type's capacity on the cluster, from NVCFBackend
 // status.gpuUsage.
 type GPUUsage struct {
@@ -65,9 +78,55 @@ type AgentStatus struct {
 	ControlPlane        *ICMSInfo   `json:"controlPlane,omitempty"`
 }
 
+// Instance is one running instance backing a scheduled function, from
+// ICMSRequest status.instances.
+type Instance struct {
+	ID                    string            `json:"id"`
+	Type                  string            `json:"type,omitempty"`
+	Status                string            `json:"status,omitempty"`
+	LastReportedStatus    string            `json:"lastReportedStatus,omitempty"`
+	LastReportedTimestamp string            `json:"lastReportedTimestamp,omitempty"`
+	Attributes            map[string]string `json:"attributes,omitempty"`
+}
+
+// ScheduledFunction is one function version scheduled on the cluster, derived
+// from an ICMSRequest CR.
+type ScheduledFunction struct {
+	FunctionID        string `json:"functionId"`
+	FunctionVersionID string `json:"functionVersionId"`
+	Namespace         string `json:"namespace"`
+	Action            string `json:"action,omitempty"`
+	RequestStatus     string `json:"requestStatus"`
+	Phase             Phase  `json:"phase"`
+	InstanceCount     int    `json:"instanceCount"`
+}
+
+// FunctionDetail is the detailed view of one scheduled function version.
+type FunctionDetail struct {
+	ScheduledFunction
+	Instances          []Instance `json:"instances,omitempty"`
+	LastStatusUpdated  string     `json:"lastStatusUpdated,omitempty"`
+	LastACKTimestamp   string     `json:"lastAckTimestamp,omitempty"`
+	LastReconcileError string     `json:"lastReconcileError,omitempty"`
+	ReconcileErrors    uint64     `json:"reconcileErrors,omitempty"`
+}
+
+// ListOptions controls ListFunctions.
+type ListOptions struct {
+	// Namespace scopes the ICMSRequest listing. Empty means all namespaces.
+	Namespace string
+	// PhaseFilter, when set, restricts results to a single phase.
+	PhaseFilter Phase
+}
+
 // AgentInspector reads NVCA state from a compute-plane cluster. Implementations
 // return domain types only, never raw Kubernetes objects.
 type AgentInspector interface {
 	// Status returns the NVCA agent status from the NVCFBackend CR in namespace.
 	Status(ctx context.Context, namespace string) (*AgentStatus, error)
+	// ListFunctions returns the function versions scheduled on the cluster.
+	ListFunctions(ctx context.Context, opts ListOptions) ([]ScheduledFunction, error)
+	// GetFunction returns the detailed state for one function version. An empty
+	// versionID matches the first request for the function regardless of version.
+	GetFunction(ctx context.Context, functionID, versionID string) (*FunctionDetail, error)
 }

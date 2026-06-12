@@ -1587,9 +1587,9 @@ into three user-facing phases:
 | `DEPLOYING` | Request pending or in progress (caching, instance creation). |
 | `ACTIVE` | Request completed and acknowledged. |
 | `DRAINING` | Cluster draining, a termination request, or instances winding down. |
+| `FAILED` | Request failed or failure acknowledged. |
 
-Failed requests are hidden by default. Use `--show-failed` to include them, or
-`--phase` to show only one of `ACTIVE`, `DEPLOYING`, or `DRAINING`.
+Use `--phase` to filter to one of `ACTIVE`, `DEPLOYING`, `DRAINING`, or `FAILED`.
 
 ### Authentication
 
