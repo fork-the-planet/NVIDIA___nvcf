@@ -201,6 +201,13 @@ HELMFILE_ENV=<env-name> helmfile template   # Preview rendered manifests
 HELMFILE_ENV=<env-name> helmfile sync       # Deploy
 ```
 
+> Set BOTH Cassandra passwords in the secrets file. The secrets file documents
+> `DEFAULT_CASSANDRA_PASSWORD`, but the cassandra chart has a second credential,
+> `cassandra.serviceRolePassword`, that defaults to `ch@ng3m3`. If you set only
+> `DEFAULT_CASSANDRA_PASSWORD`, the service role keeps that default and every DB-backed
+> service crash-loops with `Bad credentials` once it tries to authenticate. Set
+> `cassandra.serviceRolePassword` to the same value as `DEFAULT_CASSANDRA_PASSWORD`.
+
 ### 5. Deployment phases
 
 Helmfile deploys in order with dependencies:
@@ -581,15 +588,43 @@ kubectl get events -n <ns> --sort-by='.lastTimestamp'  # Recent events
 | `ImagePullBackOff` + `401 Unauthorized` | Missing or wrong pull secret | Check secret exists, check SA has imagePullSecrets |
 | `Init:0/1` stuck on service pods | Vault-agent waiting for OpenBao | Check OpenBao pods + migration job status |
 | `OOMKilled` on Cassandra | Default resources too small | Override `cassandra.resources` via values block |
+| DB-backed services crash-loop `Bad credentials` connecting to Cassandra | Secrets file set only `DEFAULT_CASSANDRA_PASSWORD`; `cassandra.serviceRolePassword` still defaults to `ch@ng3m3` | Set `cassandra.serviceRolePassword` in the secrets file equal to `DEFAULT_CASSANDRA_PASSWORD`, then re-sync cassandra + the DB-backed services |
 | `Pending` pods | Node selector mismatch or no storage class | `kubectl describe pod`, check labels and storage |
 | Helm release in `failed` state | First install failed partway | `helmfile destroy` the release, then `sync` again |
 | Account bootstrap timeout | Wrong base64 credentials in secrets file | Check `kubectl logs job/nvcf-api-account-bootstrap -n nvcf` |
+| function / account calls return `404 Unknown client_id` | The account-bootstrap post-install hook never ran: the `api` release install failed, or was repaired with live patches instead of a clean re-sync, so the hook (and the account) was skipped | Verify and re-run the hook; see [Verify the account bootstrap ran](#verify-the-account-bootstrap-ran) |
 | NVCA agent `CrashLoopBackOff` + "no backend GPUs found" | No GPU operator or fake GPUs on cluster | Install fake-gpu-operator, see [Fake GPU Operator](#fake-gpu-operator-non-gpu-clusters) |
 | `ImagePullBackOff` in `nvca-system` | Pull secret missing in operator-created namespace | Create secret + update Kyverno policy to include `nvca-system` |
 | Services fail to read vault secrets; `secrets.json` not found | Vault path hardcoded to `/home/app/vault/` in `_helpers.tpl`; the runtime resolves the mounted path relative to the working directory and drops the leading `/` | Override `podAnnotations` and set `JAVA_TOOL_OPTIONS: "-Duser.dir=/"` in release values |
 | NATS connection fails at startup; placement tag mismatch | NATS server tags hardcoded to `dc:ncp`; app derives tag from `AWS_REGION` (e.g., `us-gov-west-1`) | Set `AWS_REGION=ncp` and `NVCF_AWS_REGION=ncp` in env config |
 | `helmfile sync` finishes but no `nvca-operator` Deployment exists | `nvcaOperator.enabled` is `false` (the default); phase 5 skipped the release | Set `nvcaOperator.enabled: true` in `environments/<env>.yaml` and run `helmfile --selector name=nvca-operator sync`, see [Enable and validate the NVCA operator](#6-enable-and-validate-the-nvca-operator-opt-in) |
 | `nvca-operator` Deployment not ready after sync | Chart synced but pod failing (pull secret, GPU discovery, or bootstrap error) | `kubectl describe deploy nvca-operator -n nvca-operator`, check pod logs, verify pull secret in `nvca-operator`, ensure GPUs (real or fake) are visible |
+
+### Verify the account bootstrap ran
+
+The default account is created by a **`post-install` hook on the `api` release**
+(`job/nvcf-api-account-bootstrap` in `nvcf`). Because it is a post-install hook, it only
+fires on a successful `api` install. If that install failed and you repaired it with live
+patches (rather than a clean re-sync), the hook never runs, no account is created, and
+every subsequent function/account call returns a cryptic `404 Unknown client_id` with
+nothing obviously wrong in the running pods.
+
+Verify it ran after the first sync:
+
+```bash
+kubectl get job -n nvcf nvcf-api-account-bootstrap \
+  -o jsonpath='{.status.succeeded}'   # expect 1
+```
+
+If the job is absent or `0`, re-run it by re-syncing the `api` release so the hook fires
+again (delete the prior job first if it lingers in a completed/failed state and blocks the
+hook):
+
+```bash
+kubectl delete job -n nvcf nvcf-api-account-bootstrap --ignore-not-found
+HELMFILE_ENV=<env> helmfile --selector name=api sync
+kubectl logs -n nvcf job/nvcf-api-account-bootstrap   # confirm the account was created
+```
 
 For expanded debugging recipes, see [references/debugging.md](references/debugging.md).
 
