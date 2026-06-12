@@ -100,7 +100,7 @@ type ClusterClient interface {
 // clusterLister is a narrow seam used by resolveExistingCluster so the
 // recovery-path logic can be unit-tested independently of the full adapter.
 type clusterLister interface {
-	ListClusters(ctx context.Context, sisURL, ncaID string) ([]client.SISCluster, error)
+	ListClusters(ctx context.Context, sisURL, ncaID string) ([]client.ICMSCluster, error)
 }
 
 // resolveExistingCluster handles the --ignore-existing recovery branch: the

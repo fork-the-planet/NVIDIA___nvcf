@@ -227,16 +227,16 @@ func (f *fakeClusterDeleter) DeleteCluster(_ context.Context, _, _, clusterID st
 type fakeDownClusterClient struct {
 	fakeClusterDeleter
 	listCalls int
-	clusters  []client.SISCluster
+	clusters  []client.ICMSCluster
 	listErr   error
 }
 
-func (f *fakeDownClusterClient) ListClusters(_ context.Context, _, _ string) ([]client.SISCluster, error) {
+func (f *fakeDownClusterClient) ListClusters(_ context.Context, _, _ string) ([]client.ICMSCluster, error) {
 	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	var remaining []client.SISCluster
+	var remaining []client.ICMSCluster
 	for _, cluster := range f.clusters {
 		deleted := false
 		for _, deletedID := range f.deletedIDs {
@@ -493,7 +493,7 @@ func TestDown_ClusterNameUsesPersistedClusterIDBeforeCheckingRemainingClusters(t
 	}
 
 	fakeClient := &fakeDownClusterClient{}
-	fakeClient.clusters = []client.SISCluster{{ClusterID: "cl-ncp-local", ClusterName: "ncp-local", ClusterGroupID: "cg-ncp-local"}}
+	fakeClient.clusters = []client.ICMSCluster{{ClusterID: "cl-ncp-local", ClusterName: "ncp-local", ClusterGroupID: "cg-ncp-local"}}
 	prevDeleterFactory := newClusterDeleterForDown
 	t.Cleanup(func() { newClusterDeleterForDown = prevDeleterFactory })
 	newClusterDeleterForDown = func(_ string) (teardown.ClusterDeleter, func(), error) {

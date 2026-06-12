@@ -1550,6 +1550,77 @@ nvcf-cli admin accounts list --json
 
 ---
 
+## Cluster Agent Inspection
+
+The `cluster agent` commands let operators inspect the NVCF cluster agent (NVCA)
+running on a compute-plane cluster. They are read-only and read the
+`NVCFBackend` and `ICMSRequest` custom resources directly from the target
+cluster, so they work like `kubectl`: select the cluster with a kube context.
+
+### Selecting the cluster
+
+Use `--compute-plane-context` to choose the kube context for the target cluster.
+Standard kubeconfig resolution applies: `--kubeconfig`, then `KUBECONFIG`, then
+`~/.kube/config`.
+
+```bash
+nvcf-cli cluster agent status --compute-plane-context edge-cluster-1
+```
+
+### Commands
+
+| Command | What it does |
+| :---- | :---- |
+| `cluster agent status` | NVCA version, agent health, and GPU usage for the cluster, with optional control-plane (SIS) enrichment. |
+| `cluster agent list-functions` | Function versions scheduled on the cluster, with instance counts and a phase. |
+| `cluster agent get-function <function-id> [version-id]` | Detailed state for one scheduled function version, including its instances. |
+
+All commands support `--json` for automation.
+
+### Function phases
+
+The NVCA tracks eight granular request statuses. `list-functions` collapses them
+into three user-facing phases:
+
+| Phase | Meaning |
+| :---- | :---- |
+| `DEPLOYING` | Request pending or in progress (caching, instance creation). |
+| `ACTIVE` | Request completed and acknowledged. |
+| `DRAINING` | Cluster draining, a termination request, or instances winding down. |
+
+Failed requests are hidden by default. Use `--show-failed` to include them, or
+`--phase` to show only one of `ACTIVE`, `DEPLOYING`, or `DRAINING`.
+
+### Authentication
+
+`status`, `list-functions`, and `get-function` read from the cluster's
+Kubernetes API and rely on the kube context's RBAC; no NVCF token is required.
+
+`status` can additionally enrich its output with the control-plane (SIS) view of
+the cluster. That enrichment requires `--nca-id` and `NVCF_TOKEN` with the
+`cluster-management` scope. It is strictly additive: when the token or `--nca-id`
+is missing, or SIS has no data, `status` prints the cluster-derived fields and
+notes that the control-plane view was skipped, rather than failing.
+
+### Examples
+
+```bash
+# NVCA status as a table
+nvcf-cli cluster agent status --compute-plane-context edge-1
+
+# Status with control-plane enrichment
+export NVCF_TOKEN=${YOUR_ADMIN_JWT}
+nvcf-cli cluster agent status --compute-plane-context edge-1 --nca-id nca-123
+
+# Show only functions still draining during maintenance
+nvcf-cli cluster agent list-functions --compute-plane-context edge-1 --phase DRAINING
+
+# Detailed state for one function version, as JSON
+nvcf-cli cluster agent get-function func-abc ver-def --compute-plane-context edge-1 --json
+```
+
+---
+
 ## **License**
 
 This project is licensed under the terms specified in the repository license file.

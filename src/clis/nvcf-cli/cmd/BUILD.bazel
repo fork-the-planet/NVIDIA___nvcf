@@ -22,6 +22,7 @@ go_library(
         "agent_skill.go",
         "apikey.go",
         "cluster.go",
+        "cluster_agent.go",
         "cluster_registration.go",
         "cluster_utils.go",
         "deploy.go",
@@ -53,6 +54,8 @@ go_library(
         "//src/clis/nvcf-cli/internal/agentskill",
         "//src/clis/nvcf-cli/internal/apikeys",
         "//src/clis/nvcf-cli/internal/client",
+        "//src/clis/nvcf-cli/internal/clusteragent",
+        "//src/clis/nvcf-cli/internal/k8s",
         "//src/clis/nvcf-cli/internal/logging",
         "//src/clis/nvcf-cli/internal/selfhosted",
         "//src/clis/nvcf-cli/internal/selfhosted/controlplaneprofile",
@@ -87,6 +90,7 @@ go_test(
     name = "cmd_test",
     srcs = [
         "agent_skill_test.go",
+        "cluster_agent_test.go",
         "cluster_registration_test.go",
         "exit_code_error_test.go",
         "function_llm_model_test.go",
@@ -104,6 +108,7 @@ go_test(
     embed = [":cmd"],
     deps = [
         "//src/clis/nvcf-cli/internal/client",
+        "//src/clis/nvcf-cli/internal/clusteragent",
         "//src/clis/nvcf-cli/internal/selfhosted",
         "//src/clis/nvcf-cli/internal/selfhosted/controlplaneprofile",
         "//src/clis/nvcf-cli/internal/selfhosted/auth",

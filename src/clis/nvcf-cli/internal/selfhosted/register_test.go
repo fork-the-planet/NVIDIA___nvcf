@@ -120,16 +120,16 @@ func TestRegisterCluster_PropagatesError(t *testing.T) {
 // fakeLister is a test double for the clusterLister interface used by
 // resolveExistingCluster.
 type fakeLister struct {
-	clusters []client.SISCluster
+	clusters []client.ICMSCluster
 	err      error
 }
 
-func (f *fakeLister) ListClusters(_ context.Context, _, _ string) ([]client.SISCluster, error) {
+func (f *fakeLister) ListClusters(_ context.Context, _, _ string) ([]client.ICMSCluster, error) {
 	return f.clusters, f.err
 }
 
 func TestResolveExistingCluster_FoundByName(t *testing.T) {
-	l := &fakeLister{clusters: []client.SISCluster{
+	l := &fakeLister{clusters: []client.ICMSCluster{
 		{ClusterName: "other", ClusterID: "id-other"},
 		{ClusterName: "wanted", ClusterID: "id-wanted", ClusterGroupID: "grp-wanted"},
 	}}
@@ -140,7 +140,7 @@ func TestResolveExistingCluster_FoundByName(t *testing.T) {
 }
 
 func TestResolveExistingCluster_NotFound(t *testing.T) {
-	l := &fakeLister{clusters: []client.SISCluster{{ClusterName: "other"}}}
+	l := &fakeLister{clusters: []client.ICMSCluster{{ClusterName: "other"}}}
 	_, err := resolveExistingCluster(context.Background(), l, "url", "nca", "missing")
 	assert.ErrorContains(t, err, "missing")
 }

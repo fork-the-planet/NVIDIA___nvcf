@@ -294,7 +294,7 @@ func clusterNamesFromStackOut(stackPath string) ([]string, error) {
 	return out, nil
 }
 
-func registeredClusterName(cl client.SISCluster) string {
+func registeredClusterName(cl client.ICMSCluster) string {
 	if cl.ClusterName != "" {
 		return cl.ClusterName
 	}
@@ -480,10 +480,10 @@ func runDownControlPlane(c *cobra.Command, ctx context.Context, sink progress.Ev
 }
 
 type registeredClusterLister interface {
-	ListClusters(ctx context.Context, sisURL, ncaID string) ([]client.SISCluster, error)
+	ListClusters(ctx context.Context, sisURL, ncaID string) ([]client.ICMSCluster, error)
 }
 
-func listRegisteredClusters(ctx context.Context, icmsURL, ncaID string) ([]client.SISCluster, error) {
+func listRegisteredClusters(ctx context.Context, icmsURL, ncaID string) ([]client.ICMSCluster, error) {
 	deleter, closeDeleter, err := newClusterDeleterForDown(icmsURL)
 	if err != nil {
 		return nil, fmt.Errorf("constructing cluster lister: %w", err)
