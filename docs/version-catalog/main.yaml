@@ -93,7 +93,7 @@ artifacts:
   - name: helm-nvcf-llm-request-router
     type: chart
     registry: staging
-    version: 1.6.2
+    version: 1.6.3
   - name: helm-nvcf-nats-auth-callout-service
     type: chart
     registry: staging
