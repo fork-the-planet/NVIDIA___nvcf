@@ -45,7 +45,7 @@ The `Dockerfile` uses the public upstream OpenBao image (`openbao/openbao:2.5.4`
 
 ```bash
 docker build \
-  --build-arg KUBECTL_APK_VERSION=1.33.1-r5 \
+  --build-arg KUBECTL_APK_VERSION=1.34.2-r6 \
   -t <your-registry>/<your-org>/openbao-migrations:<version> .
 ```
 

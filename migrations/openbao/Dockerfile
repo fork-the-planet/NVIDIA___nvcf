@@ -1,4 +1,4 @@
-ARG ALPINE_VERSION=3.22
+ARG ALPINE_VERSION=3.23
 
 FROM alpine:${ALPINE_VERSION} AS jwker-downloader
 
@@ -26,7 +26,7 @@ RUN apk add --no-cache curl tar && \
 
 FROM alpine:${ALPINE_VERSION} AS kubectl-downloader
 
-ARG KUBECTL_APK_VERSION=1.33.1-r5
+ARG KUBECTL_APK_VERSION=1.34.2-r6
 
 # apk verifies the signed repository index and package checksums.
 RUN apk add --no-cache "kubectl=${KUBECTL_APK_VERSION}" && \
