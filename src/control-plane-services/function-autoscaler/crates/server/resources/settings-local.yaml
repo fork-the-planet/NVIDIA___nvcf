@@ -62,7 +62,6 @@ scaling:
   discover_new_functions_interval_seconds: 30
   lookback_seconds: 600
   decay_factor: 0.1
-  accounts_without_worker_metrics: ""
   policy:
     type: Static
     settings:

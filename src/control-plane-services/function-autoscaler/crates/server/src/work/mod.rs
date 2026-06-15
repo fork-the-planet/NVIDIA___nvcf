@@ -166,9 +166,10 @@ async fn get_byoc_instance_count(
     ignore_env: bool,
 ) -> Result<usize> {
     let env_suffix = if ignore_env {
-        "".to_string()
+        String::new()
     } else {
-        format!(", env=\"{}\"", env)
+        let env_val = if env == "stg" { "stage" } else { "prod" };
+        format!(r#", environment="{}""#, env_val)
     };
 
     let query = format!(
@@ -253,6 +254,11 @@ async fn get_byoc_instance_count(
 /// discovery adds or moves a function; if a function stays in the same table, num_workers is
 /// never refreshed and scaling would report stale counts (e.g. 2 when TimeseriesDb shows 3).
 ///
+/// Returns `Ok(None)` when no worker series matched the query at all. Callers use that as the
+/// signal to fall back to control-plane metrics (BYOC / CP-only functions never emit worker
+/// series). `Ok(Some(0))` would mean "series exists but count parsed as 0," which we don't
+/// expect from this counter shape but is kept distinct from the fallback signal.
+///
 /// We do not filter or group by nca_id in the query (same as utilization and BYOC queries).
 async fn get_current_worker_count_from_timeseries_db(
     timeseries_db_client: &TimeseriesDbClient,
@@ -261,7 +267,7 @@ async fn get_current_worker_count_from_timeseries_db(
     nca_id: &str,
     env: &str,
     ignore_env: bool,
-) -> Result<usize> {
+) -> Result<Option<usize>> {
     let env_filter = if ignore_env {
         String::new()
     } else {
@@ -299,18 +305,18 @@ async fn get_current_worker_count_from_timeseries_db(
                     nca_id,
                     n
                 );
-                return Ok(n);
+                return Ok(Some(n));
             }
         }
     }
 
-    tracing::warn!(
-        "No worker count from TimeseriesDb for {}:{} (nca_id={}) — no matching series or empty values; reporting 0",
+    tracing::debug!(
+        "No worker series for {}:{} (nca_id={}); caller will fall back to control-plane metrics",
         function_id,
         function_version_id,
         nca_id
     );
-    Ok(0)
+    Ok(None)
 }
 
 // Function that creates or removes our node entry in Cassandra based on readiness.
@@ -457,44 +463,11 @@ async fn make_scaling_requests_for_table(
                     let cached: Option<FunctionCachedState> = function_state_cache
                         .get(&(function.function_id, function.function_version_id));
 
-                    // Check if this is a BYOC function (NCA ID is in the filter list)
-                    // BYOC functions use utilization-based scaling even with unknown worker count
+                    // Resolve the metric path for this function. Worker metrics are the default;
+                    // when no worker series exists at query time (BYOC and other CP-only functions)
+                    // we fall back to control-plane metrics.
                     let nca_id_str = function.nca_id.as_str();
-                    let uses_cp_metrics = scaling_settings.has_accounts_without_worker_metrics()
-                        && scaling_settings.is_account_without_worker_metrics(nca_id_str);
-
-                    tracing::debug!(
-                        "Scaling path for {}:{} - account: '{}', has_accounts_without_worker_metrics: {}, uses_cp_metrics: {}",
-                        function.function_id,
-                        function.function_version_id,
-                        nca_id_str,
-                        scaling_settings.has_accounts_without_worker_metrics(),
-                        uses_cp_metrics,
-                    );
-
-                    // Get current instance count from TimeseriesDb
-                    let current_instances = if uses_cp_metrics {
-                        match get_byoc_instance_count(
-                            &timeseries_db_client,
-                            &function.function_id,
-                            &function.function_version_id,
-                            &env,
-                            ignore_env,
-                        )
-                        .await
-                        {
-                            Ok(n) => n,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "TimeseriesDb BYOC instance count failed for {}:{}, using 0: {}",
-                                    function.function_id,
-                                    function.function_version_id,
-                                    e
-                                );
-                                0
-                            }
-                        }
-                    } else {
+                    let (current_instances, uses_cp_metrics) =
                         match get_current_worker_count_from_timeseries_db(
                             &timeseries_db_client,
                             &function.function_id,
@@ -505,7 +478,38 @@ async fn make_scaling_requests_for_table(
                         )
                         .await
                         {
-                            Ok(n) => n,
+                            Ok(Some(n)) => (n, false),
+                            Ok(None) => {
+                                // No worker series — fall back to control-plane metrics.
+                                tracing::info!(
+                                    "No worker series for {}:{} (nca_id={}); falling back to control-plane metrics",
+                                    function.function_id,
+                                    function.function_version_id,
+                                    nca_id_str
+                                );
+                                let n = match get_byoc_instance_count(
+                                    &timeseries_db_client,
+                                    &function.function_id,
+                                    &function.function_version_id,
+                                    &env,
+                                    ignore_env,
+                                )
+                                .await
+                                {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "CP fallback instance count failed for {}:{} (nca_id={}), using 0: {}",
+                                            function.function_id,
+                                            function.function_version_id,
+                                            nca_id_str,
+                                            e
+                                        );
+                                        0
+                                    }
+                                };
+                                (n, true)
+                            }
                             Err(e) => {
                                 tracing::warn!(
                                     "TimeseriesDb worker count failed for {}:{} (nca_id={}), using 0: {}",
@@ -514,10 +518,9 @@ async fn make_scaling_requests_for_table(
                                     nca_id_str,
                                     e
                                 );
-                                0
+                                (0, false)
                             }
-                        }
-                    };
+                        };
 
                     tracing::info!(
                         "Current instances for {}:{} = {} (uses_cp_metrics: {}, source: {})",

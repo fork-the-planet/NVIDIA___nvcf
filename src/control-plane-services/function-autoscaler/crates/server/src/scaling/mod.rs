@@ -79,8 +79,6 @@ pub struct ScalingSettings {
     pub lookback: Duration,
     #[serde(default)]
     pub decay_factor: f32,
-    #[serde(default, rename = "accounts_without_worker_metrics")]
-    pub accounts_without_worker_metrics: String,
     pub policy: ScalingPolicy,
     #[serde_as(as = "serde_with::DurationSeconds<u64>")]
     #[serde(
@@ -121,7 +119,6 @@ impl Default for ScalingSettings {
             discover_new_functions_interval: default_discover_interval(),
             decay_factor: 0.0,
             lookback: default_lookback(),
-            accounts_without_worker_metrics: String::new(),
             policy: ScalingPolicy::Static(StaticScalingPolicy::default()),
             discovery_lock_duration: default_discovery_lock_duration(),
             scale_to_zero_idle_timeout: default_scale_to_zero_idle_timeout(),
@@ -138,19 +135,6 @@ impl Default for ScalingSettings {
 }
 
 impl ScalingSettings {
-    /// Returns true if the given NCA ID is in the accounts_without_worker_metrics list.
-    /// Empty list means all accounts use worker metrics, so returns false.
-    pub fn is_account_without_worker_metrics(&self, nca_id: &str) -> bool {
-        self.accounts_without_worker_metrics
-            .split(',')
-            .any(|id| id.trim() == nca_id)
-    }
-
-    /// Returns true if NCA ID filtering is enabled (filter is not empty)
-    pub fn has_accounts_without_worker_metrics(&self) -> bool {
-        !self.accounts_without_worker_metrics.is_empty()
-    }
-
     /// Get scaling policy (thresholds and factors) for a specific function version ID
     ///
     /// Behavior depends on the configured policy type:
@@ -330,6 +314,7 @@ pub fn prepare_time_series(
                 rounded_timestamp == minute
             })
             .and_then(|(_, utilization_str)| utilization_str.parse::<f64>().ok())
+            .filter(|x| x.is_finite())
             .unwrap_or(0.0);
         result.push(value);
     }
@@ -366,7 +351,15 @@ pub fn get_desired_instances(
     sorted.sort_by_key(|(ts, _)| *ts);
     let historical_utilization: Vec<f64> = sorted
         .iter()
-        .map(|(_, v)| v.parse::<f64>().unwrap_or(0.0))
+        // Prometheus encodes 0/0 (e.g. the CP utilization query at zero instances) as the string
+        // "NaN", which parses to f64::NAN and silently breaks the `< scale_down_threshold` guard
+        // (NaN compares false), preventing scale-to-zero. Treat non-finite values as 0.0.
+        .map(|(_, v)| {
+            v.parse::<f64>()
+                .ok()
+                .filter(|x| x.is_finite())
+                .unwrap_or(0.0)
+        })
         .collect();
 
     let avg_utilization =
@@ -663,6 +656,29 @@ mod tests {
         let result = get_desired_instances(vec![], &default_policy(), 0, 0.1);
         assert_eq!(result.as_ref().map(|d| d.desired_instances), Some(1));
         assert_eq!(result.as_ref().map(|d| d.average_utilization), Some(0.0));
+    }
+
+    /// Prometheus returns 0/0 as the string "NaN" (e.g. the CP utilization query at zero
+    /// instances). NaN must be treated as 0.0 so average_utilization stays finite; otherwise
+    /// the downstream `< scale_down_threshold` guard compares against NaN (always false) and
+    /// scale-to-zero silently breaks.
+    #[test]
+    fn test_non_finite_utilization_treated_as_zero() {
+        let raw_data = vec![
+            (1080, "NaN".to_string()),
+            (1140, "+Inf".to_string()),
+            (1200, "NaN".to_string()),
+        ];
+
+        let result = get_desired_instances(raw_data, &default_policy(), 0, 0.1);
+
+        let decision = result.expect("decision");
+        assert!(
+            decision.average_utilization.is_finite(),
+            "average_utilization must be finite, got {}",
+            decision.average_utilization
+        );
+        assert_eq!(decision.average_utilization, 0.0);
     }
 
     #[test]
