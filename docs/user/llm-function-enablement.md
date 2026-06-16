@@ -31,17 +31,25 @@ When enabled, the stack creates:
 
 ## Helmfile Configuration
 
-Add the LLM addon block to your Helmfile environment file before applying the
-stack:
+Add the LLM addon and `agentConfig` block to your Helmfile environment file
+before applying the stack:
 
 ```yaml
 addons:
   llm:
     enabled: true
     gateway:
-      replicaCount: 3
+      replicaCount: 1
+      auth:
+        grpcInsecure: true
+      metrics:
+        serviceMonitor:
+          enabled: false
     requestRouter:
-      replicaCount: 3
+      replicaCount: 1
+      metrics:
+        serviceMonitor:
+          enabled: false
       loadBalancer:
         config: |
           {
@@ -53,10 +61,18 @@ addons:
               "groq-multiregion": "groq-multiregion"
             }
           }
+
+agentConfig:
+  mergeConfig: |
+    cluster:
+      validationPolicy:
+        name: Unrestricted
+    workload:
+      stargateQUICInsecure: true
 ```
 
-Use `replicaCount: 1` for local or single-node test clusters. Use multiple
-replicas for shared or production environments.
+Use `replicaCount: 1` for local or single-node test clusters. Increase
+replica counts for shared or production environments.
 
 `addons.llm.requestRouter.loadBalancer.config` configures request-router
 algorithm selection. Function model specs use underscored `routingMethod`
@@ -84,8 +100,13 @@ artifact registry settings as the other control plane services.
 
 ## Local Plaintext Transport
 
-Local development clusters commonly run the API gRPC endpoint and worker router
-tunnel without TLS. In that case, add both plaintext controls:
+Local development clusters commonly run the LLM API Gateway to NVCF API gRPC
+hop and the worker `pylon` sidecar to request-router QUIC tunnel without TLS.
+In that case, add both plaintext controls.
+
+The complete Helmfile example above includes these settings and the
+request-router load balancer config. If you already have an LLM block, include
+these plaintext-specific fields:
 
 ```yaml
 addons:
@@ -105,14 +126,14 @@ agentConfig:
 ```
 
 `addons.llm.gateway.auth.grpcInsecure: true` configures the LLM API Gateway to
-talk to the local NVCF API over plaintext gRPC.
+talk to the NVCF API over plaintext gRPC.
 
 `workload.stargateQUICInsecure: true` configures generated LLM workers to pass
-the insecure local QUIC setting to the `pylon` sidecar.
+the plaintext QUIC setting to the `pylon` sidecar.
 
 <Warning>
-Use these insecure settings only for local or isolated test clusters. Production
-environments should use TLS-capable service configuration instead.
+Use these plaintext settings only for local or isolated test clusters.
+Production environments should use TLS-capable service configuration instead.
 
 </Warning>
 
