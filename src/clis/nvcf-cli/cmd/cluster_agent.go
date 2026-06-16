@@ -93,6 +93,7 @@ func initClusterAgentCmds() {
 	clusterAgentCmd.AddCommand(clusterAgentListFunctionsCmd)
 	clusterAgentCmd.AddCommand(clusterAgentGetFunctionCmd)
 	initClusterAgentMaintenanceCmds()
+	initClusterAgentValidateCmds()
 
 	for _, c := range []*cobra.Command{clusterAgentStatusCmd, clusterAgentListFunctionsCmd, clusterAgentGetFunctionCmd} {
 		c.Flags().String(flagComputePlaneContext, "", "Kube context for the target compute-plane cluster")

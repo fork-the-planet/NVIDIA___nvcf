@@ -20,9 +20,11 @@ go_library(
     srcs = [
         "k8s_inspector.go",
         "k8s_maintainer.go",
+        "k8s_validator.go",
         "maintainer.go",
         "phase.go",
         "types.go",
+        "validator.go",
     ],
     importpath = "nvcf-cli/internal/clusteragent",
     visibility = ["//src/clis/nvcf-cli:__subpackages__"],
@@ -44,6 +46,7 @@ go_test(
     srcs = [
         "k8s_inspector_test.go",
         "k8s_maintainer_test.go",
+        "k8s_validator_test.go",
         "phase_test.go",
     ],
     embed = [":clusteragent"],
@@ -51,6 +54,7 @@ go_test(
         "@io_k8s_api//apps/v1:apps",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/api/resource",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
         "@io_k8s_apimachinery//pkg/apis/meta/v1/unstructured",
         "@io_k8s_apimachinery//pkg/runtime",
