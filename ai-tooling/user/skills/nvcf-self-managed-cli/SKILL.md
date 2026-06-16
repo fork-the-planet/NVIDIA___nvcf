@@ -1,20 +1,15 @@
 ---
 name: nvcf-self-managed-cli
 description: |
-  Install, manage, operate, and tear down self-hosted NVIDIA Cloud Functions (NVCF)
-  deployments via nvcf-cli. Use when users want to bring up a control plane, register
-  a compute plane, deploy or invoke a container or LLM function, create or monitor
-  tasks, manage admin tokens, check cluster health, diagnose a failed install, or
-  tear down (uninstall) any of the above. Supports single-cluster (control plane and
-  compute plane on one Kubernetes cluster) and split-cluster (control plane on cluster
-  A, N compute planes on clusters B/C/...) topologies. Trigger keywords: nvcf, nvcf-cli,
-  self-hosted nvcf, install nvcf, uninstall nvcf, tear down nvcf, remove nvcf, deploy nvcf,
-  register cluster, deregister cluster, NVCFBackend, control plane, compute plane, NCP, NVCA,
-  function deploy, function invoke, GPU function, LLM function, OpenAI-compatible
-  invocation, chat completions, Responses API, embeddings, cluster register, cluster rotate, cluster delete,
-  helmfile, helmfile destroy, helm uninstall, icms, api-keys, cluster ID, JWKS rotation,
-  task, tasks, task create, task list, task cancel, task delete, batch job, batch task,
-  create a task, run a task, submit a task, monitor a task.
+  Install, operate, and tear down self-hosted NVIDIA Cloud Functions (NVCF)
+  deployments with nvcf-cli. Use for control-plane or compute-plane install,
+  status checks, cluster registration, function deploy/invoke, task
+  create/list/cancel/delete, API keys, admin tokens, JWKS rotation,
+  failed-install diagnosis, and uninstall or down workflows. Trigger keywords:
+  nvcf, nvcf-cli, self-hosted nvcf, self-managed nvcf, NVCFBackend, NVCA, NCP,
+  ICMS, helmfile, control plane, compute plane, LLM function,
+  OpenAI-compatible invocation, Responses API, embeddings, batch task, task
+  monitor, cluster rotate, cluster delete.
 allowed-tools: Bash, Read, AskUserQuestion
 argument-hint: "[install|status|check|deploy-function|register-cluster|teardown] [args]"
 ---
