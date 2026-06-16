@@ -1,6 +1,3 @@
-## Customer Summary (required for feat, fix, and perf PRs)
-<!--To include in the release notes. Use customer facing language to describe the effect on them.-->
-
 ## TL;DR
 <!--Provide a brief description of what changed and why it is needed.-->
 
