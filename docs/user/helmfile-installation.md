@@ -756,6 +756,8 @@ The account bootstrap job runs as a post-install hook and is the most common fai
 
 **Phase 4: (Optional) GPU Operator (1-2 minutes)**
 
+- For real GPU clusters, complete [GPU Cluster Setup](./cluster-management/index.md)
+  after Phase 3. The page covers the NVIDIA GPU Operator prerequisite and cluster registration.
 - Fake GPU Operator (optional, for development environments)
 - **Helmfile Selector:** `release-group=workers`
 
