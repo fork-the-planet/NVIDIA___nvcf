@@ -97,7 +97,7 @@ EOF
 helm install kai-scheduler \
   oci://ghcr.io/kai-scheduler/kai-scheduler/kai-scheduler \
   -n kai-scheduler --create-namespace -f nvca-values.yaml \
-  --version v0.12.6 \
+  --version v0.14.0 \
   --wait --timeout 5m
 ```
 

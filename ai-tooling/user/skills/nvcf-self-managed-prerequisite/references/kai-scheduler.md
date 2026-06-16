@@ -10,7 +10,7 @@ An open-source Kubernetes-native scheduler for AI workloads at large scale. The 
 
 KAI moves with the NVCF stack. Always cross-check the version in the stack `manifest.yaml` before installing — the chart version that ships in the manifest is the one NVCF has validated against the current NVCA / SIS combination.
 
-At the time of writing, the pinned chart version is `v0.12.6`. See [NVCF KAI Scheduler docs](https://docs.nvidia.com/cloud-functions/current/latest/cluster-management/kai-scheduler.html) for the canonical version table.
+At the time of writing, the pinned chart version is `v0.14.0`. See [NVCF KAI Scheduler docs](https://docs.nvidia.com/cloud-functions/current/latest/cluster-management/kai-scheduler.html) for the canonical version table.
 
 ## Install
 
@@ -65,7 +65,7 @@ helm install kai-scheduler \
   oci://ghcr.io/kai-scheduler/kai-scheduler/kai-scheduler \
   -n kai-scheduler \
   --create-namespace \
-  --version v0.12.6 -f nvca-values.yaml \
+  --version v0.14.0 -f nvca-values.yaml \
   --wait --timeout 5m
 ```
 
