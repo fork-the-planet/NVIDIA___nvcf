@@ -4,13 +4,14 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
   I want to use the documented Helmfile workflow across two pre-provisioned
   EKS clusters, so that I can install the control plane on one cluster, then
   register and install the NVCA operator on a separate compute cluster, and
-  deploy and invoke a sample function end to end.
+  verify that the compute cluster agent becomes healthy.
 
   # This feature is values-driven (not profile-driven); see
   # AGENTS.md "CLI vs Helmfile install paths". It authors the nvcf-cli
-  # config and runs init + cluster register explicitly (like the
-  # single-cluster EKS feature) because the gateway address is only
-  # known at runtime.
+  # config from the gateway address at runtime, then uses the
+  # compute-plane Makefile register-cluster target. That target runs
+  # nvcf-cli init before cluster register and writes the registration
+  # values consumed by Helmfile.
   #
   # Required environment variables (user-supplied):
   #   NVCF_CLI                   built CLI path (harness)
@@ -141,6 +142,18 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       | openbao.migrations.issuerDiscovery.enabled                     | true                                 |
     Then yaml file "deploy/stacks/self-managed/environments/eks-bdd-multi.yaml" key "global.domain" should equal "${EKS_GATEWAY_ADDR}"
 
+    When I copy the file "deploy/stacks/nvcf-compute-plane/environments/base.yaml" to "deploy/stacks/nvcf-compute-plane/environments/eks-bdd-multi.yaml"
+    And I update yaml file "deploy/stacks/nvcf-compute-plane/environments/eks-bdd-multi.yaml" with keys:
+      | global.helm.sources.repository                                 | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
+      | global.image.repository                                        | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
+      | global.imagePullSecrets[0].name                                | nvcr-pull-secret                     |
+      | global.nvcaOperator.selfManaged.icmsServiceURL                 | http://${EKS_GATEWAY_ADDR}           |
+      | global.nvcaOperator.selfManaged.icmsServiceHostHeaderOverride  | sis.${EKS_GATEWAY_ADDR}              |
+      | global.nvcaOperator.selfManaged.revalServiceURL                | http://${EKS_GATEWAY_ADDR}           |
+      | global.nvcaOperator.selfManaged.revalServiceHostHeaderOverride | reval.${EKS_GATEWAY_ADDR}            |
+      | global.nvcaOperator.selfManaged.natsURL                        | nats://${EKS_GATEWAY_ADDR}:4222      |
+      | global.nvcaOperator.selfManaged.natsHostOverride               | nats.${EKS_GATEWAY_ADDR}             |
+
   Rule: Helmfile installs the control plane on the control-plane EKS cluster
 
     Background:
@@ -211,13 +224,18 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
 
     @nvca-registration
     Scenario: User registers the compute cluster and installs the NVCA operator there
-      # cluster register auto-discovers the target cluster's OIDC issuer
-      # + JWKS by probing the CURRENT kubectl context, then POSTs that
-      # identity to ICMS. The compute cluster (not the control plane) is
-      # the target, so switch context to it before register-cluster runs.
-      # compute-plane install that follows also runs helm against the
-      # ambient context, so this single switch covers both steps.
+      # The pull-secret helper below uses the current kubectl context.
       When I run command "kubectl config use-context ${EKS_COMPUTE_CONTEXT}"
+      Then the command exit code should be 0
+
+      # Create a kubeconfig scoped to the compute cluster. register-cluster
+      # uses this file to discover the compute cluster's OIDC issuer and
+      # JWKS, and install uses the same file so Helmfile targets the compute
+      # cluster instead of the control-plane cluster.
+      When I run command:
+        """
+        bash -c 'set -eo pipefail; mkdir -p tests/bdd/out; kubectl --context "${EKS_COMPUTE_CONTEXT}" config view --raw --minify --flatten > tests/bdd/out/eks-compute-kubeconfig.yaml'
+        """
       Then the command exit code should be 0
 
       # Pull secret in the operator namespace on the compute cluster. The
@@ -239,29 +257,24 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
         | invoke_host          | invocation.${EKS_GATEWAY_ADDR} |
         | icms_host            | sis.${EKS_GATEWAY_ADDR}        |
 
-      # Mint the admin JWT against the control-plane gateway.
-      When I run command "${NVCF_CLI} --config tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml init"
-      Then the command exit code should be 0
-
-      # Register the compute cluster with the control plane. tee mirrors
-      # the CLI's full stdout to stderr for log visibility; the slice
-      # helper extracts the YAML body from the mixed stdout before
-      # redirecting it to the compute-plane values file.
+      # Register the compute cluster with the control plane. The Makefile
+      # runs nvcf-cli init, then cluster register, and writes the returned
+      # Helm values under registration/.
       When I run command:
         """
-        bash -c 'set -eo pipefail; mkdir -p deploy/stacks/nvcf-compute-plane/out; ${NVCF_CLI} --config tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml cluster register --name ${EKS_COMPUTE_CLUSTER_NAME} --nca-id nvcf-default --region ${EKS_REGION} --icms-url http://${EKS_GATEWAY_ADDR} --ignore-existing | tee /dev/stderr | tests/bdd/scripts/slice-yaml-body.sh > deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml'
+        make -C deploy/stacks/nvcf-compute-plane register-cluster CLUSTER_NAME=${EKS_COMPUTE_CLUSTER_NAME} NCA_ID=nvcf-default CLUSTER_REGION=${EKS_REGION} ICMS_URL=http://${EKS_GATEWAY_ADDR} KUBECONFIG_FILE=${REPO_ROOT}/tests/bdd/out/eks-compute-kubeconfig.yaml NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml
         """
       Then the command exit code should be 0
-      And file "deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" should exist
-      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" should contain:
+      And file "deploy/stacks/nvcf-compute-plane/registration/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" should exist
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" should contain:
         """
         ncaID: nvcf-default
         region: ${EKS_REGION}
         selfManaged:
           identitySource: psat
         """
-      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" key "clusterID" should not be empty
-      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" key "clusterGroupID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" key "clusterID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" key "clusterGroupID" should not be empty
 
       # The register-values URLs stay as cluster register's bare-ELB
       # output. Gateway HTTPRoute matching is handled by the chart-native
@@ -269,7 +282,7 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       # which the agent sends as the HTTP Host header.
       When I run command:
         """
-        make -C deploy/stacks/nvcf-compute-plane install CLUSTER_NAME=${EKS_COMPUTE_CLUSTER_NAME} HELMFILE_ENV=eks-bdd-multi NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml
+        make -C deploy/stacks/nvcf-compute-plane install CLUSTER_NAME=${EKS_COMPUTE_CLUSTER_NAME} HELMFILE_ENV=eks-bdd-multi KUBECONFIG_FILE=${REPO_ROOT}/tests/bdd/out/eks-compute-kubeconfig.yaml NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml
         """
       Then the command exit code should be 0
 

@@ -29,6 +29,7 @@ import (
 
 const (
 	defaultStackProjectID    = 182049
+	defaultComputeProjectID  = 268903
 	defaultPackageName       = "ncp-deploy"
 	defaultStackResourceName = "nvcf-self-managed-stack"
 	computeStackResourceName = "nvcf-compute-plane-stack"
@@ -461,6 +462,10 @@ func defaultOutputs() []OutputFile {
 				{
 					Marker:   "image-mirroring-stack-snippet",
 					Renderer: "image-mirroring-stack-snippet",
+				},
+				{
+					Marker:   "image-mirroring-compute-stack-snippet",
+					Renderer: "image-mirroring-compute-stack-snippet",
 				},
 				{
 					Marker:   "image-mirroring-cli-snippet",

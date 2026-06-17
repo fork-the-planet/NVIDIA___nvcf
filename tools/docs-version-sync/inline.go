@@ -110,20 +110,22 @@ func syncImageMirroring(content string, catalog *Catalog) (string, bool, error) 
 }
 
 func syncClusterManagementSelfManaged(content string, catalog *Catalog) (string, bool, error) {
-	updated, changed, err := replaceChartVersions(content, catalog, []string{"helm-nvca-operator"})
-	if err != nil {
-		return "", false, err
+	chart, ok := catalog.findArtifact("helm-nvca-operator")
+	if !ok {
+		return "", false, fmt.Errorf("artifact helm-nvca-operator is required")
 	}
+	updated, count := replaceVersionTable(content, chart.Name, chart.Version)
+	if count == 0 {
+		return "", false, fmt.Errorf("version table for %s not found", chart.Name)
+	}
+	updated, _ = replaceHelmVersionArgument(updated, chart.Name, chart.Version)
+
 	nvca, ok := catalog.findArtifact("nvca")
 	if !ok {
 		return "", false, fmt.Errorf("artifact nvca is required")
 	}
-	var count int
 	updated, count = replaceYAMLStringValue(updated, "nvcaVersion", nvca.Version)
-	if count == 0 {
-		return "", false, fmt.Errorf("selfManaged.nvcaVersion not found")
-	}
-	return updated, changed || updated != content, nil
+	return updated, updated != content, nil
 }
 
 func syncClusterManagementReference(content string, catalog *Catalog) (string, bool, error) {
@@ -161,7 +163,8 @@ func replaceChartVersions(content string, catalog *Catalog, names []string) (str
 }
 
 func replaceVersionTable(content, chartName, version string) (string, int) {
-	pattern := fmt.Sprintf(`(?s)(\| \*\*Chart\*\* \| %s \|\n\| --- \| --- \|\n\| \*\*Version\*\* \| )`+"`[^`]+`"+`( \|)`, regexp.QuoteMeta("`"+chartName+"`"))
+	label := `(?:\*\*)?%s(?:\*\*)?`
+	pattern := fmt.Sprintf(`(?s)(\| `+label+` \| %s \|\n\| --- \| --- \|\n\| `+label+` \| )`+"`[^`]+`"+`( \|)`, "Chart", regexp.QuoteMeta("`"+chartName+"`"), "Version")
 	re := regexp.MustCompile(pattern)
 	count := len(re.FindAllStringIndex(content, -1))
 	return re.ReplaceAllString(content, "${1}`"+version+"`${2}"), count

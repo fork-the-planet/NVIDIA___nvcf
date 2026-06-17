@@ -29,6 +29,9 @@ versions:
 - display-name: dev
   path: versions/dev.yml
   slug: dev
+- display-name: "0.6.0-rc"
+  path: versions/v0.6.0-rc.yml
+  slug: "v0.6.0-rc"
 - display-name: "0.5.0"
   path: versions/v0.5.yml
   slug: "v0.5"
@@ -40,5 +43,7 @@ redirects:
     destination: "/nvcf/dev/"
   - source: "/nvcf/latest/index.html"
     destination: "/nvcf/"
+  - source: "/nvcf/v0.6.0-rc/index.html"
+    destination: "/nvcf/v0.6.0-rc/"
   - source: "/nvcf/v0.5/index.html"
     destination: "/nvcf/v0.5/"

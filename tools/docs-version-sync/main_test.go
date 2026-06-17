@@ -254,6 +254,27 @@ func TestSyncInlineSelfManagedNVCAOperatorVersions(t *testing.T) {
 	}
 }
 
+func TestSyncInlineSelfManagedNVCAOperatorPlainVersionTable(t *testing.T) {
+	catalog := testCatalog()
+	catalog.SupplementalArtifacts = append(catalog.SupplementalArtifacts,
+		Artifact{Name: "nvca", Type: ArtifactTypeImage, Registry: "staging", Version: "3.0.0-rc.11"},
+		Artifact{Name: "helm-nvca-operator", Type: ArtifactTypeChart, Registry: "staging", Version: "1.9.0"},
+	)
+	content := "| Chart | `helm-nvca-operator` |\n| --- | --- |\n| Version | `1.6.7` |\n\n" +
+		"The compute-plane Helmfile installs the operator.\n"
+
+	got, changed, err := SyncInlineVersions("docs/user/cluster-management/self-managed.md", content, catalog)
+	if err != nil {
+		t.Fatalf("SyncInlineVersions failed: %v", err)
+	}
+	if !changed {
+		t.Fatal("SyncInlineVersions reported no change")
+	}
+	if !strings.Contains(got, "`1.9.0`") {
+		t.Fatalf("updated content missing chart version:\n%s", got)
+	}
+}
+
 func TestSyncInlineImageMirroringNVCAOperatorChartVersions(t *testing.T) {
 	catalog := testCatalog()
 	catalog.SupplementalArtifacts = append(catalog.SupplementalArtifacts,
@@ -472,14 +493,17 @@ helm-nvcf-api:1.13.0
 
 func TestUpdateCatalogPreservesCustomDenylist(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wantPath := "/api/v4/projects/182049/packages/generic/ncp-deploy/0.9.0/artifacts-0.9.0.txt"
-		if r.URL.Path != wantPath {
+		switch r.URL.Path {
+		case "/api/v4/projects/182049/packages/generic/ncp-deploy/0.9.0/artifacts-0.9.0.txt":
+			fmt.Fprint(w, `legacy-service:1.0.0
+strap:2.234.0
+`)
+		case "/api/v4/projects/268903/packages":
+			fmt.Fprint(w, `[{"name":"nvcf-compute-plane-stack","version":"1.0.0"}]`)
+		default:
 			http.Error(w, fmt.Sprintf("unexpected path %s", r.URL.Path), http.StatusNotFound)
 			return
 		}
-		fmt.Fprint(w, `legacy-service:1.0.0
-strap:2.234.0
-`)
 	}))
 	defer server.Close()
 
@@ -501,6 +525,35 @@ strap:2.234.0
 	}
 	if _, ok := catalog.findArtifact("strap"); !ok {
 		t.Fatal("updated catalog is missing allowed artifact strap")
+	}
+}
+
+func TestUpdateCatalogSyncsComputePlaneStackPackage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/projects/182049/packages/generic/ncp-deploy/0.9.0/artifacts-0.9.0.txt":
+			fmt.Fprint(w, `strap:2.234.0`)
+		case "/api/v4/projects/268903/packages":
+			fmt.Fprint(w, `[{"name":"nvcf-compute-plane-stack","version":"1.0.0"}]`)
+		default:
+			http.Error(w, fmt.Sprintf("unexpected path %s", r.URL.Path), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DOC_VERSION_SYNC_GITLAB_BASE_URL", server.URL)
+	t.Setenv("DOC_VERSION_SYNC_GITLAB_TOKEN", "env-token")
+
+	catalog, err := updateCatalogFromGitLab("0.9.0", testCatalog())
+	if err != nil {
+		t.Fatalf("updateCatalogFromGitLab failed: %v", err)
+	}
+	compute, ok := catalog.findArtifact(computeStackResourceName)
+	if !ok {
+		t.Fatal("updated catalog is missing compute-plane stack artifact")
+	}
+	if compute.Version != "1.0.0" {
+		t.Fatalf("compute stack version = %q, want 1.0.0", compute.Version)
 	}
 }
 
@@ -555,6 +608,60 @@ func TestLatestStackVersionPaginatesPackages(t *testing.T) {
 	}
 	if version != "0.9.2" {
 		t.Fatalf("version = %q, want 0.9.2", version)
+	}
+}
+
+func TestLatestGenericPackageVersionDoesNotUseReleaseFallback(t *testing.T) {
+	releaseRequested := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/projects/268903/packages":
+			fmt.Fprint(w, `[]`)
+		case "/api/v4/projects/268903/releases":
+			releaseRequested = true
+			fmt.Fprint(w, `[{"tag_name":"0.6.0-rc.84"}]`)
+		default:
+			http.Error(w, fmt.Sprintf("unexpected path %s", r.URL.Path), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := &GitLabClient{BaseURL: server.URL, HTTPClient: server.Client()}
+	_, err := client.LatestGenericPackageVersion(defaultComputeProjectID, computeStackResourceName)
+	if err == nil {
+		t.Fatal("LatestGenericPackageVersion succeeded without a package")
+	}
+	if releaseRequested {
+		t.Fatal("LatestGenericPackageVersion requested releases")
+	}
+	if !strings.Contains(err.Error(), "no generic package version found") {
+		t.Fatalf("error = %q, want missing generic package", err)
+	}
+}
+
+func TestComputeStackProjectIDUsesCIProjectID(t *testing.T) {
+	t.Setenv("DOC_VERSION_SYNC_COMPUTE_GITLAB_PROJECT_ID", "")
+	t.Setenv("CI_PROJECT_ID", "12345")
+
+	projectID, err := computeStackProjectID()
+	if err != nil {
+		t.Fatalf("computeStackProjectID failed: %v", err)
+	}
+	if projectID != 12345 {
+		t.Fatalf("projectID = %d, want 12345", projectID)
+	}
+}
+
+func TestComputeStackProjectIDUsesExplicitOverride(t *testing.T) {
+	t.Setenv("DOC_VERSION_SYNC_COMPUTE_GITLAB_PROJECT_ID", "67890")
+	t.Setenv("CI_PROJECT_ID", "12345")
+
+	projectID, err := computeStackProjectID()
+	if err != nil {
+		t.Fatalf("computeStackProjectID failed: %v", err)
+	}
+	if projectID != 67890 {
+		t.Fatalf("projectID = %d, want 67890", projectID)
 	}
 }
 

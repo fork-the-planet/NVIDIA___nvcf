@@ -244,6 +244,17 @@ func writeArtifact(t *testing.T, repoRoot, stackDir, name, body string) {
 	}
 }
 
+func writeRegistrationArtifact(t *testing.T, repoRoot, stackDir, name, body string) {
+	t.Helper()
+	dir := filepath.Join(repoRoot, "deploy", "stacks", stackDir, "registration")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir registration handoff: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
 // TestSingleClusterUpFeatureFileWiresToSteps runs the live feature
 // file from tests/bdd/features against a fake CommandRunner. The
 // test asserts the suite reaches the end without unresolved steps and
@@ -587,6 +598,17 @@ func seedStackBaseYaml(t *testing.T, repoRoot string) {
 	}
 }
 
+func seedComputePlaneBaseYaml(t *testing.T, repoRoot string) {
+	t.Helper()
+	envPath := filepath.Join(repoRoot, "deploy", "stacks", "nvcf-compute-plane", "environments", "base.yaml")
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+		t.Fatalf("mkdir compute env dir: %v", err)
+	}
+	if err := os.WriteFile(envPath, []byte("global: {}\n"), 0o644); err != nil {
+		t.Fatalf("write compute base.yaml: %v", err)
+	}
+}
+
 // seedNVCFCLINonlocalTemplate writes a minimal stand-in for
 // tests/bdd/fixtures/nvcf-cli-nonlocal.yaml.template. The EKS feature's
 // @nvca-registration scenario copies this into tests/bdd/out/ and
@@ -601,14 +623,12 @@ client_id: "nvcf-default"
 `)
 }
 
-// writeEKSRegisterValues seeds the register-values handoff the
-// @nvca-registration scenario reads back after register-cluster.sh.
-// The wiring test's fakeRunner does not actually run the script, so
-// the file must be pre-seeded with the same shape the assertions
-// expect: ncaID, region matching EKS_REGION, identitySource=psat, and
-// non-empty clusterID + clusterGroupID. The selfManaged URL fields are
-// rewritten in-place by the chart Host-header workaround step, so
-// their initial values do not have to match the EKS gateway.
+// writeEKSRegisterValues seeds the register-values handoff the EKS
+// @nvca-registration scenarios read back. The wiring test's fakeRunner
+// does not actually run the registration command, so the file must be
+// pre-seeded with the same shape the assertions expect: ncaID, region
+// matching EKS_REGION, identitySource=psat, and non-empty clusterID +
+// clusterGroupID.
 func writeEKSRegisterValues(t *testing.T, repoRoot, clusterName, region string) {
 	t.Helper()
 	body := `clusterID: 11111111-2222-3333-4444-555555555555
@@ -622,6 +642,7 @@ selfManaged:
   natsURL: nats://wiring-elb.example.invalid:4222
 `
 	writeArtifact(t, repoRoot, "nvcf-compute-plane", clusterName+"-register-values.yaml", body)
+	writeRegistrationArtifact(t, repoRoot, "nvcf-compute-plane", clusterName+"-register-values.yaml", body)
 }
 
 // TestSingleClusterEKSHelmfileFeatureFileWiresToSteps runs the EKS
@@ -743,6 +764,7 @@ func TestMultiClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 		},
 	}))
 	seedStackBaseYaml(t, suite.Config.RepoRoot)
+	seedComputePlaneBaseYaml(t, suite.Config.RepoRoot)
 	seedStackSecretsTemplate(t, suite.Config.RepoRoot)
 	seedNVCFCLINonlocalTemplate(t, suite.Config.RepoRoot)
 	writeEKSRegisterValues(t, suite.Config.RepoRoot, computeClusterName, eksRegion)
@@ -768,8 +790,11 @@ func TestMultiClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "install HELMFILE_ENV=eks-bdd-multi") {
 		t.Fatal("helmfile install make target was never invoked")
 	}
-	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "cluster register --name") {
-		t.Fatal("nvcf-cli cluster register was never invoked")
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "register-cluster CLUSTER_NAME="+computeClusterName) {
+		t.Fatal("compute-plane register-cluster make target was never invoked")
+	}
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "KUBECONFIG_FILE=/repo-root-placeholder/tests/bdd/out/eks-compute-kubeconfig.yaml") {
+		t.Fatal("compute-plane register/install did not use the generated compute kubeconfig")
 	}
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "deploy/stacks/nvcf-compute-plane install") {
 		t.Fatal("compute-plane install make target was never invoked")
