@@ -88,6 +88,7 @@ func TestRenderManifestDeploymentResources(t *testing.T) {
 		"| Image | llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.2.0` |",
 		"See [self-hosted-example-dashboards](./example-dashboards.md) for deployment instructions.",
 		"| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.5.0` |",
+		"| Resource | nvcf-compute-plane-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:0.5.0` |",
 		"| Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |",
 	}
 	for _, want := range wantLines {
@@ -153,6 +154,12 @@ func TestRenderImageMirroringResourceExamples(t *testing.T) {
 	if !strings.Contains(got, `0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:${STACK_VERSION}`) {
 		t.Fatalf("resource examples missing versioned stack ref:\n%s", got)
 	}
+	if !strings.Contains(got, `export COMPUTE_STACK_VERSION="0.5.0"`) {
+		t.Fatalf("resource examples missing compute stack version:\n%s", got)
+	}
+	if !strings.Contains(got, `0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:${COMPUTE_STACK_VERSION}`) {
+		t.Fatalf("resource examples missing compute stack ref:\n%s", got)
+	}
 }
 
 func TestRenderImageMirroringSnippets(t *testing.T) {
@@ -166,6 +173,16 @@ func TestRenderImageMirroringSnippets(t *testing.T) {
 	}
 	if !strings.Contains(stack, `0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:${VERSION}`) {
 		t.Fatalf("stack snippet missing stack resource path:\n%s", stack)
+	}
+	computeStack, err := Render("image-mirroring-compute-stack-snippet", catalog)
+	if err != nil {
+		t.Fatalf("render compute stack snippet: %v", err)
+	}
+	if !strings.Contains(computeStack, `export COMPUTE_VERSION="0.5.0"`) {
+		t.Fatalf("compute stack snippet missing version:\n%s", computeStack)
+	}
+	if !strings.Contains(computeStack, `0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:${COMPUTE_VERSION}`) {
+		t.Fatalf("compute stack snippet missing resource path:\n%s", computeStack)
 	}
 
 	cli, err := Render("image-mirroring-cli-snippet", catalog)
@@ -564,6 +581,7 @@ func testCatalog() *Catalog {
 			{Name: "nvcf-base", Type: ArtifactTypeResource, Registry: "staging", Version: "0.1.4"},
 		},
 		SupplementalArtifacts: []Artifact{
+			{Name: "nvcf-compute-plane-stack", Type: ArtifactTypeResource, Registry: "staging", Version: "0.5.0"},
 			{Name: "nvcf-cli", Type: ArtifactTypeResource, Registry: "staging", Version: "0.0.30"},
 			{Name: "llm-api-gateway", Type: ArtifactTypeImage, Registry: "staging", Version: "0.3.0"},
 			{Name: "llm-request-router", Type: ArtifactTypeImage, Registry: "staging", RepositoryName: "stargate", Version: "0.2.0"},

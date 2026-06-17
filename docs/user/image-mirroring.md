@@ -1,6 +1,6 @@
 # Image Mirroring
 
-All required self-hosted NVCF artifacts (see [self-hosted-artifact-manifest](./manifest.md)) must be available to be pulled by pods in your Kubernetes cluster for a successful installation using the helmfile (`nvcf-self-managed-stack`) automation. This page provides examples on how to pull artifacts from NGC and push them to your desired registry.
+All required self-hosted NVCF artifacts (see [self-hosted-artifact-manifest](./manifest.md)) must be available to be pulled by pods in your Kubernetes cluster for a successful installation using the split stack bundles (`nvcf-self-managed-stack` for control plane and `nvcf-compute-plane-stack` for compute plane). This page provides examples on how to pull artifacts from NGC and push them to your desired registry.
 
 <Note>
 **Mirroring images is not the same as configuring image pull secrets.** This page covers how to copy NVCF artifacts into your registry. If your registry is private, Kubernetes also needs credentials to pull those images at runtime. For instructions on configuring image pull secrets for the NVCF control plane pods, see [control-plane-image-pull-secrets](./helmfile-installation.md) in the installation guide.
@@ -181,25 +181,38 @@ First, ensure you have the [NGC CLI installed and configured](https://org.ngc.nv
 {/* docs-version-sync:BEGIN image-mirroring-resource-examples */}
 
 ```bash
-# Set the stack version
+# Set stack versions
 export STACK_VERSION="0.6.0-rc.56"
+export COMPUTE_STACK_VERSION="0.6.0-rc.56"
 
-# Download a specific stack version
+# Download a specific control-plane stack version
 ngc registry resource download-version \
   "0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:${STACK_VERSION}"
 
-# List all stack versions
+# List all control-plane stack versions
 ngc registry resource list \
   "0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:*"
 
-# Download latest stack version (omit version)
+# Download latest control-plane stack version (omit version)
 ngc registry resource download-version \
   "0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack"
+
+# Download a specific compute-plane stack version
+ngc registry resource download-version \
+  "0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:${COMPUTE_STACK_VERSION}"
+
+# List all compute-plane stack versions
+ngc registry resource list \
+  "0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:*"
+
+# Download latest compute-plane stack version (omit version)
+ngc registry resource download-version \
+  "0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack"
 ```
 
 {/* docs-version-sync:END image-mirroring-resource-examples */}
 
-### Downloading `nvcf-self-managed-stack`
+### Downloading `nvcf-self-managed-stack` (control plane)
 
 The `nvcf-self-managed-stack` repository contains Helmfile configurations for deploying the NVCF control plane components.
 
@@ -231,6 +244,43 @@ ngc registry resource download-version "0833294136851237/nvcf-ncp-staging/nvcf-s
 
 <Note>
 If you don't have access to this repository, contact your NVIDIA representative.
+
+</Note>
+
+### Downloading `nvcf-compute-plane-stack`
+
+The `nvcf-compute-plane-stack` repository contains Helmfile configurations for deploying compute-plane components.
+
+<Warning>
+Check for the latest version before downloading. The version shown below is an example only.
+
+```bash
+# List available versions to find the latest
+ngc registry resource list "0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:*"
+```
+
+</Warning>
+
+Download and extract:
+
+{/* docs-version-sync:BEGIN image-mirroring-compute-stack-snippet */}
+
+```bash
+# Set the version
+export COMPUTE_VERSION="0.6.0-rc.56"
+
+ngc registry resource download-version "0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:${COMPUTE_VERSION}" && \
+   mkdir -p nvcf-compute-plane-stack && \
+   tar -xzf nvcf-compute-plane-stack_v${COMPUTE_VERSION}/nvcf-compute-plane-stack-${COMPUTE_VERSION}.tar.gz -C nvcf-compute-plane-stack && \
+   rm -rf nvcf-compute-plane-stack_v${COMPUTE_VERSION}
+```
+
+{/* docs-version-sync:END image-mirroring-compute-stack-snippet */}
+
+<Note>
+Use both stack bundles for split-stack local and self-managed installs:
+`nvcf-self-managed-stack` for the control plane and
+`nvcf-compute-plane-stack` for compute-plane components.
 
 </Note>
 

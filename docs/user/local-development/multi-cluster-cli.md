@@ -99,7 +99,7 @@ make -C tools/ncp-local-cluster check-gateway-api CLUSTER_NAME=ncp-local-cp
 
 </Note>
 
-## Step 2: Author the local secrets file
+## Step 2: Author the local secrets files
 
 ```bash
 cp deploy/stacks/self-managed/secrets/secrets.yaml.template \
@@ -147,7 +147,8 @@ plane:
 nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
-    --stack deploy/stacks/self-managed \
+    --control-plane-stack deploy/stacks/self-managed \
+    --compute-plane-stack deploy/stacks/nvcf-compute-plane \
     --env local \
     --plain \
     --control-plane-context k3d-ncp-local-cp \
@@ -198,7 +199,8 @@ cluster uses those URLs at runtime to reach cp services.
 nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
-    --stack deploy/stacks/self-managed \
+    --control-plane-stack deploy/stacks/self-managed \
+    --compute-plane-stack deploy/stacks/nvcf-compute-plane \
     --env local \
     --plain \
   compute-plane register \
@@ -206,7 +208,7 @@ nvcf-cli \
     --cluster-name ncp-local-compute-1 \
     --kube-context k3d-ncp-local-compute-1 \
     --region us-west-1 \
-    --output deploy/stacks/self-managed/out/ncp-local-compute-1-register-values.yaml
+    --output deploy/stacks/nvcf-compute-plane/out/ncp-local-compute-1-register-values.yaml
 ```
 
 The output file's `selfManaged` block contains the `.localhost`
@@ -228,11 +230,12 @@ when the compute agent presents PSAT tokens at runtime. Always set
 nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
-    --stack deploy/stacks/self-managed \
+    --control-plane-stack deploy/stacks/self-managed \
+    --compute-plane-stack deploy/stacks/nvcf-compute-plane \
     --env local \
     --plain \
   compute-plane install \
-    --values deploy/stacks/self-managed/out/ncp-local-compute-1-register-values.yaml \
+    --values deploy/stacks/nvcf-compute-plane/out/ncp-local-compute-1-register-values.yaml \
     --kube-context k3d-ncp-local-compute-1 \
     --cluster-name ncp-local-compute-1
 ```

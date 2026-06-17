@@ -175,23 +175,23 @@ contract verified in `src/clis/nvcf-cli/cmd/`):
 
 - `self-hosted up`:
   ```
-  ${NVCF_CLI} --config <cfg> self-hosted --stack deploy/stacks/self-managed --env local --plain up --cluster-name <name> --region us-west-1 --nca-id nvcf-default
+  ${NVCF_CLI} --config <cfg> self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain up --cluster-name <name> --region us-west-1 --nca-id nvcf-default
   ```
 - `self-hosted install --control-plane` (multi-cluster):
   ```
-  ${NVCF_CLI} --config <cfg> self-hosted --stack deploy/stacks/self-managed --env local --plain --control-plane-context k3d-<cp> --compute-plane-context k3d-<compute> install --control-plane --cluster-name <cp> --region us-west-1 --nca-id nvcf-default
+  ${NVCF_CLI} --config <cfg> self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain --control-plane-context k3d-<cp> --compute-plane-context k3d-<compute> install --control-plane --cluster-name <cp> --region us-west-1 --nca-id nvcf-default
   ```
 - `self-hosted control-plane profile validate`:
   ```
-  ${NVCF_CLI} --config <cfg> self-hosted --stack deploy/stacks/self-managed --env local --plain control-plane profile validate --file <profile-path> --require in-cluster
+  ${NVCF_CLI} --config <cfg> self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain control-plane profile validate --file <profile-path> --require in-cluster
   ```
 - `self-hosted compute-plane register`:
   ```
-  ${NVCF_CLI} --config <cfg> self-hosted --stack deploy/stacks/self-managed --env local --plain compute-plane register --control-plane-profile <profile-path> --cluster-name <compute> --kube-context k3d-<compute> --region us-west-1 --output <values-path>
+  ${NVCF_CLI} --config <cfg> self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain compute-plane register --control-plane-profile <profile-path> --cluster-name <compute> --kube-context k3d-<compute> --region us-west-1 --output <values-path>
   ```
 - `self-hosted compute-plane install`:
   ```
-  ${NVCF_CLI} --config <cfg> self-hosted --stack deploy/stacks/self-managed --env local --plain compute-plane install --values <values-path> --kube-context k3d-<compute> --cluster-name <compute>
+  ${NVCF_CLI} --config <cfg> self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain compute-plane install --values <values-path> --kube-context k3d-<compute> --cluster-name <compute>
   ```
 
 ## File restoration
@@ -216,10 +216,11 @@ need a "restore" step; the contract is "any path you touch via the DSL
 is yours for the duration of the suite, and the runner cleans up".
 
 Files written via `When I run command` (e.g. `make install` producing
-`deploy/stacks/self-managed/out/<env>-register-values.yaml`) are not
-covered by automatic restoration. The runner cannot tell which side
-effects a shell command intended; if a scenario depends on cleaning up
-such files it must do so via another `When I run command "rm ..."`.
+`deploy/stacks/self-managed/out/<file>.yaml` or
+`deploy/stacks/nvcf-compute-plane/out/<file>.yaml`) are not covered by
+automatic restoration. The runner cannot tell which side effects a shell
+command intended; if a scenario depends on cleaning up such files it must
+do so via another `When I run command "rm ..."`.
 
 ## Why this list
 

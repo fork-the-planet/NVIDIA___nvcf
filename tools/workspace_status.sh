@@ -44,6 +44,12 @@ echo "STABLE_BUILD_USER ${BUILD_USER}"
 echo "STABLE_GO_VERSION ${GO_VERSION}"
 echo "STABLE_OCI_TAG ${VERSION}-${COMMIT}${DIRTY}"
 
+# Stack OCI refs for the nvcf-cli ldflag stamping. Set by CI at release
+# build time; empty string is the correct default for dev builds (users
+# must pass --control-plane-stack / --compute-plane-stack explicitly).
+echo "CONTROL_PLANE_STACK_OCI ${CONTROL_PLANE_STACK_OCI:-}"
+echo "COMPUTE_PLANE_STACK_OCI ${COMPUTE_PLANE_STACK_OCI:-}"
+
 # Volatile keys (no STABLE_ prefix). Bazel injects them into stamped
 # binaries the same way as STABLE_* keys, but their value changes do
 # NOT invalidate the action cache. BUILD_DATE moves on every invocation;

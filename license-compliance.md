@@ -133,15 +133,9 @@ This is the repo's source-header check.
 Useful commands:
 
 ```bash
-<<<<<<< Updated upstream
 ./tools/ci/check-license-headers
 ./tools/ci/check-license-headers tools
-./tools/ci/check-license-headers src/libraries/go/nvcf-go
-=======
-./tools/scripts/check-license-headers
-./tools/scripts/check-license-headers tools
-./tools/scripts/check-license-headers src/libraries/go/lib
->>>>>>> Stashed changes
+./tools/ci/check-license-headers src/libraries/go/lib
 ```
 
 ### `./tools/scripts/collect-notices` and `./tools/scripts/update-license`

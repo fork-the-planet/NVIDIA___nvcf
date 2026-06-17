@@ -108,8 +108,8 @@ func runSelfHostedComputePlaneInstall(c *cobra.Command, _ []string) error {
 	ncaID := firstNonEmpty(metadata.NCAID, computePlaneInstallNCAID)
 
 	resolved, err := selfhosted.ResolveStack(c.Context(), selfhosted.StackOptions{
-		Source:        selfHostedStack,
-		BuiltInOCIRef: builtInStackOCI(),
+		Source:        selfHostedComputePlaneStack,
+		BuiltInOCIRef: builtInComputePlaneStackOCI(),
 	})
 	if err != nil {
 		return err
@@ -121,19 +121,16 @@ func runSelfHostedComputePlaneInstall(c *cobra.Command, _ []string) error {
 		return fmt.Errorf("resolving helm runtime: %w", err)
 	}
 
-	helmfileFile, selector := computePlaneTarget(resolved.Path)
 	return selfhosted.Render(selfhosted.RenderOptions{
 		StackPath:       resolved.Path,
-		HelmfileFile:    helmfileFile,
 		Env:             selfHostedEnv,
-		Selector:        selector,
 		Apply:           !selfHostedNoApply,
 		KubeContext:     computePlaneInstallKubeContext,
 		HelmRuntimeMode: helmRuntimeMode,
 		Stdout:          c.OutOrStdout(),
 		Stderr:          c.ErrOrStderr(),
 		Ctx:             c.Context(),
-		ExtraEnv:        computePlaneInstallEnv(valuesPath, clusterName, ncaID),
+		ExtraEnv:        computePlaneInstallEnv(clusterName, ncaID),
 	})
 }
 
@@ -182,10 +179,8 @@ func inferClusterNameFromValuesPath(path string) string {
 	return ""
 }
 
-func computePlaneInstallEnv(valuesPath, clusterName, ncaID string) []string {
+func computePlaneInstallEnv(clusterName, ncaID string) []string {
 	return []string{
-		"NVCF_NVCA_VALUES_FILE=" + valuesPath,
-		"HELMFILE_INCLUDE_WORKER_LAYER=true",
 		"CLUSTER_NAME=" + clusterName,
 		"NCA_ID=" + ncaID,
 	}
@@ -359,7 +354,7 @@ func writeComputePlaneRegisterSummary(c *cobra.Command, summary computePlaneRegi
 		fmt.Fprintln(out, "computePlaneInstallCommand:")
 		installArgs := []string{"nvcf", "self-hosted", "compute-plane", "install"}
 		if summary.Handoff.StackArg != "" {
-			installArgs = append(installArgs, "--stack", summary.Handoff.StackArg)
+			installArgs = append(installArgs, "--compute-plane-stack", summary.Handoff.StackArg)
 		}
 		installArgs = append(installArgs, "--values", summary.Handoff.ValuesPath)
 		if summary.ComputePlaneKubeCtx != "" {
@@ -451,15 +446,16 @@ type computePlaneRegisterHandoff struct {
 
 func prepareComputePlaneRegisterHandoff(c *cobra.Command, clusterName string) (*computePlaneRegisterHandoff, error) {
 	resolved, err := selfhosted.ResolveStack(c.Context(), selfhosted.StackOptions{
-		Source:        selfHostedStack,
-		BuiltInOCIRef: builtInStackOCI(),
+		Source:        selfHostedComputePlaneStack,
+		BuiltInOCIRef: builtInComputePlaneStackOCI(),
 	})
 	if err != nil {
 		return nil, err
 	}
 	valuesPath := computePlaneRegisterOutput
 	if valuesPath == "" {
-		valuesPath = filepath.Join(resolved.Path, "out", clusterName+"-nvca-values.yaml")
+		// TODO: resolve to using one path in both CLI and helmfiles.
+		valuesPath = filepath.Join(resolved.Path, "out", clusterName+"-register-values.yaml")
 	} else {
 		valuesPath, err = filepath.Abs(valuesPath)
 		if err != nil {
@@ -471,7 +467,7 @@ func prepareComputePlaneRegisterHandoff(c *cobra.Command, clusterName string) (*
 		return nil, err
 	}
 	return &computePlaneRegisterHandoff{
-		StackArg:   selfHostedStack,
+		StackArg:   selfHostedComputePlaneStack,
 		StackPath:  resolved.Path,
 		ValuesPath: valuesPath,
 		Chart:      chart,
@@ -509,19 +505,21 @@ func writeComputePlaneNVCAValues(req computePlaneNVCAValuesRequest) error {
 	})
 }
 
-func computePlaneChartFromStack(stackPath string) (string, string, error) {
-	for _, rel := range []string{"helmfile-nvca-operator.yaml.gotmpl", "helmfile.d/04-worker.yaml.gotmpl"} {
-		path := filepath.Join(stackPath, rel)
-		body, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
+func computePlaneChartFromStack(stackPath string) (chart, version string, err error) {
+	helmfileDir := filepath.Join(stackPath, "helmfile.d")
+	entries, err := os.ReadDir(helmfileDir)
+	if err != nil {
+		return "", "", fmt.Errorf("reading compute-plane helmfile directory: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), "-nvca.yaml.gotmpl") {
+			body, err := os.ReadFile(filepath.Join(helmfileDir, entry.Name()))
+			if err != nil {
+				return "", "", fmt.Errorf("reading compute-plane nvca helmfile: %w", err)
 			}
-			return "", "", fmt.Errorf("reading compute-plane helmfile: %w", err)
-		}
-		chart, version := parseComputePlaneChart(string(body))
-		if chart != "" && version != "" {
-			return chart, version, nil
+			if chart, version = parseComputePlaneChart(string(body)); chart != "" && version != "" {
+				return chart, version, nil
+			}
 		}
 	}
 	return "", "", fmt.Errorf("compute-plane chart reference not found in stack")

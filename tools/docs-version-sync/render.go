@@ -38,6 +38,8 @@ func Render(renderer string, catalog *Catalog) (string, error) {
 		return renderImageMirroringResourceExamples(catalog)
 	case "image-mirroring-stack-snippet":
 		return renderImageMirroringStackSnippet(catalog)
+	case "image-mirroring-compute-stack-snippet":
+		return renderImageMirroringComputeStackSnippet(catalog)
 	case "image-mirroring-cli-snippet":
 		return renderImageMirroringCLISnippet(catalog)
 	default:
@@ -303,14 +305,56 @@ func renderImageMirroringResourceExamples(catalog *Catalog) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	compute, hasComputeStack := catalog.findArtifact(computeStackResourceName)
+	computeRef := ""
+	if hasComputeStack {
+		if compute.Type != ArtifactTypeResource {
+			return "", fmt.Errorf("%s must be a resource artifact", computeStackResourceName)
+		}
+		computeRef, err = catalog.resourceRef(compute)
+		if err != nil {
+			return "", err
+		}
+	}
+
 	refWithVersion := strings.Replace(ref, stack.Version, "${STACK_VERSION}", 1)
 	refWithoutVersion := strings.TrimSuffix(ref, ":"+stack.Version)
-	return fmt.Sprintf("```bash\n# Set the stack version\nexport STACK_VERSION=%q\n\n# Download a specific stack version\nngc registry resource download-version \\\n  %q\n\n# List all stack versions\nngc registry resource list \\\n  %q\n\n# Download latest stack version (omit version)\nngc registry resource download-version \\\n  %q\n```\n",
-		stack.Version,
-		refWithVersion,
-		refWithoutVersion+":*",
-		refWithoutVersion,
-	), nil
+
+	var b strings.Builder
+	b.WriteString("```bash\n")
+	b.WriteString("# Set stack versions\n")
+	b.WriteString(fmt.Sprintf("export STACK_VERSION=%q\n", stack.Version))
+	if hasComputeStack {
+		b.WriteString(fmt.Sprintf("export COMPUTE_STACK_VERSION=%q\n", compute.Version))
+	}
+	b.WriteString("\n")
+	b.WriteString("# Download a specific control-plane stack version\n")
+	b.WriteString("ngc registry resource download-version \\\n")
+	b.WriteString(fmt.Sprintf("  %q\n\n", refWithVersion))
+	b.WriteString("# List all control-plane stack versions\n")
+	b.WriteString("ngc registry resource list \\\n")
+	b.WriteString(fmt.Sprintf("  %q\n\n", refWithoutVersion+":*"))
+	b.WriteString("# Download latest control-plane stack version (omit version)\n")
+	b.WriteString("ngc registry resource download-version \\\n")
+	b.WriteString(fmt.Sprintf("  %q\n", refWithoutVersion))
+
+	if hasComputeStack {
+		computeRefWithVersion := strings.Replace(computeRef, compute.Version, "${COMPUTE_STACK_VERSION}", 1)
+		computeRefWithoutVersion := strings.TrimSuffix(computeRef, ":"+compute.Version)
+		b.WriteString("\n# Download a specific compute-plane stack version\n")
+		b.WriteString("ngc registry resource download-version \\\n")
+		b.WriteString(fmt.Sprintf("  %q\n\n", computeRefWithVersion))
+		b.WriteString("# List all compute-plane stack versions\n")
+		b.WriteString("ngc registry resource list \\\n")
+		b.WriteString(fmt.Sprintf("  %q\n\n", computeRefWithoutVersion+":*"))
+		b.WriteString("# Download latest compute-plane stack version (omit version)\n")
+		b.WriteString("ngc registry resource download-version \\\n")
+		b.WriteString(fmt.Sprintf("  %q\n", computeRefWithoutVersion))
+	}
+
+	b.WriteString("```\n")
+	return b.String(), nil
 }
 
 func renderImageMirroringStackSnippet(catalog *Catalog) (string, error) {
@@ -327,6 +371,29 @@ func renderImageMirroringStackSnippet(catalog *Catalog) (string, error) {
 		stack.Name,
 		stack.Name,
 		stack.Name,
+	), nil
+}
+
+func renderImageMirroringComputeStackSnippet(catalog *Catalog) (string, error) {
+	compute, ok := catalog.findArtifact(computeStackResourceName)
+	if !ok {
+		return "", fmt.Errorf("supplemental artifact %s is required", computeStackResourceName)
+	}
+	if compute.Type != ArtifactTypeResource {
+		return "", fmt.Errorf("%s must be a resource artifact", computeStackResourceName)
+	}
+	ref, err := catalog.resourceRef(compute)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("```bash\n# Set the version\nexport COMPUTE_VERSION=%q\n\nngc registry resource download-version %q && \\\n   mkdir -p %s && \\\n   tar -xzf %s_v${COMPUTE_VERSION}/%s-${COMPUTE_VERSION}.tar.gz -C %s && \\\n   rm -rf %s_v${COMPUTE_VERSION}\n```\n",
+		compute.Version,
+		strings.Replace(ref, compute.Version, "${COMPUTE_VERSION}", 1),
+		compute.Name,
+		compute.Name,
+		compute.Name,
+		compute.Name,
+		compute.Name,
 	), nil
 }
 

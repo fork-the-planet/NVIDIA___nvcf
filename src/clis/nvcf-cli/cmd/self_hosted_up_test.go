@@ -232,7 +232,8 @@ func TestSelfHostedUp_PlainEmitsPhaseLines(t *testing.T) {
 	rootCmd.SetArgs([]string{
 		"self-hosted", "up",
 		"--cluster-name=test",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--plain",
 	})
 	require.NoError(t, rootCmd.Execute())
@@ -331,7 +332,8 @@ func TestUp_PlanOnly_NoHelmfileInvocation(t *testing.T) {
 	rootCmd.SetArgs([]string{
 		"self-hosted", "up",
 		"--cluster-name=test",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--plan-only",
 		"--json",
 	})
@@ -431,7 +433,8 @@ func TestUp_FailureEvent_HasCategoryAndRemediation(t *testing.T) {
 	rootCmd.SetArgs([]string{
 		"self-hosted", "up",
 		"--cluster-name=test",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--json",
 	})
 
@@ -534,7 +537,8 @@ func TestUp_SIGTERM_EmitsCancellation(t *testing.T) {
 	rootCmd.SetArgs([]string{
 		"self-hosted", "up",
 		"--cluster-name=test",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--json",
 	})
 
@@ -630,7 +634,8 @@ func TestSelfHostedUp_RejectsNonLocalEnvBeforePreflight(t *testing.T) {
 	rootCmd.SetArgs([]string{
 		"self-hosted", "up",
 		"--cluster-name=test",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--env=prd",
 		"--plain",
 	})
@@ -679,7 +684,8 @@ func TestSelfHostedUp_RejectsSplitClusterModeBeforePreflight(t *testing.T) {
 	rootCmd.SetArgs([]string{
 		"self-hosted", "up",
 		"--cluster-name=test",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--control-plane-context=cp",
 		"--compute-plane-context=gpu1",
 		"--icms-url=http://sis.example.test",
@@ -726,7 +732,8 @@ func TestSelfHostedUp_RejectsNonK3DContextBeforePreflight(t *testing.T) {
 	rootCmd.SetArgs([]string{
 		"self-hosted", "up",
 		"--cluster-name=test",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--plain",
 	})
 

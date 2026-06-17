@@ -5,7 +5,9 @@ This section covers manual Helmfile installation of the NVCF control plane compo
 For a fresh install, start with the [Quickstart](./quickstart.md). Use this Helmfile guide when you need explicit release control, partial recovery, upgrades, or direct access to Helmfile values. You can also install each Helm chart individually using `helm install` or `helm upgrade` (see [Standalone Deployment](./standalone-deployment.md)).
 
 <Info>
-This guide assumes you have already downloaded and extracted the `nvcf-self-managed-stack` helmfile bundle (see [download-nvcf-self-managed-stack](./image-mirroring.md)). All commands in this guide are run from inside the extracted `nvcf-self-managed-stack/` directory unless otherwise noted. The directory contains the helmfile definitions, environment templates, and sample configurations referenced throughout.
+This guide assumes you have already downloaded and extracted the `nvcf-self-managed-stack` helmfile bundle (see [download-nvcf-self-managed-stack](./image-mirroring.md)). All commands in this guide are run from inside the extracted `nvcf-self-managed-stack/` directory unless otherwise noted. The directory contains the control-plane helmfile definitions, environment templates, and sample configurations referenced throughout.
+
+For compute-plane installation, use the split `nvcf-compute-plane-stack` bundle and the `nvcf-cli self-hosted compute-plane register/install` workflow.
 
 ```bash
 cd path/to/nvcf-self-managed-stack
@@ -404,7 +406,7 @@ image:
 <Warning>
 If you have mirrored NVCF artifacts to your own registry (e.g., ECR), update both `helm.sources` and `image` to point to your mirror. See [self-hosted-image-mirroring](./image-mirroring.md) for details on mirroring artifacts.
 
-**When upgrading to a new** `nvcf-self-managed-stack` **version**, you must re-mirror all artifacts before running `helmfile sync`. Each stack release may introduce new or updated container images and Helm charts. If these are not present in your private registry, pods will fail with `ImagePullBackOff`. Check the [self-hosted-artifact-manifest](./manifest.md) for the complete list of required artifacts and versions.
+When upgrading to a new `nvcf-self-managed-stack` version, re-mirror all artifacts before running `helmfile sync`. Each stack release may introduce new or updated container images and Helm charts. If these are not present in your private registry, pods will fail with `ImagePullBackOff`. For split installs, mirror both the control-plane and compute-plane stack resources listed in the [self-hosted-artifact-manifest](./manifest.md).
 
 </Warning>
 

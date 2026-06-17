@@ -231,25 +231,25 @@ Feature: Install a single-cluster NVCF stack on a pre-provisioned EKS cluster wi
       # the CLI's full stdout to stderr for log visibility; the slice
       # helper extracts the YAML body out of the CLI's mixed stdout
       # (status logs + YAML on the same stream -- a known CLI
-      # limitation) before redirecting it to the worker-layer values
+      # limitation) before redirecting it to the compute-plane values
       # file. The slice helper exists because the DSL runner uses
       # shlex + exec rather than a shell, so the pipe + redirect must
       # live inside one bash -c invocation.
       When I run command:
         """
-        bash -c 'set -eo pipefail; mkdir -p deploy/stacks/self-managed/out; ${NVCF_CLI} --config tests/bdd/out/nvcf-cli-eks-bdd.yaml cluster register --name ${EKS_CLUSTER_NAME} --nca-id nvcf-default --region ${EKS_REGION} --icms-url http://${EKS_GATEWAY_ADDR} --ignore-existing | tee /dev/stderr | tests/bdd/scripts/slice-yaml-body.sh > deploy/stacks/self-managed/out/${EKS_CLUSTER_NAME}-register-values.yaml'
+        bash -c 'set -eo pipefail; mkdir -p deploy/stacks/nvcf-compute-plane/out; ${NVCF_CLI} --config tests/bdd/out/nvcf-cli-eks-bdd.yaml cluster register --name ${EKS_CLUSTER_NAME} --nca-id nvcf-default --region ${EKS_REGION} --icms-url http://${EKS_GATEWAY_ADDR} --ignore-existing | tee /dev/stderr | tests/bdd/scripts/slice-yaml-body.sh > deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml'
         """
       Then the command exit code should be 0
-      And file "deploy/stacks/self-managed/out/${EKS_CLUSTER_NAME}-register-values.yaml" should exist
-      And yaml file "deploy/stacks/self-managed/out/${EKS_CLUSTER_NAME}-register-values.yaml" should contain:
+      And file "deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml" should exist
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml" should contain:
         """
         ncaID: nvcf-default
         region: ${EKS_REGION}
         selfManaged:
           identitySource: psat
         """
-      And yaml file "deploy/stacks/self-managed/out/${EKS_CLUSTER_NAME}-register-values.yaml" key "clusterID" should not be empty
-      And yaml file "deploy/stacks/self-managed/out/${EKS_CLUSTER_NAME}-register-values.yaml" key "clusterGroupID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml" key "clusterID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml" key "clusterGroupID" should not be empty
 
       # The register-values URLs stay as cluster register's bare-ELB
       # output (http://${EKS_GATEWAY_ADDR}, nats://${EKS_GATEWAY_ADDR}:4222).
@@ -260,7 +260,7 @@ Feature: Install a single-cluster NVCF stack on a pre-provisioned EKS cluster wi
 
       When I run command:
         """
-        make -C deploy/stacks/self-managed install-nvca-operator CLUSTER_NAME=${EKS_CLUSTER_NAME} HELMFILE_ENV=eks-bdd NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd.yaml
+        make -C deploy/stacks/nvcf-compute-plane install CLUSTER_NAME=${EKS_CLUSTER_NAME} HELMFILE_ENV=eks-bdd NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd.yaml
         """
       Then the command exit code should be 0
 

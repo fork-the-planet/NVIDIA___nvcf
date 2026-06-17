@@ -211,6 +211,10 @@ artifacts:
     registry: staging
     version: 0.3.0
 supplemental_artifacts:
+  - name: nvcf-compute-plane-stack
+    type: resource
+    registry: staging
+    version: 0.6.0-rc.56
   - name: nvcf-cli
     type: resource
     registry: staging
@@ -333,6 +337,8 @@ outputs:
         renderer: image-mirroring-resource-examples
       - marker: image-mirroring-stack-snippet
         renderer: image-mirroring-stack-snippet
+      - marker: image-mirroring-compute-stack-snippet
+        renderer: image-mirroring-compute-stack-snippet
       - marker: image-mirroring-cli-snippet
         renderer: image-mirroring-cli-snippet
   - path: docs/user/standalone-infrastructure.md

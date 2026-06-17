@@ -89,10 +89,11 @@ make -C deploy/stacks/self-managed destroy-stack-multi
 
 ### Stack-owned helm releases
 
-Sourced from `deploy/stacks/self-managed/helmfile.d/*.gotmpl` releases
-plus the worker layer in `helmfile-nvca-operator.yaml.gotmpl`.
-Defined as Make variables in `deploy/stacks/self-managed/Makefile` so
-both targets read the same list.
+Sourced from `deploy/stacks/self-managed/helmfile.d/*.gotmpl` (control
+plane) plus `deploy/stacks/nvcf-compute-plane/helmfile.d/01-dependencies.yaml.gotmpl`
+and `deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl`
+(compute plane). Defined as explicit allow-lists in
+`tests/bdd/scripts/destroy-stack.sh`.
 
 ```make
 # Format: name:namespace per release. Update whenever helmfile.d

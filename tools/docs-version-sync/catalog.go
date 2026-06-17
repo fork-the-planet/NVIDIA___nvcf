@@ -31,6 +31,7 @@ const (
 	defaultStackProjectID    = 182049
 	defaultPackageName       = "ncp-deploy"
 	defaultStackResourceName = "nvcf-self-managed-stack"
+	computeStackResourceName = "nvcf-compute-plane-stack"
 	defaultStackRegistry     = "staging"
 	defaultCLIRegistry       = defaultStackRegistry
 	defaultCLIVersion        = "0.0.30"

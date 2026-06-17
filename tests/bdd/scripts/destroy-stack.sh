@@ -5,9 +5,9 @@
 # Destructive stack cleanup for the BDD suite. Uninstalls every
 # stack-owned helm release and deletes every stack-owned namespace
 # on a retained k3d cluster, then clears stack handoff artifacts
-# from deploy/stacks/self-managed/out/. The k3d cluster itself is
-# left running so a subsequent install does not pay the cluster
-# boot cost.
+# from deploy/stacks/self-managed/out/ and
+# deploy/stacks/nvcf-compute-plane/out/. The k3d cluster itself is left
+# running so a subsequent install does not pay the cluster boot cost.
 #
 # Governing rule (see tests/bdd/PLAN_DESTRUCTIVE_CLEANUP.md and
 # tests/bdd/AGENTS.md): topology cleanup may delete topology
@@ -34,7 +34,7 @@
 #
 # Repo root resolution: $BDD_REPO_ROOT if set, otherwise
 # `git rev-parse --show-toplevel`. The script changes directory to
-# the repo root before touching deploy/stacks/self-managed/out.
+# the repo root before touching stack out directories.
 
 set -euo pipefail
 
@@ -59,7 +59,10 @@ if [[ -n "${BDD_REPO_ROOT:-}" ]]; then
 else
   REPO_ROOT="$(git rev-parse --show-toplevel)"
 fi
-STACK_OUT_DIR="$REPO_ROOT/deploy/stacks/self-managed/out"
+STACK_OUT_DIRS=(
+  "$REPO_ROOT/deploy/stacks/self-managed/out"
+  "$REPO_ROOT/deploy/stacks/nvcf-compute-plane/out"
+)
 
 CLUSTER_NAME="${CLUSTER_NAME:-ncp-local}"
 
@@ -211,8 +214,11 @@ delete_stack_namespaces() {
 }
 
 clean_stack_out() {
-  echo "  clean $STACK_OUT_DIR"
-  rm -f "$STACK_OUT_DIR"/*.yaml
+  local dir
+  for dir in "${STACK_OUT_DIRS[@]}"; do
+    echo "  clean $dir"
+    rm -f "$dir"/*.yaml
+  done
 }
 
 

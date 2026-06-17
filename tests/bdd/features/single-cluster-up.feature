@@ -18,16 +18,15 @@ Feature: Bring up a local single-cluster NVCF stack with the CLI
       # API setup.
       And environment variable "SAMPLE_NGC_ORG" is set
       And environment variable "SAMPLE_NGC_TEAM" is set
-      # self-hosted install --env local pulls credentials from
-      # deploy/stacks/self-managed/secrets/local-secrets.yaml, which is
-      # gitignored and operator-authored (only secrets.yaml.template is
-      # tracked). Author the file from the canonical template the same
-      # way the Helmfile feature authors local-bdd-secrets.yaml: copy
-      # the template into place, then substitute the placeholder with
-      # the base64 NGC dockerconfig credential. Ledger snapshots
-      # whatever local-secrets.yaml state existed before the first
-      # write (its prior contents or absence) and restores or removes
-      # it at suite teardown, so the working tree stays clean.
+      # self-hosted install --env local reads operator-authored local
+      # secrets files from both split stacks:
+      # deploy/stacks/self-managed/secrets/local-secrets.yaml (control
+      # plane). Only secrets.yaml.template is tracked in each
+      # stack. Author both files from the canonical templates before
+      # running install/register. Ledger snapshots whatever
+      # local-secrets.yaml state existed before the first write (its
+      # prior contents or absence) and restores or removes it at suite
+      # teardown, so the working tree stays clean.
       And I copy the file "deploy/stacks/self-managed/secrets/secrets.yaml.template" to "deploy/stacks/self-managed/secrets/local-secrets.yaml"
       And I substitute "REPLACE_WITH_BASE64_DOCKER_CREDENTIAL" in file "deploy/stacks/self-managed/secrets/local-secrets.yaml" with base64 of "$oauthtoken:${NGC_API_KEY}"
       # Conflict precheck: ncp-local-cp's k3d serverlb claims
@@ -61,7 +60,7 @@ Feature: Bring up a local single-cluster NVCF stack with the CLI
     Scenario: Operator installs the single-cluster ncp-local stack
       When I run command:
         """
-        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --stack deploy/stacks/self-managed --env local --plain install --control-plane --cluster-name ncp-local --region us-west-1 --nca-id nvcf-default
+        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain install --control-plane --cluster-name ncp-local --region us-west-1 --nca-id nvcf-default
         """
 
       Then the command exit code should be 0
@@ -78,14 +77,14 @@ Feature: Bring up a local single-cluster NVCF stack with the CLI
 
       When I run command:
         """
-        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --stack deploy/stacks/self-managed --env local --plain compute-plane register --control-plane-profile deploy/stacks/self-managed/out/control-plane-profile.yaml --cluster-name ncp-local --kube-context k3d-ncp-local --region us-west-1 --output deploy/stacks/self-managed/out/ncp-local-register-values.yaml
+        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain compute-plane register --control-plane-profile deploy/stacks/self-managed/out/control-plane-profile.yaml --cluster-name ncp-local --kube-context k3d-ncp-local --region us-west-1 --output deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml
         """
       Then the command exit code should be 0
-      And file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" should exist
+      And file "deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml" should exist
 
       When I run command:
         """
-        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --stack deploy/stacks/self-managed --env local --plain compute-plane install --values deploy/stacks/self-managed/out/ncp-local-register-values.yaml --kube-context k3d-ncp-local --cluster-name ncp-local
+        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain compute-plane install --values deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml --kube-context k3d-ncp-local --cluster-name ncp-local
         """
       Then the command exit code should be 0
 
@@ -93,12 +92,12 @@ Feature: Bring up a local single-cluster NVCF stack with the CLI
     Scenario: Control-plane profile describes the installed single-cluster stack
       Given command has succeeded:
         """
-        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --stack deploy/stacks/self-managed --env local --plain install --control-plane --cluster-name ncp-local --region us-west-1 --nca-id nvcf-default
+        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain install --control-plane --cluster-name ncp-local --region us-west-1 --nca-id nvcf-default
         """
 
       When I run command:
         """
-        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --stack deploy/stacks/self-managed --env local --plain control-plane profile validate --file deploy/stacks/self-managed/out/control-plane-profile.yaml --require in-cluster
+        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain control-plane profile validate --file deploy/stacks/self-managed/out/control-plane-profile.yaml --require in-cluster
         """
       Then the command exit code should be 0
 
@@ -138,7 +137,7 @@ Feature: Bring up a local single-cluster NVCF stack with the CLI
     Scenario: NVCA values describe the registered single-cluster compute plane
       Given command has succeeded:
         """
-        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --stack deploy/stacks/self-managed --env local --plain install --control-plane --cluster-name ncp-local --region us-west-1 --nca-id nvcf-default
+        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain install --control-plane --cluster-name ncp-local --region us-west-1 --nca-id nvcf-default
         """
       And command has succeeded:
         """
@@ -146,7 +145,7 @@ Feature: Bring up a local single-cluster NVCF stack with the CLI
         """
       And command has succeeded:
         """
-        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --stack deploy/stacks/self-managed --env local --plain compute-plane register --control-plane-profile deploy/stacks/self-managed/out/control-plane-profile.yaml --cluster-name ncp-local --kube-context k3d-ncp-local --region us-west-1 --output deploy/stacks/self-managed/out/ncp-local-register-values.yaml
+        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain compute-plane register --control-plane-profile deploy/stacks/self-managed/out/control-plane-profile.yaml --cluster-name ncp-local --kube-context k3d-ncp-local --region us-west-1 --output deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml
         """
 
       # Subset match (should contain, not should match) because the
@@ -162,7 +161,7 @@ Feature: Bring up a local single-cluster NVCF stack with the CLI
       # used to emit. The multi-cluster scenario, in contrast, gets
       # compute-reachable endpoints because the worker lives in a
       # different k3d cluster.
-      Then yaml file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" should contain:
+      Then yaml file "deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml" should contain:
         """
         clusterName: ncp-local
         ncaID: nvcf-default
@@ -172,6 +171,6 @@ Feature: Bring up a local single-cluster NVCF stack with the CLI
           revalServiceURL: http://reval.nvcf.svc.cluster.local:8080
           natsURL: nats://nats.nats-system.svc.cluster.local:4222
         """
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" key "clusterID" should not be empty
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" key "clusterGroupID" should not be empty
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" key "selfManaged.identitySource" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml" key "clusterID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml" key "clusterGroupID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml" key "selfManaged.identitySource" should not be empty

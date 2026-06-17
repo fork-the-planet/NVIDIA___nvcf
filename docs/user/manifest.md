@@ -226,6 +226,7 @@ Helmfile and CLI resources for deployment.
 | --- | --- | --- |
 | Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.56` |
 | Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |
+| Resource | nvcf-compute-plane-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:0.6.0-rc.56` |
 
 {/* docs-version-sync:END manifest-artifact-registry-paths */}
 
@@ -355,4 +356,5 @@ Helmfile and CLI resources for deployment.
 | Component Name | Description |
 | --- | --- |
 | nvcf-self-managed-stack | Helmfile bundle for self-managed stack deployment |
+| nvcf-compute-plane-stack | Helmfile bundle for compute-plane stack deployment |
 | nvcf-cli | Command-line interface for managing functions and deployments |

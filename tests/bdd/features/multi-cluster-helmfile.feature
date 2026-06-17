@@ -41,6 +41,11 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
         | global.helm.sources.repository                | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
         | global.image.repository                       | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
         | api.env.NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE | nvcr.io/${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}/stargate-client:0.2.0  |
+      And I copy the file "tests/bdd/fixtures/nvcf-compute-plane-local-bdd-multi.yaml" to "deploy/stacks/nvcf-compute-plane/environments/local-bdd.yaml"
+      And I update yaml file "deploy/stacks/nvcf-compute-plane/environments/local-bdd.yaml" with keys:
+        | global.imagePullSecrets[0].name               | nvcr-pull-secret                                                    |
+        | global.helm.sources.repository                | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
+        | global.image.repository                       | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
       And I copy the file "deploy/stacks/self-managed/secrets/secrets.yaml.template" to "deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml"
       And I substitute "REPLACE_WITH_BASE64_DOCKER_CREDENTIAL" in file "deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml" with base64 of "$oauthtoken:${NGC_API_KEY}"
       # Conflict precheck: single-cluster ncp-local's k3d serverlb
@@ -173,33 +178,33 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
       # for the compute cluster row and the compute agent's tokens
       # would 401 against ICMS at runtime.
       #
-      # install-nvca-operator that follows also runs helm against the
+      # compute-plane install that follows also runs helm against the
       # ambient context, so this single switch covers both steps.
       When I run command "kubectl config use-context k3d-ncp-local-compute-1"
       Then the command exit code should be 0
 
       When I run command:
         """
-        make -C deploy/stacks/self-managed register-cluster CLUSTER_NAME=ncp-local-compute-1 NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml
+        make -C deploy/stacks/nvcf-compute-plane register-cluster CLUSTER_NAME=ncp-local-compute-1 NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml
         """
       Then the command exit code should be 0
-      And file "deploy/stacks/self-managed/out/ncp-local-compute-1-register-values.yaml" should exist
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-compute-1-register-values.yaml" should contain:
+      And file "deploy/stacks/nvcf-compute-plane/registration/ncp-local-compute-1-register-values.yaml" should exist
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/ncp-local-compute-1-register-values.yaml" should contain:
         """
         ncaID: nvcf-default
         region: us-west-1
         selfManaged:
           identitySource: psat
         """
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-compute-1-register-values.yaml" key "clusterID" should not be empty
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-compute-1-register-values.yaml" key "clusterGroupID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/ncp-local-compute-1-register-values.yaml" key "clusterID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/ncp-local-compute-1-register-values.yaml" key "clusterGroupID" should not be empty
 
       And the "nvcr-pull-secret" image pull secret exists in namespaces:
         | nvca-operator |
 
       When I run command:
         """
-        make -C deploy/stacks/self-managed install-nvca-operator CLUSTER_NAME=ncp-local-compute-1 HELMFILE_ENV=local-bdd NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml
+        make -C deploy/stacks/nvcf-compute-plane install CLUSTER_NAME=ncp-local-compute-1 HELMFILE_ENV=local-bdd NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml
         """
       Then the command exit code should be 0
 
@@ -250,7 +255,7 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
 
       When I run command:
         """
-        ${NVCF_CLI} --config ${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml api-key generate --description bdd-load-tester-supreme --scopes invoke_function,list_functions,queue_details,list_functions_details
+        ${NVCF_CLI} --config ${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml api-key generate --description bdd-load-tester-supreme --scopes invoke_function,list_functions,queue_details,list_functions_details --for function
         """
       Then the command exit code should be 0
 

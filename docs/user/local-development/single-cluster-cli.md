@@ -80,9 +80,13 @@ make -C tools/ncp-local-cluster check-gateway-api
 
 ## Step 2: Author the local secrets file
 
-`nvcf-cli self-hosted install --env local` reads NGC credentials from
-`deploy/stacks/self-managed/secrets/local-secrets.yaml`. Author it from the
-canonical template:
+`nvcf-cli self-hosted install --env local` reads NGC credentials from both
+split stacks:
+
+- `deploy/stacks/self-managed/secrets/local-secrets.yaml` (control plane)
+- `deploy/stacks/nvcf-compute-plane/secrets/local-secrets.yaml` (compute plane)
+
+Author both files from their canonical templates:
 
 ```bash
 cp deploy/stacks/self-managed/secrets/secrets.yaml.template \
@@ -129,7 +133,8 @@ done
 nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
-    --stack deploy/stacks/self-managed \
+    --control-plane-stack deploy/stacks/self-managed \
+    --compute-plane-stack deploy/stacks/nvcf-compute-plane \
     --env local \
     --plain \
     --token DUMMY \
@@ -172,7 +177,8 @@ cluster (`ncp-local`).
 nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
-    --stack deploy/stacks/self-managed \
+    --control-plane-stack deploy/stacks/self-managed \
+    --compute-plane-stack deploy/stacks/nvcf-compute-plane \
     --env local \
     --plain \
   compute-plane register \
@@ -180,7 +186,7 @@ nvcf-cli \
     --cluster-name ncp-local \
     --kube-context k3d-ncp-local \
     --region us-west-1 \
-    --output deploy/stacks/self-managed/out/ncp-local-register-values.yaml
+    --output deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml
 ```
 
 This emits `out/ncp-local-register-values.yaml`. Because compute and control
@@ -194,11 +200,12 @@ selected automatically.
 nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
-    --stack deploy/stacks/self-managed \
+    --control-plane-stack deploy/stacks/self-managed \
+    --compute-plane-stack deploy/stacks/nvcf-compute-plane \
     --env local \
     --plain \
   compute-plane install \
-    --values deploy/stacks/self-managed/out/ncp-local-register-values.yaml \
+    --values deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml \
     --kube-context k3d-ncp-local \
     --cluster-name ncp-local
 ```
@@ -233,7 +240,8 @@ The control-plane profile can be re-validated against the live cluster:
 nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
-    --stack deploy/stacks/self-managed \
+    --control-plane-stack deploy/stacks/self-managed \
+    --compute-plane-stack deploy/stacks/nvcf-compute-plane \
     --env local \
     --plain \
   control-plane profile validate \

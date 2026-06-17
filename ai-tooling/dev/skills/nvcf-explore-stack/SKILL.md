@@ -4,6 +4,7 @@ description: >-
   Navigate and explain the NVCF self-hosted stack inside the monorepo. Maps
   helmfile releases to their charts, image-source subtrees, helm hooks,
   namespaces, and `needs:` dependency chains. Reads
+  deploy/stacks/self-managed/helmfile.d/*.yaml.gotmpl and
   deploy/stacks/self-managed/helmfile.d/*.yaml.gotmpl as the source of truth
   for ordering and versions, with deployment-sequence.md and
   deployment-dependencies.yaml as enrichment, and imports.yaml for upstream
@@ -12,7 +13,7 @@ description: >-
   subtree do I edit to change X", "what namespaces does the stack use", or
   mentions stack topology, helmfile stages, deployment DAG, or dependency map.
 license: Apache-2.0
-compatibility: Requires a local checkout of the NVCF monorepo with deploy/stacks/self-managed/helmfile.d/ present
+compatibility: Requires a local checkout of the NVCF monorepo with deploy/stacks/self-managed/ and deploy/stacks/nvcf-compute-plane/ present
 author: "nvcf-core-eng <nvcf-core-eng@exchange.nvidia.com>"
 version: "1.0.0"
 tags: [nvcf, self-managed, self-hosted, helmfile, deployment, stack-topology]
@@ -47,7 +48,8 @@ Authoritative (always read first when answering):
 - `deploy/stacks/self-managed/helmfile.d/01-dependencies.yaml.gotmpl`
 - `deploy/stacks/self-managed/helmfile.d/02-core.yaml.gotmpl`
 - `deploy/stacks/self-managed/helmfile.d/03-observability.yaml.gotmpl`
-- `deploy/stacks/self-managed/helmfile.d/04-worker.yaml.gotmpl`
+- `deploy/stacks/nvcf-compute-plane/helmfile.d/01-dependencies.yaml.gotmpl`
+- `deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl`
 
 Enrichment (only if the answer needs hooks, image-source subtrees, or destroy order):
 
@@ -71,13 +73,13 @@ What deploys X
 : Look up release `X` in the helmfile stage files. Return chart name, version, namespace, and which gotmpl file declares it. If the chart is checked in, also point at `deploy/helm/<chart>/`.
 
 What does X depend on
-: Return the `needs:` chain for that release plus the stage gate it sits behind (stage 1 -> 2 -> 3 -> 4). Include any `condition:` that gates whether X deploys at all.
+: Return the `needs:` chain for that release plus the stage gate it sits behind (control-plane stages 1 -> 2 -> 3, then compute-plane). Include any `condition:` that gates whether X deploys at all.
 
 What hooks run for X
 : Use `deployment-dependencies.yaml` for hook names, weights, hook events (pre-install / post-install), images used, and purpose. Cite the chart-relative template file path.
 
 Walk me through the full deployment order
-: Summarize stages 0 through 4 from the gotmpl file headers. Call out which releases run in parallel inside a stage and which are serialized by `needs:`.
+: Summarize control-plane stages 0 through 3 from the self-managed gotmpl file headers, then the compute-plane stage from - `deploy/stacks/nvcf-compute-plane/helmfile.d/01-dependencies.yaml.gotmpl` and `deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl`. Call out which releases run in parallel inside a stage and which are serialized by `needs:`.
 
 Which subtree do I edit to change X
 : Two answers, both are important. For chart wiring (Helm hooks, manifests, values, hook weights) point at `deploy/helm/<chart>/` if the chart is checked in, or note `oci-only` (the chart is consumed from the OCI registry and does not live in the monorepo). For runtime application logic point at the image-source subtree from `deployment-dependencies.yaml` and confirm against `imports.yaml` (`authoritative_source: native` means edits land here, `upstream` means edits also flow back to the upstream repo via the synthetic-import pipeline).

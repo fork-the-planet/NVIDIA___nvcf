@@ -110,7 +110,7 @@ func runDown(c *cobra.Command) error {
 		Plain:      selfHostedPlain,
 		Accessible: selfHostedAccessible,
 		Cluster:    downClusterName,
-		Stack:      selfHostedStack,
+		Stack:      selfHostedControlPlaneStack,
 	})
 	if err != nil {
 		return err
@@ -155,7 +155,7 @@ func runDownPlanOnly(ctx context.Context, sink progress.EventSink, started time.
 	}
 	_ = sink.Emit(ctx, progress.Planned{
 		Cluster:       downClusterName,
-		Stack:         selfHostedStack,
+		Stack:         selfHostedControlPlaneStack,
 		Phases:        phases,
 		TotalETASec:   plan.TotalEstSec,
 		WillUninstall: plan.WillUninstall,
@@ -255,8 +255,8 @@ func runDownAllClustersPhases(c *cobra.Command, ctx context.Context, sink progre
 
 func localDownFallbackClusterNames(ctx context.Context) ([]string, error) {
 	resolved, err := selfhosted.ResolveStack(ctx, selfhosted.StackOptions{
-		Source:        selfHostedStack,
-		BuiltInOCIRef: builtInStackOCI(),
+		Source:        selfHostedComputePlaneStack,
+		BuiltInOCIRef: builtInComputePlaneStackOCI(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("resolve stack: %w", err)
@@ -314,14 +314,12 @@ func runDownComputePlaneForCluster(c *cobra.Command, ctx context.Context, sink p
 	_ = sink.Emit(ctx, progress.PhaseStarted{Num: 2, Name: "uninstall-compute-plane", StartedAt: p2})
 
 	resolved, err := selfhosted.ResolveStack(ctx, selfhosted.StackOptions{
-		Source:        selfHostedStack,
-		BuiltInOCIRef: builtInStackOCI(),
+		Source:        selfHostedComputePlaneStack,
+		BuiltInOCIRef: builtInComputePlaneStackOCI(),
 	})
 	if err != nil {
 		return fmt.Errorf("resolve stack: %w", err)
 	}
-
-	helmfileFile, selector := computePlaneTarget(resolved.Path)
 
 	// The compute-plane helmfile (helmfile-nvca-operator.yaml.gotmpl) reads
 	// CLUSTER_ID/CLUSTER_GROUP_ID/IDENTITY_SOURCE/CLUSTER_REGION from env
@@ -352,8 +350,6 @@ func runDownComputePlaneForCluster(c *cobra.Command, ctx context.Context, sink p
 		ClusterName:     clusterName,
 		KubeContext:     selfHostedComputePlaneContext,
 		StackPath:       resolved.Path,
-		HelmfileFile:    helmfileFile,
-		Selector:        selector,
 		Env:             selfHostedEnv,
 		HelmRuntimeMode: helmRuntimeMode,
 		Stdout:          c.OutOrStdout(),
@@ -451,8 +447,8 @@ func runDownControlPlane(c *cobra.Command, ctx context.Context, sink progress.Ev
 	_ = sink.Emit(ctx, progress.PhaseStarted{Num: 4, Name: "uninstall-control-plane", StartedAt: p4})
 
 	resolved, err := selfhosted.ResolveStack(ctx, selfhosted.StackOptions{
-		Source:        selfHostedStack,
-		BuiltInOCIRef: builtInStackOCI(),
+		Source:        selfHostedControlPlaneStack,
+		BuiltInOCIRef: builtInControlPlaneStackOCI(),
 	})
 	if err != nil {
 		return fmt.Errorf("resolve stack: %w", err)

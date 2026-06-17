@@ -37,7 +37,7 @@ func TestSelfHosted_RegisteredOnRoot(t *testing.T) {
 
 func TestSelfHosted_HasGlobalFlags(t *testing.T) {
 	cmd, _, _ := rootCmd.Find([]string{"self-hosted"})
-	for _, name := range []string{"stack", "env", "no-apply", "non-interactive", "token", "output", "wait", "icms-url", "nats-url",
+	for _, name := range []string{"control-plane-stack", "compute-plane-stack", "env", "no-apply", "non-interactive", "token", "output", "wait", "icms-url", "nats-url",
 		"control-plane-context", "compute-plane-context"} {
 		assert.NotNil(t, cmd.PersistentFlags().Lookup(name), "missing flag %q", name)
 	}

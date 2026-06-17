@@ -266,7 +266,8 @@ HELMFILE_ENV=<env> helmfile --selector release-group=services sync
 
 ### Symptoms
 
-`helmfile destroy` hangs. Namespaces stuck in `Terminating`:
+`compute-plane uninstall` or compute-stack `helmfile destroy` hangs. Namespaces
+stuck in `Terminating`:
 
 ```bash
 kubectl get ns
@@ -296,45 +297,28 @@ done
 
 ### Symptoms
 
-After `helmfile sync` completes, no `nvca-operator` Deployment exists, or it exists but pods are not ready:
+After compute-plane install completes, no `nvca-operator` Deployment exists, or
+it exists but pods are not ready:
 
 ```bash
 kubectl get deployment nvca-operator -n nvca-operator
-# Error from server (NotFound): deployments.apps "nvca-operator" not found
-# -- OR --
-# NAME            READY   UP-TO-DATE   AVAILABLE   AGE
-# nvca-operator   0/1     1            0           5m
-```
-
-### Diagnosis
-
-```bash
-# Is the release enabled?
-grep -A1 nvcaOperator environments/<env>.yaml
-
-# Did helmfile consider the release at sync time?
-HELMFILE_ENV=<env> helmfile --selector name=nvca-operator list
-# If empty output: condition evaluated false (nvcaOperator.enabled != true)
-
-# If the Deployment exists but pods are not ready:
-kubectl describe deploy nvca-operator -n nvca-operator
 kubectl get pods -n nvca-operator
-kubectl logs deployment/nvca-operator -n nvca-operator --tail=200
 ```
 
-### Fixes
+### Diagnosis and Fixes
 
-1. **Release skipped (opt-in flag off)** — set `nvcaOperator.enabled: true` in `environments/<env>.yaml`, then:
+Use the split compute-plane workflow:
+
+1. Re-run `nvcf-cli self-hosted compute-plane register` and confirm the
+   values file under `deploy/stacks/nvcf-compute-plane/out/`.
+2. Re-run `nvcf-cli self-hosted compute-plane install --values <file>`.
+3. If pods still fail, inspect operator and agent logs:
    ```bash
-   HELMFILE_ENV=<env> helmfile --selector name=nvca-operator sync
-   kubectl rollout status deployment/nvca-operator -n nvca-operator --timeout=180s
+   kubectl describe deploy nvca-operator -n nvca-operator
+   kubectl logs deployment/nvca-operator -n nvca-operator --tail=200
    ```
-
-2. Pod CrashLoopBackOff with `no backend GPUs were found`: see [Fake GPU Operator](/ai-tooling/user/skills/nvcf-self-managed-installation/SKILL.md#fake-gpu-operator-non-gpu-clusters) in SKILL.md.
-
-3. **ImagePullBackOff on the operator pod** — pull secret missing in the `nvca-operator` namespace. Create it and restart the pod. See `ImagePullBackOff` recipe above.
-
-4. **Operator up but `nvca-system` / `nvcf-backend` never created** — check operator logs for CRD or RBAC errors; re-run the bootstrap command from the post-helmfile-sync section of SKILL.md.
+4. For fake GPU and cluster prerequisite issues, follow the
+   `nvcf-self-managed-cli` skill's compute-plane troubleshooting workflow.
 
 ## Failure: Gateway Address Changed
 
@@ -369,6 +353,5 @@ Quick reference for which services run in which namespace:
 | api-keys | api-keys, admin-issuer-proxy |
 | ess | ess-api |
 | sis | sis |
-| nvca-operator | nvca-operator |
 | envoy-gateway-system | envoy gateway (ingress controller) |
 | envoy-gateway | gateway resource + routes |

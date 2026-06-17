@@ -149,7 +149,7 @@ func runSelfHostedUp(c *cobra.Command, _ []string) error {
 	// + ambient state (NO_COLOR / TERM / CI / TTY size).
 	// Cluster/Target/Stack populate the bubbletea Model header for TTY modes;
 	// they are ignored by the plain, JSONL, and accessible renderers.
-	// selfHostedStack is the flag value (before resolution); resolved.Path is
+	// selfHostedControlPlaneStack is the flag value (before resolution); resolved.Path is
 	// not yet available here, so the flag string is the best we have.
 	sink, kind, err := progress.SelectRenderer(c.ErrOrStderr(), progress.RenderOpts{
 		JSON:                selfHostedJSON,
@@ -157,7 +157,7 @@ func runSelfHostedUp(c *cobra.Command, _ []string) error {
 		Accessible:          selfHostedAccessible,
 		Cluster:             upClusterName,
 		Target:              upRegion,
-		Stack:               selfHostedStack,
+		Stack:               selfHostedControlPlaneStack,
 		ControlPlaneContext: selfHostedControlPlaneContext, // M+9.E: split-cluster header
 		ComputePlaneContext: selfHostedComputePlaneContext, // M+9.E: split-cluster header
 	})
@@ -247,6 +247,10 @@ func (r *selfHostedUpRun) run() error {
 	if err != nil {
 		return err
 	}
+	computeStackPath, err := r.resolveComputeStack()
+	if err != nil {
+		return err
+	}
 	if upPlanOnly {
 		return r.emitPlanOnly(resolved.Path)
 	}
@@ -261,11 +265,11 @@ func (r *selfHostedUpRun) run() error {
 	if err := r.checkControlPlane(); err != nil {
 		return err
 	}
-	registration, err := r.registerCluster(resolved.Path)
+	registration, err := r.registerCluster(computeStackPath)
 	if err != nil {
 		return err
 	}
-	if err := r.applyComputePlane(resolved.Path, registration); err != nil {
+	if err := r.applyComputePlane(computeStackPath, registration); err != nil {
 		return err
 	}
 	return r.emitFinalHealth(registration)
@@ -370,8 +374,8 @@ func (r *selfHostedUpRun) emitInstallLockWarning(detail string) {
 func (r *selfHostedUpRun) resolveStack() (*selfhosted.ResolvedStack, error) {
 	p2Start := r.emitPhase(2, upPhaseResolve)
 	resolved, err := selfhosted.ResolveStack(r.ctx, selfhosted.StackOptions{
-		Source:        selfHostedStack,
-		BuiltInOCIRef: builtInStackOCI(),
+		Source:        selfHostedControlPlaneStack,
+		BuiltInOCIRef: builtInControlPlaneStackOCI(),
 	})
 	if err != nil {
 		r.emitFailure(selfhosted.Failure{Phase: selfhosted.PhaseResolve, Err: err}, p2Start)
@@ -382,6 +386,17 @@ func (r *selfHostedUpRun) resolveStack() (*selfhosted.ResolvedStack, error) {
 		return nil, r.emitCancellation(3, upPhaseRender)
 	}
 	return resolved, nil
+}
+
+func (r *selfHostedUpRun) resolveComputeStack() (string, error) {
+	computeResolved, err := selfhosted.ResolveStack(r.ctx, selfhosted.StackOptions{
+		Source:        selfHostedComputePlaneStack,
+		BuiltInOCIRef: builtInComputePlaneStackOCI(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("resolve compute-plane stack: %w", err)
+	}
+	return computeResolved.Path, nil
 }
 
 func (r *selfHostedUpRun) emitPlanOnly(stackPath string) error {
@@ -592,19 +607,16 @@ func (r *selfHostedUpRun) applyComputePlane(stackPath string, registration upClu
 		return r.handleHelmfilePhaseError(7, upPhaseApplyComputePlane, selfhosted.PhaseApplyCompute, "prepare image pull secrets", err, p7Start)
 	}
 	cancelWatcher, watcherDone := startWatcher(r.ctx, r.sink, 7, upPhaseApplyComputePlane, computePlaneNamespaces())
-	helmfileFile, selector := computePlaneTarget(stackPath)
 	err := selfhosted.Render(selfhosted.RenderOptions{
 		StackPath:       stackPath,
-		HelmfileFile:    helmfileFile,
 		Env:             selfHostedEnv,
 		Apply:           true,
-		Selector:        selector,
 		HelmRuntimeMode: r.helmRuntimeMode,
 		KubeContext:     kubectxFor(7), // M+9.E: compute-plane context in split mode
 		Stdout:          r.helmfileStdout,
 		Stderr:          r.helmfileStderr,
 		Ctx:             r.ctx,
-		ExtraEnv:        append(registration.computePlaneEnv(), "NVCF_NVCA_VALUES_FILE="+nvcaValuesPath(stackPath, upClusterName)),
+		ExtraEnv:        registration.computePlaneEnv(),
 	})
 	stopWatcher(cancelWatcher, watcherDone)
 	if err != nil {

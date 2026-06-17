@@ -35,7 +35,7 @@ import (
 func resetComputePlaneFlags(t *testing.T) {
 	t.Helper()
 	selfHostedEnv = "local"
-	selfHostedStack = ""
+	selfHostedComputePlaneStack = ""
 	selfHostedNoApply = false
 	selfHostedICMSURL = ""
 	selfHostedControlPlaneContext = ""
@@ -50,7 +50,7 @@ func resetComputePlaneFlags(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		selfHostedEnv = "local"
-		selfHostedStack = ""
+		selfHostedComputePlaneStack = ""
 		selfHostedNoApply = false
 		selfHostedICMSURL = ""
 		selfHostedControlPlaneContext = ""
@@ -78,7 +78,7 @@ func TestComputePlaneInstallRequiresValues(t *testing.T) {
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{
 		"self-hosted", "compute-plane", "install",
-		"--stack", t.TempDir(),
+		"--compute-plane-stack", t.TempDir(),
 	})
 
 	err := rootCmd.Execute()
@@ -91,7 +91,6 @@ func TestComputePlaneInstallTemplatesUserValuesFile(t *testing.T) {
 
 	stackDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(stackDir, "helmfile.d"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(stackDir, "helmfile-nvca-operator.yaml.gotmpl"), []byte("releases: []\n"), 0o644))
 
 	valuesFile := filepath.Join(t.TempDir(), "custom-nvca-values.yaml")
 	require.NoError(t, os.WriteFile(valuesFile, []byte("clusterName: gpu-from-values\nncaId: nca-from-values\n"), 0o644))
@@ -103,7 +102,7 @@ func TestComputePlaneInstallTemplatesUserValuesFile(t *testing.T) {
 	rootCmd.SetErr(&stderr)
 	rootCmd.SetArgs([]string{
 		"self-hosted", "compute-plane", "install",
-		"--stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--values", valuesFile,
 		"--kube-context", "gpu-context",
 		"--no-apply",
@@ -113,10 +112,9 @@ func TestComputePlaneInstallTemplatesUserValuesFile(t *testing.T) {
 	out := stdout.String()
 	assert.Contains(t, out, "verb=template")
 	assert.Contains(t, out, "arg=--kube-context=gpu-context")
-	assert.Contains(t, out, "env:NVCF_NVCA_VALUES_FILE="+valuesFile)
 	assert.Contains(t, out, "env:CLUSTER_NAME=gpu-from-values")
 	assert.Contains(t, out, "env:NCA_ID=nca-from-values")
-	assert.Contains(t, out, "arg="+filepath.Join(stackDir, "helmfile-nvca-operator.yaml.gotmpl"))
+	assert.Contains(t, out, "arg="+stackDir)
 	assert.FileExists(t, fakeBin)
 }
 
@@ -125,7 +123,6 @@ func TestComputePlaneInstallAppliesByDefault(t *testing.T) {
 
 	stackDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(stackDir, "helmfile.d"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(stackDir, "helmfile-nvca-operator.yaml.gotmpl"), []byte("releases: []\n"), 0o644))
 
 	valuesFile := filepath.Join(t.TempDir(), "gpu-a-nvca-values.yaml")
 	require.NoError(t, os.WriteFile(valuesFile, []byte("clusterID: id-a\nclusterGroupID: group-a\n"), 0o644))
@@ -137,14 +134,13 @@ func TestComputePlaneInstallAppliesByDefault(t *testing.T) {
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{
 		"self-hosted", "compute-plane", "install",
-		"--stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--values", valuesFile,
 	})
 
 	require.NoError(t, rootCmd.Execute())
 	out := stdout.String()
 	assert.Contains(t, out, "verb=apply")
-	assert.Contains(t, out, "env:NVCF_NVCA_VALUES_FILE="+valuesFile)
 	assert.Contains(t, out, "env:CLUSTER_NAME=gpu-a")
 }
 
@@ -463,7 +459,7 @@ func TestComputePlaneRegisterCallsSISAfterValidation(t *testing.T) {
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{
 		"self-hosted", "--icms-url", "https://sis-admin.example.test", "compute-plane", "register",
-		"--stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--control-plane-profile", profileFile,
 		"--cluster-name", "gpu-a",
 		"--kube-context", "gpu-context",
@@ -514,7 +510,7 @@ func TestComputePlaneRegisterWritesNVCAValuesAndHandoffCommands(t *testing.T) {
 	rootCmd.SetErr(&bytes.Buffer{})
 	rootCmd.SetArgs([]string{
 		"self-hosted", "compute-plane", "register",
-		"--stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--control-plane-profile", profileFile,
 		"--cluster-name", "gpu-a",
 		"--kube-context", "gpu-context",
@@ -543,14 +539,14 @@ func TestComputePlaneRegisterWritesNVCAValuesAndHandoffCommands(t *testing.T) {
 	assert.Contains(t, out, "valuesPath: "+valuesPath)
 	assert.Contains(t, out, "helm upgrade --install nvca-operator nvcf/helm-nvca-operator --version 1.11.1")
 	assert.Contains(t, out, "--values "+shellQuote(valuesPath))
-	assert.Contains(t, out, shellCommand("nvcf", "self-hosted", "compute-plane", "install", "--stack", stackDir, "--values", valuesPath, "--kube-context", "gpu-context"))
+	assert.Contains(t, out, shellCommand("nvcf", "self-hosted", "compute-plane", "install", "--compute-plane-stack", stackDir, "--values", valuesPath, "--kube-context", "gpu-context"))
 }
 
 func TestComputePlaneRegisterUsesDefaultStackForValuesHandoff(t *testing.T) {
 	resetComputePlaneFlags(t)
 
 	stackDir := writeComputePlaneStack(t)
-	t.Setenv("NVCF_CLI_DEFAULT_STACK", stackDir)
+	t.Setenv("NVCF_CLI_DEFAULT_COMPUTE_PLANE_STACK", stackDir)
 	profileFile := writeTestControlPlaneProfile(t, "cp-cluster")
 
 	prevFetcher := fetchClusterIdentity
@@ -576,9 +572,9 @@ func TestComputePlaneRegisterUsesDefaultStackForValuesHandoff(t *testing.T) {
 	})
 
 	require.NoError(t, rootCmd.Execute())
-	valuesPath := filepath.Join(stackDir, "out", "gpu-a-nvca-values.yaml")
+	valuesPath := filepath.Join(stackDir, "out", "gpu-a-register-values.yaml")
 	assert.FileExists(t, valuesPath)
-	assert.NotContains(t, stdout.String(), "--stack")
+	assert.NotContains(t, stdout.String(), "--compute-plane-stack")
 }
 
 func TestComputePlaneRegisterStopsBeforeSISOnReachabilityFailure(t *testing.T) {
@@ -610,6 +606,89 @@ func TestComputePlaneRegisterStopsBeforeSISOnReachabilityFailure(t *testing.T) {
 	assert.ErrorIs(t, err, assert.AnError)
 }
 
+func TestComputePlaneChartFromStack(t *testing.T) {
+	t.Run("reads chart and version from nvca helmfile", func(t *testing.T) {
+		stackDir := writeComputePlaneStack(t)
+
+		chart, version, err := computePlaneChartFromStack(stackDir)
+		require.NoError(t, err)
+		assert.Equal(t, "nvcf/helm-nvca-operator", chart)
+		assert.Equal(t, "1.11.1", version)
+	})
+
+	t.Run("ignores non nvca helmfiles", func(t *testing.T) {
+		stackDir := t.TempDir()
+		helmfileDir := filepath.Join(stackDir, "helmfile.d")
+		require.NoError(t, os.MkdirAll(helmfileDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(helmfileDir, "01-core.yaml.gotmpl"), []byte(`
+releases:
+  - name: api
+    chart: nvcf/helm-nvcf-api
+    version: 1.2.3
+`), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(helmfileDir, "02-nvca.yaml.gotmpl"), []byte(`
+releases:
+  - name: nvca-operator
+    chart: "nvcf/helm-nvca-operator"
+    version: '1.12.0'
+`), 0o644))
+
+		chart, version, err := computePlaneChartFromStack(stackDir)
+		require.NoError(t, err)
+		assert.Equal(t, "nvcf/helm-nvca-operator", chart)
+		assert.Equal(t, "1.12.0", version)
+	})
+
+	t.Run("skips incomplete nvca file and uses next", func(t *testing.T) {
+		stackDir := t.TempDir()
+		helmfileDir := filepath.Join(stackDir, "helmfile.d")
+		require.NoError(t, os.MkdirAll(helmfileDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(helmfileDir, "01-nvca.yaml.gotmpl"), []byte(`
+releases:
+  - name: nvca-operator
+    chart: nvcf/helm-nvca-operator
+`), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(helmfileDir, "02-nvca.yaml.gotmpl"), []byte(`
+releases:
+  - name: nvca-operator
+    chart: nvcf/helm-nvca-operator
+    version: 2.0.0
+`), 0o644))
+
+		chart, version, err := computePlaneChartFromStack(stackDir)
+		require.NoError(t, err)
+		assert.Equal(t, "nvcf/helm-nvca-operator", chart)
+		assert.Equal(t, "2.0.0", version)
+	})
+
+	t.Run("errors when helmfile directory is missing", func(t *testing.T) {
+		stackDir := t.TempDir()
+
+		chart, version, err := computePlaneChartFromStack(stackDir)
+		require.Error(t, err)
+		assert.Empty(t, chart)
+		assert.Empty(t, version)
+		assert.Contains(t, err.Error(), "reading compute-plane helmfile directory")
+	})
+
+	t.Run("errors when no parseable nvca chart reference exists", func(t *testing.T) {
+		stackDir := t.TempDir()
+		helmfileDir := filepath.Join(stackDir, "helmfile.d")
+		require.NoError(t, os.MkdirAll(helmfileDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(helmfileDir, "02-nvca.yaml.gotmpl"), []byte(`
+releases:
+  - name: nvca-operator
+    chart: nvcf/helm-nvca-operator
+`), 0o644))
+
+		chart, version, err := computePlaneChartFromStack(stackDir)
+		require.Error(t, err)
+		assert.Empty(t, chart)
+		assert.Empty(t, version)
+		assert.Contains(t, err.Error(), "compute-plane chart reference not found in stack")
+	})
+}
+
 func installFakeComputePlaneHelmfile(t *testing.T) string {
 	t.Helper()
 	fakeBin := filepath.Join(t.TempDir(), "helmfile")
@@ -620,7 +699,6 @@ for arg in "$@"; do
   last="$arg"
 done
 printf 'verb=%s\n' "$last"
-printf 'env:NVCF_NVCA_VALUES_FILE=%s\n' "$NVCF_NVCA_VALUES_FILE"
 printf 'env:CLUSTER_NAME=%s\n' "$CLUSTER_NAME"
 printf 'env:NCA_ID=%s\n' "$NCA_ID"
 `
@@ -676,7 +754,7 @@ func writeComputePlaneStack(t *testing.T) string {
 func writeComputePlaneStackAt(t *testing.T, stackDir string) string {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Join(stackDir, "helmfile.d"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(stackDir, "helmfile-nvca-operator.yaml.gotmpl"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(stackDir, "helmfile.d", "02-nvca.yaml.gotmpl"), []byte(`
 releases:
   - name: nvca-operator
     chart: nvcf/helm-nvca-operator

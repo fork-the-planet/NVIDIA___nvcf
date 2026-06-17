@@ -53,11 +53,12 @@ make -C tools/ncp-local-cluster destroy-multicluster
 and applies them). The CLI manages URL block selection (in-cluster vs
 cross-cluster reachable) based on the kube contexts you pass.
 
-**Helmfile** drives the install through Make targets in
-`deploy/stacks/self-managed/Makefile`: `make template`, `make install`,
-`make register-cluster`, and `make install-nvca-operator`. The operator
-authors topology-correct URLs into an environment file (different fixture
-per topology) instead of relying on a CLI-managed profile.
+**Helmfile** drives the install through split Make targets:
+`deploy/stacks/self-managed/Makefile` for control plane (`make template`,
+`make install`) and `deploy/stacks/nvcf-compute-plane/Makefile` for
+compute plane (`make register-cluster`, `make install`). The operator authors
+topology-correct URLs into an environment file (different fixture per
+topology) instead of relying on a CLI-managed profile.
 
 The two install paths intentionally diverge. See
 `tests/bdd/AGENTS.md` (the "CLI vs Helmfile install paths" section) for

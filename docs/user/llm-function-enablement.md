@@ -145,15 +145,17 @@ Apply the updated control plane environment before creating LLM functions:
 make apply HELMFILE_ENV=<environment-name>
 ```
 
-Apply or refresh the worker layer for each registered GPU cluster so the NVCA
-operator receives `agentConfig.mergeConfig`:
+Apply or refresh the compute-plane stack for each registered GPU cluster so the
+NVCA operator receives `agentConfig.mergeConfig`:
 
 ```bash
-make install-nvca-operator HELMFILE_ENV=<environment-name> CLUSTER_NAME=<cluster-name>
+make -C deploy/stacks/nvcf-compute-plane install \
+  HELMFILE_ENV=<environment-name> \
+  CLUSTER_NAME=<cluster-name>
 ```
 
 Existing LLM function pods keep their current sidecar arguments. Recreate or
-redeploy those functions after refreshing the worker layer so new pods get the
+redeploy those functions after refreshing the compute plane so new pods get the
 updated worker transport settings.
 
 Verify the LLM control plane components:

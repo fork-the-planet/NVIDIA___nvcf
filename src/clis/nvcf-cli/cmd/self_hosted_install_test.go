@@ -76,7 +76,7 @@ func TestSelfHostedInstall_ControlPlane_NoApply(t *testing.T) {
 	rootCmd.SetOut(&stdout)
 	rootCmd.SetArgs([]string{
 		"self-hosted", "install", "--control-plane",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
 		"--no-apply",
 	})
 	require.NoError(t, rootCmd.Execute())
@@ -138,7 +138,7 @@ func TestSelfHostedInstall_ControlPlane_AppliesByDefault(t *testing.T) {
 	rootCmd.SetOut(&stdout)
 	rootCmd.SetArgs([]string{
 		"self-hosted", "install", "--control-plane",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
 	})
 	require.NoError(t, rootCmd.Execute())
 
@@ -195,7 +195,7 @@ func TestSelfHostedInstall_ControlPlane_PostInstallMintNonFatalWithoutTTY(t *tes
 	rootCmd.SetErr(&stderr)
 	rootCmd.SetArgs([]string{
 		"self-hosted", "install", "--control-plane",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
 	})
 	// Install must succeed: the post-install token mint is best-effort.
 	require.NoError(t, rootCmd.Execute())
@@ -228,7 +228,7 @@ func TestSelfHostedInstall_ControlPlane_WritesProfile(t *testing.T) {
 	rootCmd.SetErr(&stderr)
 	rootCmd.SetArgs([]string{
 		"self-hosted", "install", "--control-plane",
-		"--stack", stackDir,
+		"--control-plane-stack", stackDir,
 		"--cluster-name=nvcf-cp",
 		"--nca-id=nvcf-default",
 		"--region=us-west-1",
@@ -273,7 +273,7 @@ func TestSelfHostedInstall_ComputePlane_RegistersAndRenders(t *testing.T) {
 	rootCmd.SetOut(&stdout)
 	rootCmd.SetArgs([]string{
 		"self-hosted", "install", "--compute-plane", "--cluster-name=ncp-A",
-		"--stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--icms-url=http://sis.localhost:8080",
 		"--no-apply",
 	})
@@ -317,7 +317,7 @@ func TestSelfHostedInstall_ComputePlane_AppliesByDefault(t *testing.T) {
 	rootCmd.SetOut(&stdout)
 	rootCmd.SetArgs([]string{
 		"self-hosted", "install", "--compute-plane", "--cluster-name=ncp-A",
-		"--stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--icms-url=http://sis.localhost:8080",
 		// no --no-apply
 	})
@@ -355,7 +355,7 @@ func TestSelfHostedInstall_ComputePlane_LocalSplitWritesExternalControlPlaneEndp
 		"--control-plane-context=admin@cp",
 		"--compute-plane-context=admin@gpu1",
 		"install", "--compute-plane", "--cluster-name=ncp-A",
-		"--stack", stackDir,
+		"--compute-plane-stack", stackDir,
 		"--icms-url=http://sis.localhost:8080",
 		"--no-apply",
 	})
@@ -389,25 +389,6 @@ func TestClusterIdentityConfigPreservesLoadedKubeconfigPath(t *testing.T) {
 	assert.Equal(t, "/tmp/custom-kubeconfig", cfg.KubeconfigPath)
 	assert.Equal(t, "admin@gpu1", cfg.KubeContext)
 	assert.Equal(t, "http://api.example", cfg.BaseHTTPURL)
-}
-
-func TestComputePlaneTarget_BundledStack(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "helmfile.d"), 0o755))
-
-	helmfileFile, selector := computePlaneTarget(dir)
-	assert.Equal(t, "", helmfileFile, "bundled layout should leave HelmfileFile empty")
-	assert.Equal(t, "release-group=workers", selector, "bundled layout should filter by release-group")
-}
-
-func TestComputePlaneTarget_MultiClusterSplit(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "helmfile.d"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "helmfile-nvca-operator.yaml.gotmpl"), []byte("releases: []\n"), 0o644))
-
-	helmfileFile, selector := computePlaneTarget(dir)
-	assert.Equal(t, "helmfile-nvca-operator.yaml.gotmpl", helmfileFile)
-	assert.Equal(t, "", selector, "split layout should not narrow with a selector")
 }
 
 // fakeClusterClient is a test double for selfhosted.ClusterClient.

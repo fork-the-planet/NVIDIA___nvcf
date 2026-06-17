@@ -31,7 +31,7 @@
 
 # Transient symlink created by root Makefile's link-secrets target;
 # points at ../../../../secrets/<env>-secrets.yaml (root-level user file).
-deploy/stacks/nvcf-self-managed-stack/secrets/*-secrets.yaml
+deploy/stacks/**/secrets/*-secrets.yaml
 
 # OS
 .DS_Store

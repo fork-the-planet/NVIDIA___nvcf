@@ -117,7 +117,7 @@ controlPlane:
     nats: nats.localhost
     invocation: invocation.localhost
 `
-	writeArtifact(t, repoRoot, "control-plane-profile.yaml", body)
+	writeArtifact(t, repoRoot, "self-managed", "control-plane-profile.yaml", body)
 }
 
 // writeMulticlusterProfileHandoffArtifact seeds the profile that the
@@ -151,12 +151,12 @@ controlPlane:
     nats: nats.localhost
     invocation: invocation.localhost
 `
-	writeArtifact(t, repoRoot, "control-plane-profile.yaml", body)
+	writeArtifact(t, repoRoot, "self-managed", "control-plane-profile.yaml", body)
 }
 
 // writeMulticlusterComputeRegisterValues seeds the per-compute-cluster
 // register-values handoff the multi-cluster install scenario reads.
-func writeMulticlusterComputeRegisterValues(t *testing.T, repoRoot, cluster string) {
+func writeMulticlusterComputeRegisterValues(t *testing.T, repoRoot, stackDir, cluster string) {
 	t.Helper()
 	body := `clusterName: ` + cluster + `
 clusterID: 99999999-aaaa-bbbb-cccc-dddddddddddd
@@ -169,7 +169,7 @@ selfManaged:
   revalServiceURL: http://reval.localhost:8080
   natsURL: nats://nats.localhost:4222
 `
-	writeArtifact(t, repoRoot, cluster+"-register-values.yaml", body)
+	writeArtifact(t, repoRoot, stackDir, cluster+"-register-values.yaml", body)
 }
 
 // writeSingleClusterComputeRegisterValues seeds the register-values
@@ -192,15 +192,14 @@ selfManaged:
   revalServiceURL: http://reval.nvcf.svc.cluster.local:8080
   natsURL: nats://nats.nats-system.svc.cluster.local:4222
 `
-	writeArtifact(t, repoRoot, "ncp-local-register-values.yaml", body)
+	writeArtifact(t, repoRoot, "nvcf-compute-plane", "ncp-local-register-values.yaml", body)
 }
 
-// writeHelmfileRegisterValues seeds the register-values handoff the
-// single-cluster-helmfile.feature register scenario reads. The stack
-// Makefile passes CLUSTER_NAME separately to helmfile, so the file
-// produced by `make register-cluster` does not carry clusterName at
-// the top level and the selfManaged URLs use the compute-reachable
-// localhost hostnames.
+// writeHelmfileRegisterValues seeds the compute-plane register-values handoff
+// the single-cluster-helmfile.feature register scenario reads. The stack
+// Makefile passes CLUSTER_NAME separately to helmfile, so the file produced by
+// `make register-cluster` does not carry clusterName at the top level and the
+// selfManaged URLs use the compute-reachable localhost hostnames.
 func writeHelmfileRegisterValues(t *testing.T, repoRoot string) {
 	t.Helper()
 	body := `clusterID: 11111111-2222-3333-4444-555555555555
@@ -213,17 +212,16 @@ selfManaged:
   revalServiceURL: http://reval.localhost:8080
   natsURL: nats://nats.localhost:4222
 `
-	writeArtifact(t, repoRoot, "ncp-local-register-values.yaml", body)
+	writeArtifact(t, repoRoot, "nvcf-compute-plane", "ncp-local-register-values.yaml", body)
 }
 
-// seedStackSecretsTemplate writes a minimal stand-in for
-// deploy/stacks/self-managed/secrets/secrets.yaml.template at the
-// suite's RepoRoot. The body is not a faithful copy of the real
-// stack template (which has a richer schema with several placeholders
-// across openbao and api blocks); it only carries the single
-// REPLACE_WITH_BASE64_DOCKER_CREDENTIAL token the feature substitutes,
-// which is sufficient to exercise the I copy and I substitute steps
-// against a fake CommandRunner.
+// seedStackSecretsTemplate writes minimal stand-ins for the split stack
+// templates under deploy/stacks/self-managed/secrets/secrets.yaml.template at
+// the suite's RepoRoot. The body is not a faithful copy of the real
+// stack templates (which have richer schemas with several placeholders);
+// it only carries the single REPLACE_WITH_BASE64_DOCKER_CREDENTIAL token
+// the feature substitutes, which is sufficient to exercise the I copy
+// and I substitute steps against a fake CommandRunner.
 func seedStackSecretsTemplate(t *testing.T, repoRoot string) {
 	t.Helper()
 	templatePath := filepath.Join(repoRoot, "deploy", "stacks", "self-managed", "secrets", "secrets.yaml.template")
@@ -235,9 +233,9 @@ func seedStackSecretsTemplate(t *testing.T, repoRoot string) {
 	}
 }
 
-func writeArtifact(t *testing.T, repoRoot, name, body string) {
+func writeArtifact(t *testing.T, repoRoot, stackDir, name, body string) {
 	t.Helper()
-	dir := filepath.Join(repoRoot, "deploy", "stacks", "self-managed", "out")
+	dir := filepath.Join(repoRoot, "deploy", "stacks", stackDir, "out")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir handoff: %v", err)
 	}
@@ -255,6 +253,8 @@ func writeArtifact(t *testing.T, repoRoot, name, body string) {
 func TestSingleClusterUpFeatureFileWiresToSteps(t *testing.T) {
 	t.Setenv("NVCF_CLI", "/usr/bin/nvcf-cli")
 	t.Setenv("NGC_API_KEY", "test-key")
+	t.Setenv("SAMPLE_NGC_ORG", "test-org")
+	t.Setenv("SAMPLE_NGC_TEAM", "test-team")
 	suite := newWiringSuite(t, newFakeRunner(map[string]harness.Result{
 		// Conflict precheck: the feature asserts the conflicting
 		// multi-cluster control-plane is absent. Mimic k3d v5 "not
@@ -345,7 +345,7 @@ func TestMultiClusterUpFeatureFileWiresToSteps(t *testing.T) {
 		"k3d cluster get ncp-local": {ExitCode: 1},
 	}))
 	writeMulticlusterProfileHandoffArtifact(t, suite.Config.RepoRoot)
-	writeMulticlusterComputeRegisterValues(t, suite.Config.RepoRoot, "ncp-local-compute-1")
+	writeMulticlusterComputeRegisterValues(t, suite.Config.RepoRoot, "nvcf-compute-plane", "ncp-local-compute-1")
 	seedStackSecretsTemplate(t, suite.Config.RepoRoot)
 
 	sc := steps.NewScenarioContext(suite)
@@ -452,7 +452,7 @@ func TestMultiClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	}))
 	seedHelmfileLocalBDDMultiFixture(t, suite.Config.RepoRoot)
 	seedStackSecretsTemplate(t, suite.Config.RepoRoot)
-	writeMulticlusterComputeRegisterValues(t, suite.Config.RepoRoot, "ncp-local-compute-1")
+	writeMulticlusterComputeRegisterValues(t, suite.Config.RepoRoot, "nvcf-compute-plane", "ncp-local-compute-1")
 
 	sc := steps.NewScenarioContext(suite)
 	featurePath := mustResolveFeaturePath(t, "multi-cluster-helmfile.feature")
@@ -472,8 +472,8 @@ func TestMultiClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	if status != 0 {
 		t.Fatalf("godog suite status = %d\n%s", status, out.String())
 	}
-	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "install-nvca-operator") {
-		t.Fatal("install-nvca-operator make target was never invoked")
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "deploy/stacks/nvcf-compute-plane install") {
+		t.Fatal("compute-plane install make target was never invoked")
 	}
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "function invoke") {
 		t.Fatal("function invoke CLI command was never invoked")
@@ -621,7 +621,7 @@ selfManaged:
   revalServiceURL: http://wiring-elb.example.invalid
   natsURL: nats://wiring-elb.example.invalid:4222
 `
-	writeArtifact(t, repoRoot, clusterName+"-register-values.yaml", body)
+	writeArtifact(t, repoRoot, "nvcf-compute-plane", clusterName+"-register-values.yaml", body)
 }
 
 // TestSingleClusterEKSHelmfileFeatureFileWiresToSteps runs the EKS
@@ -694,8 +694,8 @@ func TestSingleClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "cluster register --name") {
 		t.Fatal("nvcf-cli cluster register was never invoked")
 	}
-	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "install-nvca-operator") {
-		t.Fatal("install-nvca-operator make target was never invoked")
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "deploy/stacks/nvcf-compute-plane install") {
+		t.Fatal("compute-plane install make target was never invoked")
 	}
 }
 
@@ -771,8 +771,8 @@ func TestMultiClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "cluster register --name") {
 		t.Fatal("nvcf-cli cluster register was never invoked")
 	}
-	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "install-nvca-operator") {
-		t.Fatal("install-nvca-operator make target was never invoked")
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "deploy/stacks/nvcf-compute-plane install") {
+		t.Fatal("compute-plane install make target was never invoked")
 	}
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "function invoke") {
 		t.Fatal("function invoke CLI command was never invoked")

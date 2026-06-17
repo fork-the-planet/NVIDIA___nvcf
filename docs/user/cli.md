@@ -455,6 +455,12 @@ Use these commands to install and inspect self-hosted NVCF deployments. For the 
 | `self-hosted uninstall --compute-plane --cluster-name <cluster-name>` | Remove compute-plane components for the GPU cluster. |
 | `self-hosted uninstall --control-plane` | Remove control-plane components. |
 
+Bundle source overrides:
+
+- `--control-plane-stack` selects the control-plane stack bundle.
+- `--compute-plane-stack` selects the compute-plane stack bundle.
+- Both flags accept local paths, git URLs, and `oci://` references.
+
 `self-hosted up` supports only a single local k3d cluster. It requires
 `--env local`, a current `k3d-*` kube context, and no split-context flags. For
 separate control-plane and GPU clusters, use the explicit control-plane and

@@ -159,7 +159,7 @@ When this succeeds, the following helm releases are deployed:
 ## Step 7: Register the cluster
 
 ```bash
-make -C deploy/stacks/self-managed register-cluster \
+make -C deploy/stacks/nvcf-compute-plane register-cluster \
   CLUSTER_NAME=ncp-local \
   NVCF_CLI=$(pwd)/nvcf-cli \
   NVCF_CLI_CONFIG=$(pwd)/tests/bdd/fixtures/nvcf-cli-local.yaml
@@ -172,13 +172,13 @@ step (unlike the CLI flow).
 </Note>
 
 The target produces
-`deploy/stacks/self-managed/out/ncp-local-register-values.yaml` with PSAT
+`deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml` with PSAT
 identitySource and `*.localhost` URLs.
 
 ## Step 8: Install the NVCA operator
 
 ```bash
-make -C deploy/stacks/self-managed install-nvca-operator \
+make -C deploy/stacks/nvcf-compute-plane install \
   CLUSTER_NAME=ncp-local \
   HELMFILE_ENV=local-bdd \
   NVCF_CLI=$(pwd)/nvcf-cli \

@@ -12,7 +12,8 @@
 
 | Flag | Purpose | Default |
 |---|---|---|
-| `--stack=…` | Bundle source: local path, git URL, or `oci://` URL | embedded OCI URL pinned by CLI version |
+| `--control-plane-stack=…` | Control-plane bundle source: local path, git URL, or `oci://` URL | embedded OCI URL pinned by CLI version |
+| `--compute-plane-stack=…` | Compute-plane bundle source: local path, git URL, or `oci://` URL | embedded OCI URL pinned by CLI version |
 | `--env=local\|prd\|…` | Helmfile environment name | `local` for dev builds, `prd` for releases |
 | `--non-interactive` | Disable all stdin prompts | `false` |
 | `--token=$JWT` | Admin JWT, overrides stored session | — |

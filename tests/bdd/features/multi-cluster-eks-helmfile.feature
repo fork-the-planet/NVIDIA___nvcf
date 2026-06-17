@@ -215,7 +215,7 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       # + JWKS by probing the CURRENT kubectl context, then POSTs that
       # identity to ICMS. The compute cluster (not the control plane) is
       # the target, so switch context to it before register-cluster runs.
-      # install-nvca-operator that follows also runs helm against the
+      # compute-plane install that follows also runs helm against the
       # ambient context, so this single switch covers both steps.
       When I run command "kubectl config use-context ${EKS_COMPUTE_CONTEXT}"
       Then the command exit code should be 0
@@ -246,22 +246,22 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       # Register the compute cluster with the control plane. tee mirrors
       # the CLI's full stdout to stderr for log visibility; the slice
       # helper extracts the YAML body from the mixed stdout before
-      # redirecting it to the worker-layer values file.
+      # redirecting it to the compute-plane values file.
       When I run command:
         """
-        bash -c 'set -eo pipefail; mkdir -p deploy/stacks/self-managed/out; ${NVCF_CLI} --config tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml cluster register --name ${EKS_COMPUTE_CLUSTER_NAME} --nca-id nvcf-default --region ${EKS_REGION} --icms-url http://${EKS_GATEWAY_ADDR} --ignore-existing | tee /dev/stderr | tests/bdd/scripts/slice-yaml-body.sh > deploy/stacks/self-managed/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml'
+        bash -c 'set -eo pipefail; mkdir -p deploy/stacks/nvcf-compute-plane/out; ${NVCF_CLI} --config tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml cluster register --name ${EKS_COMPUTE_CLUSTER_NAME} --nca-id nvcf-default --region ${EKS_REGION} --icms-url http://${EKS_GATEWAY_ADDR} --ignore-existing | tee /dev/stderr | tests/bdd/scripts/slice-yaml-body.sh > deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml'
         """
       Then the command exit code should be 0
-      And file "deploy/stacks/self-managed/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" should exist
-      And yaml file "deploy/stacks/self-managed/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" should contain:
+      And file "deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" should exist
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" should contain:
         """
         ncaID: nvcf-default
         region: ${EKS_REGION}
         selfManaged:
           identitySource: psat
         """
-      And yaml file "deploy/stacks/self-managed/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" key "clusterID" should not be empty
-      And yaml file "deploy/stacks/self-managed/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" key "clusterGroupID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" key "clusterID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_COMPUTE_CLUSTER_NAME}-register-values.yaml" key "clusterGroupID" should not be empty
 
       # The register-values URLs stay as cluster register's bare-ELB
       # output. Gateway HTTPRoute matching is handled by the chart-native
@@ -269,7 +269,7 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       # which the agent sends as the HTTP Host header.
       When I run command:
         """
-        make -C deploy/stacks/self-managed install-nvca-operator CLUSTER_NAME=${EKS_COMPUTE_CLUSTER_NAME} HELMFILE_ENV=eks-bdd-multi NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml
+        make -C deploy/stacks/nvcf-compute-plane install CLUSTER_NAME=${EKS_COMPUTE_CLUSTER_NAME} HELMFILE_ENV=eks-bdd-multi NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml
         """
       Then the command exit code should be 0
 

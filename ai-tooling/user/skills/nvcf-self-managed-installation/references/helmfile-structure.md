@@ -8,13 +8,21 @@ nvcf-self-managed-stack/
 │   ├── 000-prepare.yaml.gotmpl      # Validation hooks
 │   ├── 01-dependencies.yaml.gotmpl  # NATS, Cassandra, OpenBao
 │   ├── 02-core.yaml.gotmpl          # NVCF services + ingress
-│   ├── 03-observability.yaml.gotmpl # Observability stack (optional)
-│   └── 04-worker.yaml.gotmpl        # NVCA operator (opt-in via nvcaOperator.enabled)
+│   └── 03-observability.yaml.gotmpl # Observability stack (optional)
 ├── environments/
 │   ├── base.yaml                    # Default values (all environments)
 │   └── <env-name>.yaml              # Per-environment overrides
 ├── secrets/
 │   └── <env-name>-secrets.yaml      # Sensitive values (registry creds, passwords)
+└── global.yaml.gotmpl               # Go template that constructs per-chart values
+
+nvcf-compute-plane-stack/
+├── helmfile.d/
+│   ├── 01-dependencies.yaml.gotmpl  # Compute plane dependency components
+│   └── 02-nvca.yaml.gotmpl          # nvca-operator chart and nvca configuration
+├── environments/
+│   ├── base.yaml                    # Default values (all environments)
+│   └── <env-name>.yaml              # Per-environment overrides
 └── global.yaml.gotmpl               # Go template that constructs per-chart values
 ```
 
@@ -56,21 +64,6 @@ Most services use `inherit: [{template: service}]`. In MR !183 the LLM releases 
 | (observability releases) | (various) | observability | observability |
 
 Gated on observability-specific flags in the environment file. Skipped if disabled.
-
-### 04-worker.yaml.gotmpl
-
-| Release | Chart | Version | Namespace | Label | Condition |
-|---------|-------|---------|-----------|-------|-----------|
-| nvca-operator | `nvcf/helm-nvca-operator` | 1.6.6 | nvca-operator | workers | `nvcaOperator.enabled` |
-
-Standalone `values:` block with explicit image path construction. The release is **opt-in**: helmfile sets `nvcaOperator.enabled: false` as its default, and `environments/local.yaml` (plus any other env that needs functions) enables it with:
-
-```yaml
-nvcaOperator:
-  enabled: true
-```
-
-Without this override the release is skipped at sync time and no Deployment is created.
 
 ## Template Inheritance
 
@@ -192,7 +185,6 @@ HELMFILE_ENV=<env> helmfile --selector release-group=dependencies sync
 HELMFILE_ENV=<env> helmfile --selector release-group=services sync
 HELMFILE_ENV=<env> helmfile --selector release-group=ingress sync
 HELMFILE_ENV=<env> helmfile --selector release-group=observability sync
-HELMFILE_ENV=<env> helmfile --selector release-group=workers sync   # no-op unless nvcaOperator.enabled=true
 
 # By release name
 HELMFILE_ENV=<env> helmfile --selector name=cassandra sync

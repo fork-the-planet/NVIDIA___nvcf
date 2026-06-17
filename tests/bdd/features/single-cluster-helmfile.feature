@@ -22,6 +22,11 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
         | global.helm.sources.repository                | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
         | global.image.repository                       | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
         | api.env.NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE | nvcr.io/${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}/stargate-client:0.2.0  |
+      And I copy the file "tests/bdd/fixtures/nvcf-compute-plane-local-bdd.yaml" to "deploy/stacks/nvcf-compute-plane/environments/local-bdd.yaml"
+      And I update yaml file "deploy/stacks/nvcf-compute-plane/environments/local-bdd.yaml" with keys:
+        | global.imagePullSecrets[0].name               | nvcr-pull-secret                                                    |
+        | global.helm.sources.repository                | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
+        | global.image.repository                       | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
       And I copy the file "deploy/stacks/self-managed/secrets/secrets.yaml.template" to "deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml"
       # Only ${VAR} is interpolated; bare $oauthtoken stays literal.
       And I substitute "REPLACE_WITH_BASE64_DOCKER_CREDENTIAL" in file "deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml" with base64 of "$oauthtoken:${NGC_API_KEY}"
@@ -101,15 +106,15 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
     Scenario: Operator registers the local cluster and installs the NVCA operator
       When I run command:
         """
-        make -C deploy/stacks/self-managed register-cluster CLUSTER_NAME=ncp-local NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml
+        make -C deploy/stacks/nvcf-compute-plane register-cluster CLUSTER_NAME=ncp-local NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml
         """
       Then the command exit code should be 0
-      And file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" should exist
+      And file "deploy/stacks/nvcf-compute-plane/registration/ncp-local-register-values.yaml" should exist
       # The single-cluster Makefile passes CLUSTER_NAME separately to
       # helmfile, so the register-values file does not carry clusterName
       # at the top level. Assert the deterministic block that is
       # present plus the non-empty fields.
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" should contain:
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/ncp-local-register-values.yaml" should contain:
         """
         ncaID: nvcf-default
         region: us-west-1
@@ -119,12 +124,12 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
           revalServiceURL: http://reval.localhost:8080
           natsURL: nats://nats.localhost:4222
         """
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" key "clusterID" should not be empty
-      And yaml file "deploy/stacks/self-managed/out/ncp-local-register-values.yaml" key "clusterGroupID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/ncp-local-register-values.yaml" key "clusterID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/ncp-local-register-values.yaml" key "clusterGroupID" should not be empty
 
       When I run command:
         """
-        make -C deploy/stacks/self-managed install-nvca-operator CLUSTER_NAME=ncp-local HELMFILE_ENV=local-bdd NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml
+        make -C deploy/stacks/nvcf-compute-plane install CLUSTER_NAME=ncp-local HELMFILE_ENV=local-bdd NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml
         """
       Then the command exit code should be 0
 
@@ -160,7 +165,7 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
 
       When I run command:
         """
-        ${NVCF_CLI} --config ${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml api-key generate --description bdd-load-tester-supreme --scopes invoke_function,list_functions,queue_details,list_functions_details
+        ${NVCF_CLI} --config ${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml api-key generate --description bdd-load-tester-supreme --scopes invoke_function,list_functions,queue_details,list_functions_details --for function
         """
       Then the command exit code should be 0
 

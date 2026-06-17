@@ -73,7 +73,7 @@ NGC_API_KEY=<key> SAMPLE_NGC_ORG=<org> SAMPLE_NGC_TEAM=<team> \
   go test -run '^TestSingleClusterHelmfile$' -timeout 90m -v
 
 # Multi-cluster Helmfile feature: control-plane install on
-# k3d-ncp-local-cp followed by register-cluster + install-nvca-operator
+# k3d-ncp-local-cp followed by compute-plane register-cluster + install
 # on k3d-ncp-local-compute-1. Same secrets as the single-cluster
 # Helmfile feature.
 NGC_API_KEY=<key> SAMPLE_NGC_ORG=<org> SAMPLE_NGC_TEAM=<team> \

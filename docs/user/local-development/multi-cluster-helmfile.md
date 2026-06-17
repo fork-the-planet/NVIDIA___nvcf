@@ -188,7 +188,7 @@ done
 ## Step 9: Register the compute cluster
 
 ```bash
-make -C deploy/stacks/self-managed register-cluster \
+make -C deploy/stacks/nvcf-compute-plane register-cluster \
   CLUSTER_NAME=ncp-local-compute-1 \
   NVCF_CLI=$(pwd)/nvcf-cli \
   NVCF_CLI_CONFIG=$(pwd)/tests/bdd/fixtures/nvcf-cli-local.yaml
@@ -200,12 +200,12 @@ make -C deploy/stacks/self-managed register-cluster \
 </Note>
 
 The target produces
-`deploy/stacks/self-managed/out/ncp-local-compute-1-register-values.yaml`.
+`deploy/stacks/nvcf-compute-plane/out/ncp-local-compute-1-register-values.yaml`.
 
 ## Step 10: Install the NVCA operator on the compute cluster
 
 ```bash
-make -C deploy/stacks/self-managed install-nvca-operator \
+make -C deploy/stacks/nvcf-compute-plane install \
   CLUSTER_NAME=ncp-local-compute-1 \
   HELMFILE_ENV=local-bdd \
   NVCF_CLI=$(pwd)/nvcf-cli \

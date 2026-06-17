@@ -259,7 +259,6 @@ HELMFILE_ENV=<env> helmfile --selector name=cassandra sync
 | `name=llm-api-gateway` | Deploy just the LLM API gateway when `llm.enabled=true` |
 | `name=vanity-gateway` | Deploy just Vanity Gateway only when the stack package includes that release and `addons.vanityGateway.enabled=true` |
 | `release-group=ingress` | ingress (gateway routes) |
-| `release-group=workers` | nvca-operator |
 | `name=<release>` | Any individual release by name |
 
 Note: `admin-issuer-proxy` does not have a release-group label. Target it with `--selector name=admin-issuer-proxy`.

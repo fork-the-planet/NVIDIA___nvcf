@@ -28,10 +28,11 @@ Feature: Bring up a local single-cluster NVCF stack with the self-hosted up one-
       And environment variable "SAMPLE_NGC_ORG" is set
       And environment variable "SAMPLE_NGC_TEAM" is set
       # self-hosted up --env local reads operator-authored local secrets
-      # from deploy/stacks/self-managed/secrets/local-secrets.yaml (only
-      # secrets.yaml.template is tracked). Author it from the template the
-      # same way the other local features do; the Ledger restores or
-      # removes it at suite teardown.
+      # from both split stacks:
+      # deploy/stacks/self-managed/secrets/local-secrets.yaml.
+      # Only secrets.yaml.template is tracked in each stack. Author both
+      # files from the templates; the Ledger restores or removes them at
+      # suite teardown.
       And I copy the file "deploy/stacks/self-managed/secrets/secrets.yaml.template" to "deploy/stacks/self-managed/secrets/local-secrets.yaml"
       And I substitute "REPLACE_WITH_BASE64_DOCKER_CREDENTIAL" in file "deploy/stacks/self-managed/secrets/local-secrets.yaml" with base64 of "$oauthtoken:${NGC_API_KEY}"
       # Conflict precheck: ncp-local-cp's k3d serverlb claims
@@ -72,7 +73,7 @@ Feature: Bring up a local single-cluster NVCF stack with the self-hosted up one-
       # noninteractive test runner.
       When I run command with a terminal:
         """
-        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --stack deploy/stacks/self-managed --env local --plain --icms-url http://sis.localhost:8080 up --cluster-name ncp-local --region us-west-1 --nca-id nvcf-default --refresh-token
+        ${NVCF_CLI} --config tests/bdd/fixtures/nvcf-cli-local.yaml self-hosted --control-plane-stack deploy/stacks/self-managed --compute-plane-stack deploy/stacks/nvcf-compute-plane --env local --plain --icms-url http://sis.localhost:8080 up --cluster-name ncp-local --region us-west-1 --nca-id nvcf-default --refresh-token
         """
       Then the command exit code should be 0
 
