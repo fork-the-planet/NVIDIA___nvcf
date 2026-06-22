@@ -1238,12 +1238,6 @@ func (bc *BackendK8sCache) validateNVCFBackend(ctx context.Context, nb *nvidiaio
 			_, err := bc.getCustomNetworkPoliciesData(ctx, bc.clients.K8s.CoreV1().ConfigMaps(nb.Namespace).Get)
 			return err
 		},
-		func() error {
-			if nb.Spec.ClusterSource != "" && bc.clusterSource != nb.Spec.ClusterSource {
-				return fmt.Errorf("cluster source cannot be changed after initial deployment")
-			}
-			return nil
-		},
 	}
 	for _, check := range nvcaValidationChecks {
 		if err := check(); err != nil {
