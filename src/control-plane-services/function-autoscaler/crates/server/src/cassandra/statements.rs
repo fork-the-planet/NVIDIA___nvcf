@@ -48,10 +48,10 @@ pub(crate) fn get_delete_node_stmt(keyspace: &str) -> String {
 }
 
 // recently_invoked_functions Table
-// nca_id_string is a regular column, not part of PK
+// account_id is a regular column, not part of PK
 pub(crate) fn get_select_recently_invoked_functions_in_token_range_stmt(keyspace: &str) -> String {
     format!(
-        "SELECT function_id, function_version_id, nca_id_string \
+        "SELECT function_id, function_version_id, account_id \
          FROM {}.recently_invoked_functions \
          WHERE token(function_id, function_version_id) >= ? AND token(function_id, function_version_id) <= ?;",
         keyspace
@@ -67,12 +67,12 @@ pub(crate) fn get_delete_recently_invoked_function_stmt(keyspace: &str) -> Strin
 }
 
 // running_functions_without_invocations Table
-// nca_id_string is a regular column, not part of PK
+// account_id is a regular column, not part of PK
 pub(crate) fn get_select_running_functions_without_invocations_in_token_range_stmt(
     keyspace: &str,
 ) -> String {
     format!(
-        "SELECT function_id, function_version_id, nca_id_string \
+        "SELECT function_id, function_version_id, account_id \
          FROM {}.running_functions_without_invocations \
          WHERE token(function_id, function_version_id) >= ? AND token(function_id, function_version_id) <= ?;",
         keyspace
@@ -88,10 +88,10 @@ pub(crate) fn get_delete_running_function_without_invocations_stmt(keyspace: &st
 }
 
 // recently_invoked_functions_history Table
-// nca_id_string is a regular column, not part of PK
+// account_id is a regular column, not part of PK
 pub(crate) fn get_select_recently_invoked_function_history_by_id_stmt(keyspace: &str) -> String {
     format!(
-        "SELECT function_id, function_version_id, nca_id_string, num_workers, \
+        "SELECT function_id, function_version_id, account_id, num_workers, \
          last_predicted_desired_instance_count, \
          last_predicted_error_code, last_updated_at \
          FROM {}.recently_invoked_functions_history \
@@ -110,19 +110,19 @@ pub(crate) fn get_delete_recently_invoked_function_history_pk_stmt(keyspace: &st
 
 pub(crate) fn get_insert_recently_invoked_functions_history_pk_stmt(keyspace: &str) -> String {
     format!(
-        "INSERT INTO {}.recently_invoked_functions_history (function_id, function_version_id, nca_id_string, num_workers) \
+        "INSERT INTO {}.recently_invoked_functions_history (function_id, function_version_id, account_id, num_workers) \
          VALUES (?, ?, ?, ?)",
         keyspace
     )
 }
 
 // running_functions_without_invocations_history Table
-// nca_id_string is a regular column, not part of PK
+// account_id is a regular column, not part of PK
 pub(crate) fn get_select_running_function_without_invocations_history_by_id_stmt(
     keyspace: &str,
 ) -> String {
     format!(
-        "SELECT function_id, function_version_id, nca_id_string, num_workers, \
+        "SELECT function_id, function_version_id, account_id, num_workers, \
          last_predicted_desired_instance_count, \
          last_predicted_error_code, last_updated_at \
          FROM {}.running_functions_without_invocations_history \
@@ -145,7 +145,7 @@ pub(crate) fn get_insert_running_functions_without_invocations_history_pk_stmt(
     keyspace: &str,
 ) -> String {
     format!(
-        "INSERT INTO {}.running_functions_without_invocations_history (function_id, function_version_id, nca_id_string, num_workers) \
+        "INSERT INTO {}.running_functions_without_invocations_history (function_id, function_version_id, account_id, num_workers) \
          VALUES (?, ?, ?, ?)",
         keyspace
     )
@@ -190,7 +190,7 @@ pub(crate) fn get_stmt_insert_to_recently_invoked_functions(
     ttl_seconds: i32,
 ) -> String {
     format!(
-        "INSERT INTO {}.recently_invoked_functions (function_id, function_version_id, nca_id_string, last_updated_at) VALUES (?, ?, ?, ?) USING TTL {}",
+        "INSERT INTO {}.recently_invoked_functions (function_id, function_version_id, account_id, last_updated_at) VALUES (?, ?, ?, ?) USING TTL {}",
         keyspace,
         ttl_seconds
     )
@@ -203,7 +203,7 @@ pub(crate) fn get_stmt_insert_to_running_functions_without_invocations(
     ttl_seconds: i32,
 ) -> String {
     format!(
-        "INSERT INTO {}.running_functions_without_invocations (function_id, function_version_id, nca_id_string, last_updated_at) VALUES (?, ?, ?, ?) USING TTL {}",
+        "INSERT INTO {}.running_functions_without_invocations (function_id, function_version_id, account_id, last_updated_at) VALUES (?, ?, ?, ?) USING TTL {}",
         keyspace,
         ttl_seconds
     )
@@ -218,7 +218,7 @@ pub(crate) fn get_stmt_str_insert_to_recently_invoked_functions_history_predicti
     ttl_seconds: i32,
 ) -> String {
     format!(
-        "INSERT INTO {}.recently_invoked_functions_history (function_id, function_version_id, nca_id_string, \
+        "INSERT INTO {}.recently_invoked_functions_history (function_id, function_version_id, account_id, \
          num_workers, last_predicted_desired_instance_count, \
          last_predicted_error_code, last_updated_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL {}",
@@ -235,7 +235,7 @@ pub(crate) fn get_stmt_str_insert_to_running_functions_without_invocations_histo
     ttl_seconds: i32,
 ) -> String {
     format!(
-        "INSERT INTO {}.running_functions_without_invocations_history (function_id, function_version_id, nca_id_string, \
+        "INSERT INTO {}.running_functions_without_invocations_history (function_id, function_version_id, account_id, \
          num_workers, last_predicted_desired_instance_count, \
          last_predicted_error_code, last_updated_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL {}",
