@@ -133,6 +133,53 @@ run_lint nvca-operator \
   --set-string "selfManaged.revalServiceURL=http://reval.nvcf-control-plane.test:18080" \
   --set-string "selfManaged.natsURL=nats://nats.nvcf-control-plane.test:14222"
 
+# Regression test: `helm upgrade --reuse-values` from a pre-3.0.0-rc.12 chart leaves
+# agent.serviceOAuth unset (the new chart defaults are not merged). The cluster-dto
+# ConfigMaps must render nil-safely instead of failing at template render with
+# "nil pointer evaluating interface {}.helmReVal".
+echo -e "\nTesting nil-safe agent.serviceOAuth (reuse-values upgrade simulation)..."
+reuse_values_file="${repo_root}/test/test-reuse-values-no-service-oauth.yaml"
+
+assert_service_oauth_nil_safe() {
+  local label="${1}"
+  shift
+  local render_output
+  render_output="$(mktemp)"
+  if ! helm template test-release "${repo_root}/deployments/nvca-operator" "$@" \
+    --values "${reuse_values_file}" > "${render_output}" 2>&1; then
+    echo "Expected ${label} cluster-dto to render without agent.serviceOAuth defaults"
+    cat "${render_output}"
+    rm -f "${render_output}"
+    exit 1
+  fi
+  if ! grep -q 'helmReValStageOAuthTokenURL: ""' "${render_output}"; then
+    echo "Expected ${label} cluster-dto to emit empty nil-safe serviceOAuth values"
+    cat "${render_output}"
+    rm -f "${render_output}"
+    exit 1
+  fi
+  rm -f "${render_output}"
+  echo "✓ ${label} cluster-dto renders nil-safely without agent.serviceOAuth defaults"
+}
+
+assert_service_oauth_nil_safe "helm-managed" \
+  --set "ngcConfig.serviceKey=fakekey" \
+  --set "ngcConfig.clusterSource=helm-managed" \
+  --set-string "clusterName=ncp-helm-managed-1" \
+  --show-only templates/helm-managed-nvcfbackend-cm.yaml
+
+assert_service_oauth_nil_safe "self-managed" \
+  --set "generateImagePullSecret=false" \
+  --set "ngcConfig.clusterSource=self-managed" \
+  --set-string "clusterID=id" \
+  --set-string "clusterGroupID=group" \
+  --set-string "clusterName=ncp-local-compute-1" \
+  --set-string "selfManaged.nvcaVersion=3.0.0-test" \
+  --set-string "selfManaged.icmsServiceURL=http://sis.nvcf-control-plane.test:18080" \
+  --set-string "selfManaged.revalServiceURL=http://reval.nvcf-control-plane.test:18080" \
+  --set-string "selfManaged.natsURL=nats://nats.nvcf-control-plane.test:14222" \
+  --show-only templates/self-managed-nvcfbackend-cm.yaml
+
 # Test secret mirroring feature
 # Test with only source namespace (should not add args)
 run_lint nvca-operator --set "agent.secretMirror.sourceNamespace=custom-ns" --set "ngcConfig.serviceKey=fakekey"
