@@ -120,6 +120,7 @@ Components that run on GPU nodes to manage function execution, including the NVC
 | Image | nvcf_worker_utils | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_utils:2.101.0` |
 | Image | nvcf_worker_init | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_init:2.102.0` |
 | Image | nvcf_worker_niclls | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_niclls:2.105.7` |
+| Image | pylon | `nvcr.io/0833294136851237/nvcf-ncp-staging/pylon:0.2.1` |
 | Image | ess-agent | `nvcr.io/0833294136851237/nvcf-ncp-staging/ess-agent:1.0.5` |
 | Image | nvcf-image-credential-helper | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-image-credential-helper:0.5.1` |
 
@@ -218,8 +219,6 @@ Additional components present in the current stack artifact manifest.
 | Chart (OCI) | helm-nvcf-vanity-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-vanity-gateway:0.1.0-nvcf-10204.1` |
 | Image | nvcf-api-keys-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-api-keys-service:1.2.14` |
 | Image | nvcf-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-service-oss:1.5.4` |
-| Image | pylon | `nvcr.io/0833294136851237/nvcf-ncp-staging/pylon:0.2.1` |
-| Image | stargate-client | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate-client:0.3.0` |
 
 #### Deployment Resources
 
