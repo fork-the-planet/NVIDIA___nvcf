@@ -6,7 +6,6 @@
 > historical source context only; new commits, issues, and merge
 > requests should target the umbrella.
 >
-> Internal: https://github.com/NVIDIA/nvcf/nvcf/-/tree/main/deploy/helm/llm-request-router
 > Public mirror: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/llm-request-router
 
 This repository contains the Helm chart for deploying the NVCF LLM Request Router (Stargate) on Kubernetes.

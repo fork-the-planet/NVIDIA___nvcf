@@ -6,7 +6,6 @@
 > historical source context only; new commits, issues, and merge
 > requests should target the umbrella.
 >
-> Internal: https://github.com/NVIDIA/nvcf/nvcf/-/tree/main/deploy/helm/ratelimiter
 > Public mirror: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/ratelimiter
 
 This repository contains the Helm chart for deploying the NVCF Rate Limiter service on Kubernetes.

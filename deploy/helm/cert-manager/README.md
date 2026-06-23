@@ -6,7 +6,6 @@
 > historical source context only; new commits, issues, and merge
 > requests should target the umbrella.
 >
-> Internal: https://github.com/NVIDIA/nvcf/nvcf/-/tree/main/deploy/helm/cert-manager
 > Public mirror: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/cert-manager
 
 ## Scope
