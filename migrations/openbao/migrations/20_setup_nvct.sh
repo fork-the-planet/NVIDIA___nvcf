@@ -28,6 +28,7 @@ fi
 
 SERVICE_ACCOUNT_NAMESPACE="nvcf"
 SERVICE_ACCOUNT_NAME="nvct-api"
+SERVICE_NAME="nvct-api"
 
 #-------------------------------------------
 # Set defaults for secret paths and policies
@@ -58,6 +59,14 @@ write_policy "${VAULT_POLICY_BASE_PATH}-kv-ro" "${policy}"
 
 # append policy to auth role list
 VAULT_JWT_AUTH_ROLE_POLICIES="${VAULT_JWT_AUTH_ROLE_POLICIES},${VAULT_POLICY_BASE_PATH}-kv-ro"
+
+#--------------------------
+# Create JWT Secret Engine
+#--------------------------
+enable_secrets_mount "${VAULT_SECRET_BASE_PATH}/jwt" "vault-plugin-secrets-jwt"
+
+jwt_secret_mount_config=$(generate_jwt_secret_mount_config)
+config_jwt_secret_mount_config "${VAULT_SECRET_BASE_PATH}/jwt" "${jwt_secret_mount_config}"
 
 #-------------------------------------------
 # Add JWT sign access to NVCF API for nvct-api (notary + account_setup)

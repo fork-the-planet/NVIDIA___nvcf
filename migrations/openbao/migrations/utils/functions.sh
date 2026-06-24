@@ -31,8 +31,8 @@ declare SECRETS_MOUNT_LIST
 
 function initialize_mount_lists() {
     log_step "Initializing auth and secrets mount lists..."
-    AUTH_MOUNT_LIST=$(bao auth list)
-    SECRETS_MOUNT_LIST=$(bao secrets list)
+    AUTH_MOUNT_LIST=$(bao auth list -format=json)
+    SECRETS_MOUNT_LIST=$(bao secrets list -format=json)
     log_success "Mount lists initialized."
 }
 
@@ -48,7 +48,7 @@ function enable_auth_mount() {
     local mount_path=$1
     local mount_type=$2
 
-    if bao auth list | grep -q "^$mount_path/"; then
+    if bao auth list -format=json 2>/dev/null | grep -q "\"${mount_path}/\""; then
         log_success "$mount_type auth engine mounted at path '$mount_path'"
         return 0
     fi
@@ -130,16 +130,18 @@ function enable_secrets_mount() {
     local mount_path=$1
     local mount_type=$2
 
-    if ! bao secrets list | grep -q "^$mount_path/"; then
-      log_step "Enabling $mount_type secrets engine at mount path '$mount_path'"
-      if ! output=$(bao secrets enable -path=$mount_path $mount_type 2>&1); then
-          log_error "Error enabling $mount_type secrets engine: $output"
-          return 1
-      fi
+    if bao secrets list -format=json 2>/dev/null | grep -q "\"${mount_path}/\""; then
+        log_info "$mount_type secrets engine already mounted at path '$mount_path'"
+        return 0
     fi
 
-    log_info "$mount_type secrets engine already mounted at path '$mount_path'"
-    return 0
+    log_step "Enabling $mount_type secrets engine at mount path '$mount_path'"
+    if ! output=$(bao secrets enable -path=$mount_path $mount_type 2>&1); then
+        log_error "Error enabling $mount_type secrets engine: $output"
+        return 1
+    fi
+
+    log_success "$mount_type secrets engine enabled at path '$mount_path'"
 }
 
 ##
@@ -154,7 +156,7 @@ function configure_auth_tuning() {
     local default_lease_ttl=$2
     local max_lease_ttl=$3
 
-    if ! echo $AUTH_MOUNT_LIST | grep -q "^$mount_path/"; then
+    if ! echo "$AUTH_MOUNT_LIST" | grep -q "\"${mount_path}/\""; then
         log_error "$mount_type auth engine not mounted at path '$mount_path'"
         return 1
     fi
@@ -180,7 +182,7 @@ function configure_secrets_tuning() {
     local default_lease_ttl=$2
     local max_lease_ttl=$3
 
-    if ! echo $SECRETS_MOUNT_LIST | grep -q "^$mount_path/"; then
+    if ! echo "$SECRETS_MOUNT_LIST" | grep -q "\"${mount_path}/\""; then
         log_error "$mount_type secrets engine not mounted at path '$mount_path'"
         return 1
     fi
