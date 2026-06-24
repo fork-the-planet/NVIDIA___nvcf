@@ -5,10 +5,9 @@ description: >-
   helmfile releases to their charts, image-source subtrees, helm hooks,
   namespaces, and `needs:` dependency chains. Reads
   deploy/stacks/self-managed/helmfile.d/*.yaml.gotmpl and
-  deploy/stacks/self-managed/helmfile.d/*.yaml.gotmpl as the source of truth
-  for ordering and versions, with deployment-sequence.md and
-  deployment-dependencies.yaml as enrichment, and imports.yaml for upstream
-  provenance. Use when a user or developer asks "what deploys X", "what does X depend
+  deploy/stacks/nvcf-compute-plane/helmfile.d/*.yaml.gotmpl as the source of
+  truth for ordering and versions, with imports.yaml for upstream provenance.
+  Use when a user or developer asks "what deploys X", "what does X depend
   on", "what hooks run for X", "walk me through deployment order", "which
   subtree do I edit to change X", "what namespaces does the stack use", or
   mentions stack topology, helmfile stages, deployment DAG, or dependency map.
@@ -51,11 +50,6 @@ Authoritative (always read first when answering):
 - `deploy/stacks/nvcf-compute-plane/helmfile.d/01-dependencies.yaml.gotmpl`
 - `deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl`
 
-Enrichment (only if the answer needs hooks, image-source subtrees, or destroy order):
-
-- `deploy/stacks/self-managed/docs/deployment-sequence.md` (mermaid DAG, hook sub-diagram, destroy namespaces)
-- `deploy/stacks/self-managed/docs/deployment-dependencies.yaml` (chart subtree, image-source subtree, hook purpose)
-
 Provenance (when asked which subtree is monorepo-native vs. synthetic-imported from upstream):
 
 - `imports.yaml`
@@ -65,7 +59,9 @@ Chart-level (when the chart is checked into the monorepo):
 - `deploy/helm/<chart>/Chart.yaml`
 - `deploy/helm/<chart>/values.yaml`
 
-If the helmfile and the enrichment YAML disagree, the helmfile wins. Update the YAML in the same change rather than guessing.
+If workspace routing metadata is available and disagrees with the helmfile, the
+helmfile wins. Update stale routing metadata in the same change rather than
+guessing.
 
 ## Common questions
 
@@ -76,16 +72,16 @@ What does X depend on
 : Return the `needs:` chain for that release plus the stage gate it sits behind (control-plane stages 1 -> 2 -> 3, then compute-plane). Include any `condition:` that gates whether X deploys at all.
 
 What hooks run for X
-: Use `deployment-dependencies.yaml` for hook names, weights, hook events (pre-install / post-install), images used, and purpose. Cite the chart-relative template file path.
+: Read the checked-in chart under `deploy/helm/<chart>/` when available. Search its `templates/` directory for Helm hook annotations, weights, hook events (pre-install / post-install), images used, and purpose. Cite the chart-relative template file path. If the chart is consumed from OCI only and the local workspace has routing metadata, use the workspace metadata and cite it.
 
 Walk me through the full deployment order
-: Summarize control-plane stages 0 through 3 from the self-managed gotmpl file headers, then the compute-plane stage from - `deploy/stacks/nvcf-compute-plane/helmfile.d/01-dependencies.yaml.gotmpl` and `deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl`. Call out which releases run in parallel inside a stage and which are serialized by `needs:`.
+: Summarize control-plane stages 0 through 3 from the self-managed gotmpl file headers. Then summarize the compute-plane stage from `deploy/stacks/nvcf-compute-plane/helmfile.d/01-dependencies.yaml.gotmpl` and `deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl`. Call out which releases run in parallel inside a stage and which are serialized by `needs:`.
 
 Which subtree do I edit to change X
-: Two answers, both are important. For chart wiring (Helm hooks, manifests, values, hook weights) point at `deploy/helm/<chart>/` if the chart is checked in, or note `oci-only` (the chart is consumed from the OCI registry and does not live in the monorepo). For runtime application logic point at the image-source subtree from `deployment-dependencies.yaml` and confirm against `imports.yaml` (`authoritative_source: native` means edits land here, `upstream` means edits also flow back to the upstream repo via the synthetic-import pipeline).
+: Two answers, both are important. For chart wiring (Helm hooks, manifests, values, hook weights) point at `deploy/helm/<chart>/` if the chart is checked in, or note `oci-only` (the chart is consumed from the OCI registry and does not live in the monorepo). For runtime application logic, use the chart image repository, imports.yaml, and any available workspace routing metadata. `authoritative_source: native` means edits land here. `upstream` means edits also flow back to the upstream repo via the synthetic-import pipeline.
 
 What namespaces does the stack use
-: Return the list from the helmfile (`namespace:` per release) and the destroy list from `deployment-sequence.md`.
+: Return the list from the helmfile (`namespace:` per release). If workspace routing metadata includes a destroy namespace list, include it as supplemental context and cite that source.
 
 ## Subtree mapping
 

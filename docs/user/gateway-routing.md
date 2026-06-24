@@ -57,10 +57,14 @@ Install Envoy Gateway as the Gateway API controller:
 ```bash
 helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm \
   --version v1.1.3 \
+  --set deployment.replicas=2 \
   -n envoy-gateway-system
 ```
 
-Verify the controller pod is running:
+The replica override runs two Envoy Gateway controller pods for remote
+deployments.
+
+Verify the controller pods are running:
 
 ```bash
 kubectl get pods -n envoy-gateway-system
