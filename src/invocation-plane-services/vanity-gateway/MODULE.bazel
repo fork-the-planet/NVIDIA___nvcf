@@ -20,9 +20,8 @@ middleware/, pool/, router/ packages. No private NVIDIA modules; deps
 resolve via Gazelle's go_deps extension from go.mod.
 
 The umbrella nvcf/nvcf consumes this subtree under
-src/invocation-plane-services/vanity-gateway as a synthetic import;
-this file is also picked up there but the umbrella's own root
-MODULE.bazel is what Bazel uses end-to-end.
+src/invocation-plane-services/vanity-gateway; this file is also picked up
+there but the umbrella's own root MODULE.bazel is what Bazel uses end-to-end.
 """
 
 module(

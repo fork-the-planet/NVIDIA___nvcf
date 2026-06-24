@@ -17,7 +17,7 @@ bazel test //... --flaky_test_attempts=3
 # Push to internal NGC registries (manual on MR, automatic on default
 # branch + tags). The legacy docker-build-push lane from the
 # nvcf-golang-ci-pipeline template continues to publish in parallel
-# until the synthetic-import-to-native cutover in the umbrella.
+# until the native cutover in the umbrella.
 bazel run //nvidia-internal:image_push_kaze
 bazel run //nvidia-internal:image_push_ncp_dev
 ```

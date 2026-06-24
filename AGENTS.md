@@ -4,7 +4,11 @@ Quick reference for NVCF (NVIDIA Cloud Functions) in this repository.
 
 ## Repo Layout
 
-This repo is an umbrella layout: upstream services appear as ordinary directories (synthetic imports), arranged under `src/`, `deploy/`, `infra/`, and `migrations/` according to `imports.yaml`. Goal: over time, land and maintain code here natively; synthetic imports are a bridge while sources still live in separate upstream projects. Tooling lives under `tools/` and `tests/`.
+This repo is an umbrella layout: upstream services appear as ordinary
+directories arranged under `src/`, `deploy/`, `infra/`, and `migrations/`
+according to `imports.yaml`. Goal: over time, land and maintain code here
+natively while upstream-owned sources are still tracked by commit pin. Tooling
+lives under `tools/` and `tests/`.
 
 Use `python3`, not `python`, when Python is needed. Use the nearest nested `AGENTS.md` for subtree-specific guidance.
 
@@ -13,7 +17,7 @@ Useful pointers:
 - `tools/AGENTS.md` for repo tooling
 - `deploy/helm/AGENTS.md` for native Helm chart guidance
 - `migrations/AGENTS.md` for native migration image guidance
-- `.cursor/skills/add-synthetic-import/SKILL.md` for synthetic imports
+- `imports.yaml` for subtree ownership and commit pins
 - `.cursor/skills/documentation-style/SKILL.md` for docs style
 - `.cursor/skills/nvcf-gitlab-subproject-ci/SKILL.md` for native subproject CI
   (read before editing `.gitlab-ci.yml`, `subproject-validations.yaml`, or
@@ -26,16 +30,16 @@ If a referenced skill is outdated, update it before finishing.
 ## Cross-repo and stack routing
 
 Use `imports.yaml` to decide whether a subtree is monorepo-native or still
-owned by an upstream synthetic import. Native subprojects are edited here.
-Upstream-owned synthetic imports usually need the change in the upstream repo
-and a later `tools/sync-synthetic-imports` pin update.
+owned by an upstream repo. Native subprojects are edited here. Upstream-owned
+subtrees usually need the change in the upstream repo and a later commit-pin
+update.
 
 For self-managed stack ownership, deployment order, chart/image-source mapping,
 or "which subtree owns this" questions, use:
 - `.cursor/skills/nvcf-explore-stack/SKILL.md` for the in-repo Helmfile,
   dependency, chart, hook, and image-source map
-- `.cursor/skills/nvcf-workspace-router/SKILL.md` when private workspace
-  routing metadata is relevant
+- the `nvcf/nvcf-internal` repository when private workspace routing metadata
+  is relevant
 
 Do not copy workspace routing boilerplate into subtree `AGENTS.md` files. Local
 guidance should only record subtree-specific ownership exceptions, adjacent
@@ -50,10 +54,10 @@ merge-request links or ref names, internal hostnames or URLs, private service
 names, registry endpoints, vault endpoints, or debugging context that external
 readers cannot access.
 
-Keep private context in `nvidia-internal/`, in the internal Merge
-Request/Pull Request description outside the public commit section, or in a
-non-allowlisted runbook. If a change requires public wording, generalize it to
-the user-visible behavior and remove the private evidence trail from the
+Keep private context in the internal Merge Request/Pull Request description
+outside the public commit section, in the `nvcf/nvcf-internal` repository, or
+in a non-allowlisted runbook. If a change requires public wording, generalize
+it to the user-visible behavior and remove the private evidence trail from the
 allowlisted file.
 
 ## Local QA and Testing Environment Safety
@@ -65,10 +69,9 @@ local artifact state, then ask the user whether cleanup or a net-new isolated
 environment is appropriate. Never delete clusters, Helm releases, worktrees,
 secrets, or artifact directories without explicit user confirmation.
 
-Use `.cursor/skills/nvcf-self-hosted-local-dev/SKILL.md` for the detailed local
-k3d workflow. If creating a net-new environment, use unique cluster names,
-ports, Helmfile environments, secrets files, CLI configs, and artifact
-directories.
+Use the `nvcf/nvcf-internal` repository for detailed internal k3d workflows.
+If creating a net-new environment, use unique cluster names, ports, Helmfile
+environments, secrets files, CLI configs, and artifact directories.
 
 ## Writing AGENTS.md Files
 
@@ -126,8 +129,10 @@ Skills are split by visibility and audience:
 
 - `ai-tooling/user/skills/`: public user-facing NVCF skills.
 - `ai-tooling/dev/skills/`: public developer workflow skills.
-- Private skill source trees follow the same `user/skills/` and `dev/skills/` split in the private subtree.
-- `.cursor/skills/`: root dev-skill fanout only. Each entry is a symlink to a public or private dev skill source directory.
+- Private skill source trees follow the same `user/skills/` and `dev/skills/`
+  split in the `nvcf/nvcf-internal` repository.
+- `.cursor/skills/`: root dev-skill fanout only. Each entry is a symlink to a
+  public dev skill source directory in this repository.
 
 Cross-tool symlinks make root dev skills available to all agents. The root fanout directories must contain symlinks only, never source skill directories or regular skill files:
 - `.cursor/skills/<name>` -> symlink to the dev skill source directory.
@@ -146,20 +151,21 @@ When adding a skill:
 
 Hooks follow the same source-and-fanout pattern as root dev skills. The root
 hook directories are agent-facing fanouts only; hook implementation scripts
-must live in their owning public or private source tree.
+must live in their owning public source tree in this repository.
 
 - `ai-tooling/dev/hooks/`: public hook source scripts.
 - `.cursor/hooks/`: Cursor hook script fanout only. Entries must be symlinks.
 - `.codex/hooks/`: Codex hook script fanout only. Entries must be symlinks.
 - `.claude/hooks/`: Claude hook script fanout only. Entries must be symlinks.
 
-Tool-specific hook config files, such as `.cursor/hooks.json`, `.codex/hooks.json`, `.codex/config.toml`, and `.claude/settings.json`, may be regular files. Hook implementation scripts must live in a public or private `dev/hooks/` source tree and be exposed through matching symlinks in all three root hook fanouts.
+Tool-specific hook config files, such as `.cursor/hooks.json`,
+`.codex/hooks.json`, `.codex/config.toml`, and `.claude/settings.json`, may be
+regular files. Hook implementation scripts must live in `ai-tooling/dev/hooks/`
+and be exposed through matching symlinks in all three root hook fanouts.
 
-Internal checkouts may configure stop hooks that audit fanout integrity and
-newly added private references in OSS-allowlisted files. If a hook reports
-public snapshot hygiene findings, remove or rewrite those additions before
-finishing. If the hook is unavailable in a public snapshot, still follow the
-OSS Snapshot Hygiene policy manually.
+Internal-only stop hooks and private snapshot hygiene checks live in the
+`nvcf/nvcf-internal` repository. Still follow the OSS Snapshot Hygiene policy
+manually before finishing.
 
 ### Public skills
 
@@ -171,7 +177,6 @@ OSS Snapshot Hygiene policy manually.
 | `bazel-monorepo-bootstrap` | `ai-tooling/dev/skills/` | Bootstrap Bazel in an existing polyglot monorepo |
 | `bazel-oci-images` | `ai-tooling/dev/skills/` | Build multi-arch OCI images from Bazel binaries |
 | `bazel-rust-crate-universe` | `ai-tooling/dev/skills/` | Wire Rust services into Bazel with crate_universe |
-| `bazel-synthetic-import-strategy` | `ai-tooling/dev/skills/` | Plan Bazel rollout for NVCF synthetic imports |
 | `nvcf-gitlab-subproject-ci` | `ai-tooling/dev/skills/` | Native subproject CI via generated child pipeline (not root `.gitlab-ci.yml`) |
 | `documentation-style` | `ai-tooling/dev/skills/` | NVCF documentation conventions (no bold, no emojis, no em-dash) |
 | `nvcf-explore-stack` | `ai-tooling/dev/skills/` | Navigate the self-hosted stack topology and dependency graph |
@@ -179,8 +184,6 @@ OSS Snapshot Hygiene policy manually.
 | `nvcf-self-managed-cli` | `ai-tooling/user/skills/` | Install, operate, and manage self-managed NVCF through `nvcf-cli` |
 | `nvcf-self-managed-installation` | `ai-tooling/user/skills/` | Install and deploy the self-managed NVCF stack |
 | `nvcf-self-managed-prerequisite` | `ai-tooling/user/skills/` | Install cluster-level prerequisites such as KAI Scheduler and SMB CSI driver |
-
-Private skill inventory lives in the private subtree guidance.
 
 ## GitLab CI for native subprojects
 

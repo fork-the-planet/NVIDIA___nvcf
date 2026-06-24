@@ -90,7 +90,8 @@ If a file already uses bold, emojis, em-dashes, en-dashes, or non-ASCII punctuat
 
 ## Limitations
 
-- The rules target agent-edited prose in this repo. Upstream documentation in synthetic imports keeps its own style until merged natively.
+- The rules target agent-edited prose in this repo. Upstream documentation
+  keeps its own style until merged natively.
 - There is no automated linter today. Enforcement happens during review.
 
 ## Exceptions

@@ -23,8 +23,8 @@ exports_files(
 # Phase 1 scope: only the native Go subtrees listed in go.work.bazel are
 # managed by Bazel.
 # Everything else is excluded so Gazelle does not descend into vendored
-# directories of synthetic-import subtrees (whose source is owned upstream
-# and whose changes here would be clobbered by `tools/scripts/sync_synthetic_imports`).
+# directories of upstream-owned subtrees. Their source is owned upstream, and
+# local-only changes would be clobbered by the next commit-pin refresh.
 #
 # When promoting an upstream to native (Phase B), remove the corresponding
 # exclude line below and add a per-subtree BUILD.bazel with the right prefix.

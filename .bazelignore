@@ -23,9 +23,9 @@
 # Native subtrees (src/clis/nvcf-cli, src/libraries/go/lib) have their own
 # vendor/ entries listed below.
 
-# Synthetic-import subtrees with their own historical BUILD files referencing
+# Upstream-owned subtrees with their own historical BUILD files referencing
 # WORKSPACE-style repository names (@io_bazel_rules_go etc.) that conflict
-# with our bzlmod setup. Re-enable per-subtree as Phase B brings each upstream
+# with our bzlmod setup. Re-enable per-subtree as Phase B brings each subtree
 # native.
 src/compute-plane-services
 src/control-plane-services

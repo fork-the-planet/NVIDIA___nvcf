@@ -2,12 +2,12 @@
 
 This file is the contributor-facing guide for the Bazel build path in the
 NVCF umbrella repo. Bazel is the build engine for the native subtrees in
-Phase 1; synthetic-import subtrees keep their existing build paths until they
-go native.
+Phase 1; upstream-owned subtrees keep their existing build paths until they go
+native.
 
-For the design rationale (why Bazel, why phased rollout, what synthetic-import
-constraints apply), see the merge request that introduced this scaffolding
-and the Bazel skill set under `.claude/skills/bazel-*`. The skills cover the
+For the design rationale (why Bazel and why phased rollout), see the merge
+request that introduced this scaffolding and the Bazel skill set under
+`.claude/skills/bazel-*`. The skills cover the
 patterns this repo already uses and the ones future phases will need:
 
 | Skill | Use it for |
@@ -18,7 +18,6 @@ patterns this repo already uses and the ones future phases will need:
 | `bazel-java-maven` | Onboarding Java services (e.g. `llm-api-gateway`) |
 | `bazel-rust-crate-universe` | Onboarding Rust services (e.g. `parsec`) |
 | `bazel-gitlab-child-pipelines` | Wiring a new service into the Bazel CI flow |
-| `bazel-synthetic-import-strategy` | Anything touching `imports.yaml` synthetic-import subtrees |
 
 ## Phase 1 scope
 
@@ -27,8 +26,8 @@ Bazel currently builds, tests, and packages:
 - `src/clis/nvcf-cli` (Go binary + multi-platform release matrix + OCI image)
 - `src/libraries/go/lib` (Go library, 92 targets)
 
-Synthetic-import subtrees listed in `imports.yaml` with
-`authoritative_source: upstream` are intentionally excluded via
+Subtrees listed in `imports.yaml` with `authoritative_source: upstream` are
+intentionally excluded via
 `.bazelignore` and `# gazelle:exclude` directives in the root `BUILD.bazel`.
 They will be onboarded one at a time as Phase B in separate MRs.
 
@@ -151,7 +150,7 @@ bazel mod tidy
 ```
 
 Gazelle is configured to skip everything outside Phase 1 scope, so it will
-not touch synthetic-import subtrees or vendored directories.
+not touch upstream-owned subtrees or vendored directories.
 
 #### Rust equivalent
 
@@ -355,10 +354,9 @@ For native subtrees outside Phase 1 scope today:
 5. Run `bazel run //:gazelle` then `bazel mod tidy`.
 6. `bazel build //path/to/subtree/...` to validate.
 
-For synthetic-import subtrees (`authoritative_source: upstream` in
-`imports.yaml`), see `.cursor/skills/bazel-synthetic-import-strategy/SKILL.md`.
-The short version: Bazel files belong upstream so they survive the next
-`tools/scripts/sync_synthetic_imports` run.
+For upstream-owned subtrees (`authoritative_source: upstream` in
+`imports.yaml`), Bazel files belong upstream so they survive the next commit-pin
+refresh.
 
 ## Per-service publish cadence
 
@@ -433,17 +431,16 @@ maintainers; centralising it would couple unrelated release decisions.
 
 ## Phase B status
 
-Per-service rollout state for synthetic-import subtrees is tracked in
-an internal plan that references upstream GitLab URLs and per-service
-rollout state that does not belong in the public mirror, including which
-upstream MRs are open, which are merged, and which umbrella `imports.yaml`
-bumps have landed. Update that internal plan as each service moves through
-the playbook.
+Per-service rollout state for upstream-owned subtrees is tracked in an internal
+plan that references upstream GitLab URLs and per-service rollout state that
+does not belong in the public mirror, including which upstream MRs are open,
+which are merged, and which umbrella `imports.yaml` bumps have landed. Update
+that internal plan as each service moves through the playbook.
 
 ## Out of scope (Phase B and later)
 
-- Wiring synthetic-import subtrees (22 entries in `imports.yaml`). One MR
-  per upstream owner. See the tracker.
+- Wiring upstream-owned subtrees listed in `imports.yaml`. One MR per upstream
+  owner. See the tracker.
 - Migrating goreleaser-driven release stages
   (archive/package/publish/ngc-push) onto Bazel-native equivalents (e.g.
   `pkg_tar`, `oci_push`, custom rules for NGC). Today the artifact

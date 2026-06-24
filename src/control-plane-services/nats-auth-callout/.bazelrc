@@ -17,7 +17,7 @@
 # Bazel configuration for nvcf-nats-auth-callout-service.
 #
 # Additive scaffold for the NVCF Phase B rollout; see the umbrella's
-# BAZEL.md and nvidia-internal/plans/bazel-phase-b.plan.md for context.
+# BAZEL.md and the nvcf/nvcf-internal docs for context.
 # ============================================================================
 
 build --compilation_mode=fastbuild

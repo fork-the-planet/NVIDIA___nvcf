@@ -50,7 +50,7 @@ Authoritative (always read first when answering):
 - `deploy/stacks/nvcf-compute-plane/helmfile.d/01-dependencies.yaml.gotmpl`
 - `deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl`
 
-Provenance (when asked which subtree is monorepo-native vs. synthetic-imported from upstream):
+Provenance (when asked which subtree is monorepo-native vs. upstream-owned):
 
 - `imports.yaml`
 
@@ -78,7 +78,7 @@ Walk me through the full deployment order
 : Summarize control-plane stages 0 through 3 from the self-managed gotmpl file headers. Then summarize the compute-plane stage from `deploy/stacks/nvcf-compute-plane/helmfile.d/01-dependencies.yaml.gotmpl` and `deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl`. Call out which releases run in parallel inside a stage and which are serialized by `needs:`.
 
 Which subtree do I edit to change X
-: Two answers, both are important. For chart wiring (Helm hooks, manifests, values, hook weights) point at `deploy/helm/<chart>/` if the chart is checked in, or note `oci-only` (the chart is consumed from the OCI registry and does not live in the monorepo). For runtime application logic, use the chart image repository, imports.yaml, and any available workspace routing metadata. `authoritative_source: native` means edits land here. `upstream` means edits also flow back to the upstream repo via the synthetic-import pipeline.
+: Two answers, both are important. For chart wiring (Helm hooks, manifests, values, hook weights) point at `deploy/helm/<chart>/` if the chart is checked in, or note `oci-only` (the chart is consumed from the OCI registry and does not live in the monorepo). For runtime application logic, use the chart image repository, imports.yaml, and any available workspace routing metadata. `authoritative_source: native` means edits land here. `upstream` means edits also flow back to the upstream repo through the internal source-sync workflow.
 
 What namespaces does the stack use
 : Return the list from the helmfile (`namespace:` per release). If workspace routing metadata includes a destroy namespace list, include it as supplemental context and cite that source.

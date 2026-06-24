@@ -12,7 +12,6 @@ Public agent skills for users and developers working with NVIDIA Cloud Functions
 | [bazel-monorepo-bootstrap](dev/skills/bazel-monorepo-bootstrap/SKILL.md) | Bootstrap Bazel in an existing polyglot monorepo |
 | [bazel-oci-images](dev/skills/bazel-oci-images/SKILL.md) | Build multi-arch OCI images from Bazel binaries |
 | [bazel-rust-crate-universe](dev/skills/bazel-rust-crate-universe/SKILL.md) | Wire Rust services into Bazel with crate_universe |
-| [bazel-synthetic-import-strategy](dev/skills/bazel-synthetic-import-strategy/SKILL.md) | Plan Bazel rollout for NVCF synthetic imports |
 | [documentation-style](dev/skills/documentation-style/SKILL.md) | NVCF documentation conventions for public repo prose |
 | [nvcf-explore-stack](dev/skills/nvcf-explore-stack/SKILL.md) | Navigate the self-hosted stack topology, helmfile dependency graph, chart ownership, and deployment order |
 | [nvcf-gitlab-subproject-ci](dev/skills/nvcf-gitlab-subproject-ci/SKILL.md) | Maintain native subproject CI through `tools/ci/subproject-validations.yaml` and the generated child pipeline |

@@ -29,9 +29,8 @@ single-arch (linux/amd64) only until per-platform libssl paths are
 wired in.
 
 The umbrella nvcf/nvcf consumes this subtree under
-src/control-plane-services/function-autoscaler as a synthetic import;
-this file is also picked up there but the umbrella's own root
-MODULE.bazel is what Bazel uses end-to-end.
+src/control-plane-services/function-autoscaler; this file is also picked up
+there but the umbrella's own root MODULE.bazel is what Bazel uses end-to-end.
 """
 
 module(

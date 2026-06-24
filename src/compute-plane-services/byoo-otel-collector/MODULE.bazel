@@ -28,9 +28,8 @@ a separate go_binary; the multi-arch OCI images that consume them are
 declared in //:BUILD.bazel.
 
 The umbrella nvcf/nvcf consumes this subtree under
-src/compute-plane-services/byoo-otel-collector as a synthetic import;
-this file is also picked up there but the umbrella's own root
-MODULE.bazel is what Bazel uses end-to-end.
+src/compute-plane-services/byoo-otel-collector; this file is also picked up
+there but the umbrella's own root MODULE.bazel is what Bazel uses end-to-end.
 """
 
 module(

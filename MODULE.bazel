@@ -20,8 +20,8 @@ Phase 1 scope: native Go subtrees only.
 - src/libraries/go/lib (Go library)
 - src/libraries/go/worker (Go worker library)
 
-Synthetic-import subtrees (authoritative_source: upstream in imports.yaml)
-are intentionally not wired here. See bazel-synthetic-import-strategy skill.
+Subtrees with authoritative_source: upstream in imports.yaml are intentionally
+not wired here.
 """
 
 module(

@@ -20,8 +20,8 @@ First Rust Phase B service. Single-crate Cargo workspace:
 
 Tracks the canonical NVCF Phase B pattern (ratelimiter/grpc-proxy for Go,
 this is the Rust counterpart). The umbrella nvcf/nvcf consumes this
-subtree as a synthetic import; this file is also picked up there but the
-umbrella has its own root MODULE.bazel.
+subtree too; this file is also picked up there but the umbrella has its own
+root MODULE.bazel.
 """
 
 module(

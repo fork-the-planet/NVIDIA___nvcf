@@ -58,8 +58,7 @@ entry for a public base such as `gcr.io/distroless/static-debian12`
 (then `bazel mod tidy` to refresh the lockfile). `bazel build //...` and
 `bazel test //...` work without modification.
 
-Local Bazel cache setup is documented in the umbrella's
-`nvidia-internal/bazel-cheatsheet.md`.
+Local Bazel cache setup is documented in the `nvcf/nvcf-internal` docs.
 
 ## API Endpoints
 

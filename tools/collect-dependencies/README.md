@@ -92,7 +92,8 @@ COLLECT_DEPS_GO_VENDOR=missing go run ./tools/collect-dependencies
 COLLECT_DEPS_GO_VENDOR=1 go run ./tools/collect-dependencies
 ```
 
-This writes under synthetic import trees. Choose in Git whether to commit `vendor/`, many upstreams already do.
+This writes under Go module trees. Choose in Git whether to commit `vendor/`,
+many upstreams already do.
 
 `go mod vendor` uses the same module proxy and VCS behavior as other `go` commands. For `go list`, `go mod download`, and GitHub lookups during license fill, see [External APIs and network calls](#external-apis-and-network-calls).
 

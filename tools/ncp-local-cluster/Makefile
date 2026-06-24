@@ -575,7 +575,7 @@ build-credential-provider-multiarch: ## Build multi-arch credential provider bin
 	@ls -lh $(PROVIDER_LINUX_AMD64_OUTPUT_PATH) $(PROVIDER_LINUX_ARM64_OUTPUT_PATH)
 
 # Optional release helpers are loaded only when present.
-NCP_LOCAL_INTERNAL_RELEASE_MK ?= ../../nvidia-internal/tools/ncp-local-cluster/release.mk
+NCP_LOCAL_INTERNAL_RELEASE_MK ?= ../../../nvcf-internal/tools/ncp-local-cluster/release.mk
 -include $(NCP_LOCAL_INTERNAL_RELEASE_MK)
 
 # --- Cleanup & Help ---

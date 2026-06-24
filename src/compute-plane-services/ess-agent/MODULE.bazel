@@ -22,9 +22,8 @@ go.mod). No private NVIDIA modules; deps resolve via Gazelle's go_deps
 extension from go.mod.
 
 The umbrella nvcf/nvcf consumes this subtree under
-src/compute-plane-services/ess-agent as a synthetic import; this file
-is also picked up there but the umbrella's own root MODULE.bazel is
-what Bazel uses end-to-end.
+src/compute-plane-services/ess-agent; this file is also picked up there but the
+umbrella's own root MODULE.bazel is what Bazel uses end-to-end.
 """
 
 module(

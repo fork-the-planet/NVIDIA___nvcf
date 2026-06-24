@@ -102,7 +102,7 @@ For the full setup, cleanup, and configuration flow, see
 Bazel is the build, test, and packaging tool across the monorepo. Native
 subtrees (`src/clis/nvcf-cli`, `src/libraries/go/lib`) build fully under
 Bazel today. Phase B has additionally landed Bazel scaffolds in
-synthetic-import upstreams: `nvcf-grpc-proxy`, `nvcf-ratelimiter`,
+upstream-owned service trees: `nvcf-grpc-proxy`, `nvcf-ratelimiter`,
 `nvcf-nats-auth-callout-service`, `nvcf-cache/nvcf-unbound` (dns-cache),
 `nvcf-image-credential-helper`, and `nvca`. Their `BUILD.bazel`,
 `MODULE.bazel`, and `rules/oci/` files are picked up automatically when

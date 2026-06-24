@@ -43,10 +43,6 @@ examples/**/*.tgz
 __pycache__/
 *.py[cod]
 
-# Built from tools/sync-synthetic-imports/
-/tools/scripts/sync-synthetic-imports
-# Wrong -o path: with `go build -C tools/sync-synthetic-imports`, `-o scripts/...` is under the module.
-/tools/sync-synthetic-imports/scripts/sync-synthetic-imports
 # Checked-in BYOO otelconfig test binary output.
 /tools/byoo/testdata/otelconfig/create/main
 # Built from tools/collect-dependencies/
@@ -73,4 +69,3 @@ nvcf-grpc-proxy-go/vendor/
 nvcf-nats-auth-callout-service-go/vendor/
 otelconfig-go/vendor/
 nvcf-ratelimiter-go/vendor/
-tools/sync-synthetic-imports/vendor/

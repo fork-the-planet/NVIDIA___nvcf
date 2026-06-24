@@ -24,9 +24,9 @@ flows. Bazel resolves deps via Gazelle's go_deps extension from go.mod
 and ignores vendor/ (.bazelignore).
 
 The umbrella nvcf/nvcf consumes this subtree under
-src/compute-plane-services/nvca as a synthetic import; this file is
-picked up there too, but the umbrella's own root MODULE.bazel is what
-Bazel uses end-to-end. The umbrella's go.work.bazel maps the private
+src/compute-plane-services/nvca; this file is picked up there too, but the
+umbrella's own root MODULE.bazel is what Bazel uses end-to-end. The umbrella's
+go.work.bazel maps the private
 nvcf-go submodule
 (github.com/NVIDIA/nvcf/src/libraries/go/lib) to the umbrella's
 //src/libraries/go/lib subtree, so the actual build + tests happen

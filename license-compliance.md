@@ -128,7 +128,7 @@ This is the repo's source-header check.
 - It can allow alternate SPDX identifiers per directory with `--allow-spdx-dir DIR:LICENSE_ID`.
 - It skips generated files when the file looks generated and includes both `Code generated` and `DO NOT EDIT` in the first 30 lines.
 - It skips common non-source and dependency directories including `vendor`, `node_modules`, virtualenv caches, and similar directories.
-- It groups failures by synthetic import path from `imports.yaml` or by top-level repo directory to make reports actionable.
+- It groups failures by `imports.yaml` path or by top-level repo directory to make reports actionable.
 
 Useful commands:
 

@@ -33,9 +33,8 @@ the override below regenerates its BUILD.bazel files in this repo's bzlmod
 context.
 
 The umbrella nvcf/nvcf consumes this subtree under
-src/control-plane-services/helm-reval as a synthetic import; this file is
-picked up there too, but the umbrella's own root MODULE.bazel is what
-Bazel uses end-to-end.
+src/control-plane-services/helm-reval; this file is picked up there too, but
+the umbrella's own root MODULE.bazel is what Bazel uses end-to-end.
 """
 
 module(
