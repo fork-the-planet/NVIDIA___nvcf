@@ -1561,8 +1561,8 @@ Sample configs live under [`examples/`](./examples):
 `gpuSpecification.instanceType`. When `resultHandlingStrategy=UPLOAD`,
 `resultsLocation` becomes required and the user must supply an `NGC_API_KEY`
 secret with write privileges to that location. See the
-[NVCT OpenAPI spec](https://github.com/NVIDIA/nvcf/nvct/docs) for the
-full field reference.
+[OpenAPI specification](../../../docs/user/api.md#openapi-specification) for
+the full field reference.
 
 ---
 

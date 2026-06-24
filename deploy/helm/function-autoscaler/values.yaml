@@ -21,7 +21,7 @@ rsfTemplate:
   nameOverride: nvcf-autoscaler-service
 
   image:
-    repository: nvcr.io/nvidia/omniverse/nvcf-autoscaler-service
+    repository: ""
     pullPolicy: IfNotPresent
     tag: latest
 

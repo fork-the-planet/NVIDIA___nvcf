@@ -19,14 +19,14 @@ pinned version reference is bumped accordingly.
 
 ## Schema Sources
 
-| Keyspace          | Source Repository                                                                                                                                                                               | Pinned Version | Commit     |
-|-------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------|------------|
-| `api_keys_api`    | [local_env/cassandra/schema.cql](https://github.com/NVIDIA/kaizen/auth/ncp-auth/nv-api-keys-service/-/blob/01eae99b48c2d1235ff4662055824c3037565bce/local_env/cassandra/schema.cql)      | `main`         | `01eae99b` |
-| `ess_api`         | [src/main/resources/models/schema.cql](https://github.com/NVIDIA/ngc/cloud/secrets/ess-api-service/-/blob/200fd74d7543c4aad5973676525cbe0ec4bcf62b/src/main/resources/models/schema.cql) | `v0.48.26`     | `200fd74d` |
-| `nvcf_autoscaler` | `migrations/*.up.cql`                                                                                                                                                                           | `v1.15.0`      | `bff903c`  |
-| `nvcf_api`        | [local_env/cassandra/schema/0001_initial_schema.cql](https://github.com/NVIDIA/nvcf/nvcf-api/cloud-functions/-/blob/master/local_env/cassandra/schema/0001_initial_schema.cql?ref_type=heads)  | `v1.5.1`       | `7a422ff1` |
-| `nvct_api`        | [local_env/cassandra/schema/0001_initial_schema.cql](https://github.com/NVIDIA/nvcf/nvct/cloud-tasks/-/blob/master/local_env/cassandra/schema/0001_initial_schema.cql?ref_type=heads) | `v1.5.2`       | `a0247478` |
-| `sis_api`         | [spot_local_env/cassandra/schema/schema.cql](https://github.com/NVIDIA/nvcf/nvcf-spot/spot/-/blob/8a492a2e3b38f9c3c4f2c2ee7ac680788954b49d/spot_local_env/cassandra/schema/schema.cql)   | `v1.531.2`     | `8a492a2e` |
+| Keyspace          | Local Schema                                                              | Pinned Version | Commit     |
+|-------------------|---------------------------------------------------------------------------|----------------|------------|
+| `api_keys_api`    | [api_keys_api/03_init_tables.up.sql](api_keys_api/03_init_tables.up.sql)       | `main`         | `01eae99b` |
+| `ess_api`         | [ess_api/03_init_tables.up.sql](ess_api/03_init_tables.up.sql)                 | `v0.48.26`     | `200fd74d` |
+| `nvcf_autoscaler` | [nvcf_autoscaler/03_init_tables.up.sql](nvcf_autoscaler/03_init_tables.up.sql) | `v1.15.0`      | `bff903c`  |
+| `nvcf_api`        | [nvcf_api/03_init_tables.up.sql](nvcf_api/03_init_tables.up.sql)               | `v1.5.1`       | `7a422ff1` |
+| `nvct_api`        | [nvct_api/03_init_tables.up.sql](nvct_api/03_init_tables.up.sql)               | `v1.5.2`       | `a0247478` |
+| `sis_api`         | [sis_api/03_init_tables.up.sql](sis_api/03_init_tables.up.sql)                 | `v1.531.2`     | `8a492a2e` |
 
 > **Note — `sis_api`:** The upstream SoT is under active clarification. The schema
 > was sourced from `nvcf/nvcf-spot/spot@v1.517.0`. A competing source

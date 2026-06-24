@@ -24,7 +24,7 @@ registry:
   # Use existing secret (leave empty to create one)
   existingSecret: ""
   # Secret data (used only if existingSecret is empty)
-  server: "github.com/NVIDIA:5005"
+  server: ""
   username: ""
   password: ""
 

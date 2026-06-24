@@ -48,7 +48,6 @@ go_oci_multi_binary_image(
     ],
     extra_registries = {
         "devops": "nvcr.io/nv-ngc-devops/nvca-operator",
-        "gitlab": "github.com/NVIDIA:5005/egx/intelligent-infra/nvca/nvca-operator",
         "ncp_dev": "nvcr.io/0651155215864979/ncp-dev/nvca-operator",
     },
     registry = "nvcr.io/qtfpt1h0bieu/byocdev/nvca-operator",
