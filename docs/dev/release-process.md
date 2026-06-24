@@ -17,7 +17,7 @@ conventions, see [GitHub Release Automation](github-release-process.md).
 | Step | What | Where |
 | --- | --- | --- |
 | 1. Author commit | Conventional Commits format. The commit `type` decides whether (and how) the next release version bumps | Local |
-| 2. Open MR | Pre-merge gates run: per-service Bazel build, image-push build-only, license, sonarqube, etc. | MR pipeline |
+| 2. Open MR | Pre-merge gates run: per-service Bazel build, image-push build-only, license, and other public-safe validation. | MR pipeline |
 | 3. Merge to main | Default-branch pipeline runs: `compute-next-release-version-<svc>` -> `<svc>-bazel` -> `<svc>-image-push` -> (if helm) `helm-package-<svc>` + `helm-push-<svc>-*` -> `semantic-release-<svc>` -> `<svc>-slack-notify` | Default-branch pipeline |
 | 4. Tag created | `semantic-release-<svc>` creates the git tag `<service-name>-v<X.Y.Z>` and a GitLab Release | End of step 3 |
 | 5. Tag pipeline | A new pipeline runs against the tag ref. Same publish jobs re-run. NGC chart pushes are NOT idempotent (helm-registry rejects republishing the same version); the cds-component swallows the failure when `ngc-duplicate: skip` is set. OCI image pushes overwrite the tag pointer if the org allows it; some orgs reject. See "Known shortcomings and follow-ups" below. | Tag pipeline |
@@ -165,12 +165,6 @@ Optional, only when the service declares a `slack_channel`. Posts
 to the configured Slack channel via backstage-helper after the tag
 pipeline completes.
 
-### `<svc>-sonarqube-analysis` (stage: Prerequisites)
-
-Optional, only when the service declares a `sonarqube_project_key`.
-Runs sonar-scanner against the subtree on MR + default-branch
-pipelines.
-
 ## End-to-end flow (worked example: nvcf-unbound)
 
 A developer opens an MR with a commit
@@ -183,7 +177,6 @@ MR pipeline runs:
   version would be `0.7.19` (patch bump from `fix:`)
 - `nvcf-unbound-image-push`: `bazel build :image_push_devops` etc.
   validates the auth setup and base image fetch but does not push
-- `nvcf-unbound-sonarqube-analysis`: scans the subtree
 
 The MR gets reviewed and merged.
 
@@ -249,7 +242,6 @@ Image-only example (no Helm chart):
           ci_var: NGC_DEVOPS_API_KEY
         docker_auth_path: nvcr.io/0651155215864979/ncp-dev/<service-name>
     slack_channel: C08S6KLCEJH
-    sonarqube_project_key: <project-key>   # optional
 ```
 
 Image + Helm example (see nvcf-unbound for the working version):

@@ -26,6 +26,7 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+REPO_ROOT="$(realpath "${REPO_ROOT}")"
 IMPORTS_MANIFEST="${REPO_ROOT}/imports.yaml"
 
 HEADER_WINDOW=24
@@ -43,7 +44,7 @@ SKIP_DIR_NAMES=(
     .mypy_cache .tox node_modules target vendor
 )
 
-SKIP_FILE_NAMES=(sonar-project.properties)
+SKIP_FILE_NAMES=()
 
 # Generated Go filename patterns (ERE).
 GENERATED_GO_PATTERNS=(
