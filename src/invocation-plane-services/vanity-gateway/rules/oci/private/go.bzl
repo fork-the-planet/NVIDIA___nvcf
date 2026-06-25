@@ -19,7 +19,7 @@ load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "strip_prefi
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("//rules/oci/private:common.bzl", "DEFAULT_BASE", "create_oci_image")
 
-def _go_oci_image_impl(name, visibility, binary, base, entrypoint, binary_path, registry, extra_registries, tags):
+def _go_oci_image_impl(name, visibility, binary, base, entrypoint, env, binary_path, registry, extra_registries, tags):
     layer_name = name + "_layer"
 
     # Place the binary at `binary_path` in the layer tarball. By default
@@ -76,6 +76,7 @@ def _go_oci_image_impl(name, visibility, binary, base, entrypoint, binary_path, 
         tars = [layer_name],
         base = base,
         entrypoint = entry,
+        env = env,
         visibility = visibility,
         registry = registry,
         extra_registries = extra_registries,
@@ -104,6 +105,10 @@ go_oci_image = macro(
         "entrypoint": attr.string_list(
             doc = "Container entrypoint. Defaults to [binary_path] if set, " +
                   "otherwise [/{binary_name}].",
+            configurable = False,
+        ),
+        "env": attr.string_dict(
+            doc = "Environment variables baked into the image config (key -> value).",
             configurable = False,
         ),
         "registry": attr.string(

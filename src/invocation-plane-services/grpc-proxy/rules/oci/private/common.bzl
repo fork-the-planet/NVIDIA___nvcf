@@ -34,6 +34,7 @@ def create_oci_image(
         base,
         entrypoint,
         visibility,
+        env = None,
         registry = None,
         extra_registries = None,
         tags = None):
@@ -55,6 +56,7 @@ def create_oci_image(
         base = base,
         tars = tars + COMMON_LAYERS,
         entrypoint = entrypoint,
+        env = env,
         visibility = ["//visibility:private"],
         tags = all_tags,
     )

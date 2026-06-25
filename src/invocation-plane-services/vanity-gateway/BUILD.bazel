@@ -22,11 +22,22 @@ gazelle(
 # Multi-arch OCI image. Distroless/go base, single-binary entrypoint.
 # Image push targets (kaze, ncp-dev) live under //nvidia-internal:* so
 # the NGC registry coordinates stay off the OSS mirror.
+# The distroless/go base ships ENTRYPOINT ["/usr/bin/shelless_ulimit"], a shim
+# that raises RLIMIT_NOFILE (soft -> hard) when ULIMIT_FLAG=1 before exec'ing
+# its arguments. The legacy Dockerfile relied on that base entrypoint plus
+# ENV ULIMIT_FLAG=1; go_oci_image otherwise overrides the entrypoint with just
+# [binary_path], bypassing the shim and leaving the default 1024 soft fd limit.
+# Restore the shim + flag so the Bazel image matches the Dockerfile.
 go_oci_image(
     name = "image",
     base = "@distroless_go",
     binary = ":ai-api-gateway-service",
     binary_path = "/usr/bin/nvcf-ai-api-gateway-service",
+    entrypoint = [
+        "/usr/bin/shelless_ulimit",
+        "/usr/bin/nvcf-ai-api-gateway-service",
+    ],
+    env = {"ULIMIT_FLAG": "1"},
     tags = ["nvcf-ai-api-gateway-service"],
     visibility = ["//visibility:public"],
 )
