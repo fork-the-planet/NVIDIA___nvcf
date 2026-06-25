@@ -13,6 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{ $profile := include "multi-node-test.effectiveProfileValues" . | fromYaml -}}
+{{ $image := $profile.image | default dict -}}
+{{ $resources := $profile.resources | default dict -}}
+{{ $resourceClaimTemplate := $profile.resourceClaimTemplate | default dict -}}
+{{ $resourceClaimTemplateEnabled := $resourceClaimTemplate.enabled | default false -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -25,24 +30,24 @@ spec:
   serviceName: {{ include "multi-node-test.name" . }}-headless
   podManagementPolicy: Parallel
   {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.nodesPerInstance }}
+  replicas: {{ $profile.nodesPerInstance }}
   {{- end }}
   selector:
     matchLabels:
       {{- include "multi-node-test.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
+      {{- with $profile.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
         {{- include "multi-node-test.selectorLabels" . | nindent 8 }}
     spec:
-      {{- if .Values.resourceClaimTemplate.enabled }}
+      {{- if $resourceClaimTemplateEnabled }}
       resourceClaims:
-        - name: {{ .Values.resourceClaimTemplate.claimName }}
-          resourceClaimTemplateName: {{ .Values.resourceClaimTemplate.name }}
+        - name: {{ $resourceClaimTemplate.claimName }}
+          resourceClaimTemplateName: {{ $resourceClaimTemplate.name }}
       {{- end }}
       volumes:
         - name: dshm
@@ -64,16 +69,16 @@ spec:
             - mountPath: /tmp
               name: temp
           securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+            {{- toYaml ($profile.securityContext | default dict) | nindent 12 }}
+          image: "{{ $image.repository }}:{{ $image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ $image.pullPolicy }}
           env:
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
             - name: NODES_PER_INSTANCE
-              value: {{ .Values.nodesPerInstance | quote }}
+              value: {{ $profile.nodesPerInstance | quote }}
             - name: HEADLESS_SERVICE_NAME
               value: {{ include "multi-node-test.name" . }}-headless
           ports:
@@ -89,14 +94,14 @@ spec:
             timeoutSeconds: 10
             successThreshold: 1
             failureThreshold: 3
-          {{- if or .Values.resourceClaimTemplate.enabled (not (empty .Values.resources)) }}
+          {{- if or $resourceClaimTemplateEnabled (not (empty $resources)) }}
           resources:
-            {{- with .Values.resources }}
+            {{- with $resources }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-            {{- if .Values.resourceClaimTemplate.enabled }}
+            {{- if $resourceClaimTemplateEnabled }}
             claims:
-              - name: {{ .Values.resourceClaimTemplate.claimName }}
+              - name: {{ $resourceClaimTemplate.claimName }}
             {{- end }}
           {{- end }}
       {{- with .Values.nodeSelector }}
