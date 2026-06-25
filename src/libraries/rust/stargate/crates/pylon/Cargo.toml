@@ -33,6 +33,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+flume = { workspace = true }
 opentelemetry = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
@@ -40,4 +41,5 @@ tracing = { workspace = true }
 pylon-lib = { workspace = true }
 stargate-proto = { workspace = true }
 stargate-protocol = { workspace = true }
+stargate-runtime = { workspace = true }
 stargate-telemetry = { workspace = true }

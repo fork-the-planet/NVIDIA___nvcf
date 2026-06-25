@@ -20,12 +20,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use reqwest::StatusCode;
 use serde::de::{self, Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tokio::time::Instant as TokioInstant;
+use tokio_util::sync::CancellationToken;
+
+use stargate_runtime::{OwnedTask, TASK_SHUTDOWN_TIMEOUT};
 
 use super::collector::{RequestCounterUpdate, StatsAggregatorUpdate, StatsUpdateSource};
 use super::metrics::PylonMetrics;
@@ -110,25 +112,29 @@ impl Default for EngineStatsStreamConfig {
 }
 
 pub struct EngineStatsStreamHandle {
-    task: JoinHandle<()>,
+    task: OwnedTask,
 }
 
 impl EngineStatsStreamHandle {
+    pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
+        self.task.wait_for_exit().await
+    }
+
     pub async fn shutdown(self) {
-        self.task.abort();
-        let _ = self.task.await;
+        self.task.shutdown(TASK_SHUTDOWN_TIMEOUT).await;
     }
 }
 
 pub fn start_engine_stats_stream(
     config: EngineStatsStreamConfig,
     stats_update_tx: flume::Sender<StatsAggregatorUpdate>,
-    stop_rx: watch::Receiver<bool>,
 ) -> Option<EngineStatsStreamHandle> {
     if config.mode == EngineStatsStreamMode::Off {
         return None;
     }
-    let task = tokio::spawn(run_engine_stats_stream(config, stats_update_tx, stop_rx));
+    let task = OwnedTask::spawn("engine stats stream", move |stop| {
+        run_engine_stats_stream(config, stats_update_tx, stop)
+    });
     Some(EngineStatsStreamHandle { task })
 }
 
@@ -142,7 +148,6 @@ impl ParsedEngineStatsEvent {
     fn event_type(&self) -> &'static str {
         match self {
             Self::Update(StatsAggregatorUpdate::RequestCounters(_)) => "stats",
-            Self::Update(StatsAggregatorUpdate::RequestObservation(_)) => "observation",
             Self::Update(StatsAggregatorUpdate::FinalizeRequest(_)) => "finalize",
             Self::Update(StatsAggregatorUpdate::EnableOpenAiFallback) => "control",
             Self::Ping => "ping",
@@ -728,20 +733,20 @@ fn required_nonempty_string(
 async fn run_engine_stats_stream(
     config: EngineStatsStreamConfig,
     stats_update_tx: flume::Sender<StatsAggregatorUpdate>,
-    mut stop_rx: watch::Receiver<bool>,
+    stop: CancellationToken,
 ) {
     let client = reqwest::Client::new();
     let mut backoff = config.initial_reconnect_backoff;
     let mut valid_event_seen = false;
     loop {
-        if stop_channel_requested(&stop_rx) {
+        if stop.is_cancelled() {
             return;
         }
         match read_stream_once(
             &config,
             &client,
             &stats_update_tx,
-            &mut stop_rx,
+            &stop,
             &mut valid_event_seen,
         )
         .await
@@ -754,9 +759,12 @@ async fn run_engine_stats_stream(
                     url = config.url,
                     "engine stats stream unsupported; using OpenAI fallback observation"
                 );
-                let _ = stats_update_tx
-                    .send_async(StatsAggregatorUpdate::EnableOpenAiFallback)
-                    .await;
+                let _ = send_stats_update(
+                    &stats_update_tx,
+                    StatsAggregatorUpdate::EnableOpenAiFallback,
+                    &stop,
+                )
+                .await;
                 return;
             }
             StreamReadOutcome::Unsupported => {
@@ -767,13 +775,14 @@ async fn run_engine_stats_stream(
             }
         }
 
-        if sleep_or_stop(backoff, &mut stop_rx).await {
+        if sleep_or_stop(backoff, &stop).await {
             return;
         }
         backoff = (backoff * 2).min(config.max_reconnect_backoff);
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum StreamReadOutcome {
     Stopped,
     Unsupported,
@@ -784,16 +793,24 @@ async fn read_stream_once(
     config: &EngineStatsStreamConfig,
     client: &reqwest::Client,
     stats_update_tx: &flume::Sender<StatsAggregatorUpdate>,
-    stop_rx: &mut watch::Receiver<bool>,
+    stop: &CancellationToken,
     valid_event_seen: &mut bool,
 ) -> StreamReadOutcome {
+    let response = match open_engine_stats_response(config, client, stop).await {
+        Ok(response) => response,
+        Err(outcome) => return outcome,
+    };
+    observe_connected(config, true);
+    drain_engine_stats_response(config, response, stats_update_tx, stop, valid_event_seen).await
+}
+
+async fn open_engine_stats_response(
+    config: &EngineStatsStreamConfig,
+    client: &reqwest::Client,
+    stop: &CancellationToken,
+) -> Result<reqwest::Response, StreamReadOutcome> {
     let response = tokio::select! {
-        changed = stop_rx.changed() => {
-            if stop_channel_changed(changed, stop_rx) {
-                return StreamReadOutcome::Stopped;
-            }
-            return StreamReadOutcome::Retry("stop_watch");
-        }
+        _ = stop.cancelled() => return Err(StreamReadOutcome::Stopped),
         response = client
             .get(&config.url)
             .header(reqwest::header::ACCEPT, HEADER_ACCEPT_NDJSON)
@@ -803,16 +820,23 @@ async fn read_stream_once(
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(url = config.url, error = %error, "engine stats stream connect failed");
-            return StreamReadOutcome::Retry("connect_error");
+            return Err(StreamReadOutcome::Retry("connect_error"));
         }
     };
+    classify_engine_stats_response(config, response)
+}
+
+fn classify_engine_stats_response(
+    config: &EngineStatsStreamConfig,
+    response: reqwest::Response,
+) -> Result<reqwest::Response, StreamReadOutcome> {
     if permanent_unsupported_status(response.status()) {
         tracing::warn!(
             url = config.url,
             status = %response.status(),
             "engine stats stream endpoint is unsupported"
         );
-        return StreamReadOutcome::Unsupported;
+        return Err(StreamReadOutcome::Unsupported);
     }
     if !response.status().is_success() {
         tracing::warn!(
@@ -820,96 +844,202 @@ async fn read_stream_once(
             status = %response.status(),
             "engine stats stream returned non-success status"
         );
-        return StreamReadOutcome::Retry("http_status");
+        return Err(StreamReadOutcome::Retry("http_status"));
     }
-    observe_connected(config, true);
+    Ok(response)
+}
+
+async fn drain_engine_stats_response(
+    config: &EngineStatsStreamConfig,
+    response: reqwest::Response,
+    stats_update_tx: &flume::Sender<StatsAggregatorUpdate>,
+    stop: &CancellationToken,
+    valid_event_seen: &mut bool,
+) -> StreamReadOutcome {
     let mut stream = response.bytes_stream();
     let mut line_buffer = Vec::with_capacity(1024);
-
     loop {
-        let chunk = tokio::select! {
-            changed = stop_rx.changed() => {
-                if stop_channel_changed(changed, stop_rx) {
-                    observe_connected(config, false);
-                    return StreamReadOutcome::Stopped;
-                }
-                continue;
-            }
-            chunk = stream.next() => chunk,
+        let chunk = match next_engine_stats_chunk(config, stop, &mut stream).await {
+            Ok(chunk) => match non_empty_engine_stats_chunk(config, chunk) {
+                Ok(chunk) => chunk,
+                Err(outcome) => return outcome,
+            },
+            Err(outcome) => return outcome,
         };
-        let Some(chunk) = chunk else {
+        if let Some(outcome) = process_engine_stats_chunk(
+            config,
+            stats_update_tx,
+            valid_event_seen,
+            &mut line_buffer,
+            &chunk,
+            stop,
+        )
+        .await
+        {
+            return outcome;
+        }
+    }
+}
+
+fn non_empty_engine_stats_chunk(
+    config: &EngineStatsStreamConfig,
+    chunk: Bytes,
+) -> Result<Bytes, StreamReadOutcome> {
+    if chunk.is_empty() {
+        observe_connected(config, false);
+        Err(StreamReadOutcome::Retry("empty_chunk"))
+    } else {
+        Ok(chunk)
+    }
+}
+
+async fn next_engine_stats_chunk<S>(
+    config: &EngineStatsStreamConfig,
+    stop: &CancellationToken,
+    stream: &mut S,
+) -> Result<Bytes, StreamReadOutcome>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
+    let chunk = tokio::select! {
+        _ = stop.cancelled() => {
             observe_connected(config, false);
-            return StreamReadOutcome::Retry("eof");
-        };
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => {
-                tracing::warn!(url = config.url, error = %error, "engine stats stream read failed");
-                observe_connected(config, false);
-                return StreamReadOutcome::Retry("read_error");
-            }
-        };
-        line_buffer.extend_from_slice(&chunk);
-        let mut consumed = 0;
-        while let Some(relative_newline_index) = memchr::memchr(b'\n', &line_buffer[consumed..]) {
-            let newline_index = consumed + relative_newline_index;
-            if newline_index - consumed > config.max_line_bytes {
-                observe_invalid(config, "line_too_large");
-                consumed = newline_index + 1;
-                continue;
-            }
-            let mut line_end = newline_index;
-            if line_end > consumed && line_buffer[line_end - 1] == b'\r' {
-                line_end -= 1;
-            }
-            if line_end == consumed {
-                consumed = newline_index + 1;
-                continue;
-            }
-            let observed_at = TokioInstant::now();
+            return Err(StreamReadOutcome::Stopped);
+        }
+        chunk = stream.next() => chunk,
+    };
+    let Some(chunk) = chunk else {
+        observe_connected(config, false);
+        return Err(StreamReadOutcome::Retry("eof"));
+    };
+    chunk.map_err(|error| {
+        tracing::warn!(url = config.url, error = %error, "engine stats stream read failed");
+        observe_connected(config, false);
+        StreamReadOutcome::Retry("read_error")
+    })
+}
+
+async fn process_engine_stats_chunk(
+    config: &EngineStatsStreamConfig,
+    stats_update_tx: &flume::Sender<StatsAggregatorUpdate>,
+    valid_event_seen: &mut bool,
+    line_buffer: &mut Vec<u8>,
+    chunk: &[u8],
+    stop: &CancellationToken,
+) -> Option<StreamReadOutcome> {
+    line_buffer.extend_from_slice(chunk);
+    process_buffered_engine_stats_lines(
+        config,
+        stats_update_tx,
+        valid_event_seen,
+        line_buffer,
+        stop,
+    )
+    .await
+}
+
+async fn process_buffered_engine_stats_lines(
+    config: &EngineStatsStreamConfig,
+    stats_update_tx: &flume::Sender<StatsAggregatorUpdate>,
+    valid_event_seen: &mut bool,
+    line_buffer: &mut Vec<u8>,
+    stop: &CancellationToken,
+) -> Option<StreamReadOutcome> {
+    let mut consumed = 0;
+    while let Some(relative_newline_index) = memchr::memchr(b'\n', &line_buffer[consumed..]) {
+        let newline_index = consumed + relative_newline_index;
+        if newline_index - consumed > config.max_line_bytes {
+            observe_invalid(config, "line_too_large");
+            consumed = newline_index.saturating_add(1);
+            continue;
+        }
+        let line_end = trim_engine_stats_line_end(line_buffer, consumed, newline_index);
+        if line_end != consumed {
             let parsed_event = {
                 let line = &line_buffer[consumed..line_end];
-                parse_engine_stats_line(line, observed_at)
+                parse_engine_stats_line(line, TokioInstant::now())
             };
-            match parsed_event {
-                Ok(event) => {
-                    *valid_event_seen = true;
-                    observe_event(config, event.event_type());
-                    let update_sent = match event.into_update() {
-                        Some(update) => send_stats_update(stats_update_tx, update).await,
-                        None => true,
-                    };
-                    if !update_sent {
-                        observe_connected(config, false);
-                        return StreamReadOutcome::Stopped;
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(url = config.url, error = %error, "invalid engine stats event");
-                    observe_invalid(config, error.metric_reason());
-                }
+            if !handle_parsed_engine_stats_event(
+                config,
+                stats_update_tx,
+                valid_event_seen,
+                parsed_event,
+                stop,
+            )
+            .await
+            {
+                observe_connected(config, false);
+                return Some(StreamReadOutcome::Stopped);
             }
-            consumed = newline_index + 1;
         }
-        if consumed == line_buffer.len() {
-            line_buffer.clear();
-        } else if consumed > 0 {
-            line_buffer.drain(..consumed);
+        consumed = newline_index.saturating_add(1);
+    }
+    compact_engine_stats_line_buffer(config, line_buffer, consumed);
+    None
+}
+
+async fn handle_parsed_engine_stats_event(
+    config: &EngineStatsStreamConfig,
+    stats_update_tx: &flume::Sender<StatsAggregatorUpdate>,
+    valid_event_seen: &mut bool,
+    parsed_event: Result<ParsedEngineStatsEvent, EngineStatsParseError>,
+    stop: &CancellationToken,
+) -> bool {
+    match parsed_event {
+        Ok(event) => {
+            *valid_event_seen = true;
+            observe_event(config, event.event_type());
+            match event.into_update() {
+                Some(update) => send_stats_update(stats_update_tx, update, stop).await,
+                None => true,
+            }
         }
-        if line_buffer.len() > config.max_line_bytes {
-            observe_invalid(config, "line_too_large");
-            line_buffer.clear();
+        Err(error) => {
+            tracing::warn!(url = config.url, error = %error, "invalid engine stats event");
+            observe_invalid(config, error.metric_reason());
+            true
         }
+    }
+}
+
+fn trim_engine_stats_line_end(line_buffer: &[u8], consumed: usize, newline_index: usize) -> usize {
+    let mut line_end = newline_index;
+    if line_buffer
+        .get(consumed..line_end)
+        .is_some_and(|line| line.ends_with(b"\r"))
+    {
+        line_end = line_end.saturating_sub(1);
+    }
+    line_end
+}
+
+fn compact_engine_stats_line_buffer(
+    config: &EngineStatsStreamConfig,
+    line_buffer: &mut Vec<u8>,
+    consumed: usize,
+) {
+    if consumed == line_buffer.len() {
+        line_buffer.clear();
+    } else {
+        let _ = line_buffer.drain(..consumed).count();
+    }
+    if line_buffer.len() > config.max_line_bytes {
+        observe_invalid(config, "line_too_large");
+        line_buffer.clear();
     }
 }
 
 async fn send_stats_update(
     stats_update_tx: &flume::Sender<StatsAggregatorUpdate>,
     update: StatsAggregatorUpdate,
+    stop: &CancellationToken,
 ) -> bool {
     match stats_update_tx.try_send(update) {
         Ok(()) => true,
-        Err(flume::TrySendError::Full(update)) => stats_update_tx.send_async(update).await.is_ok(),
+        Err(flume::TrySendError::Full(update)) => stop
+            .run_until_cancelled(stats_update_tx.send_async(update))
+            .await
+            .is_some_and(|result| result.is_ok()),
         Err(flume::TrySendError::Disconnected(_)) => false,
     }
 }
@@ -959,22 +1089,10 @@ fn permanent_unsupported_status(status: StatusCode) -> bool {
     )
 }
 
-async fn sleep_or_stop(duration: Duration, stop_rx: &mut watch::Receiver<bool>) -> bool {
-    tokio::select! {
-        _ = tokio::time::sleep(duration) => false,
-        changed = stop_rx.changed() => stop_channel_changed(changed, stop_rx),
-    }
-}
-
-fn stop_channel_requested(stop_rx: &watch::Receiver<bool>) -> bool {
-    *stop_rx.borrow()
-}
-
-fn stop_channel_changed(
-    changed: Result<(), watch::error::RecvError>,
-    stop_rx: &watch::Receiver<bool>,
-) -> bool {
-    changed.is_err() || *stop_rx.borrow()
+async fn sleep_or_stop(duration: Duration, stop: &CancellationToken) -> bool {
+    stop.run_until_cancelled(tokio::time::sleep(duration))
+        .await
+        .is_none()
 }
 
 fn join_base_url_path(base_url: &str, path: &str) -> String {
@@ -1052,6 +1170,238 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn next_engine_stats_chunk_reads_before_cancellation() {
+        let config = EngineStatsStreamConfig::default();
+        let stop = CancellationToken::new();
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(1);
+        let reader = tokio::spawn(async move {
+            let mut stream = tokio_stream::wrappers::ReceiverStream::new(chunk_rx);
+            next_engine_stats_chunk(&config, &stop, &mut stream).await
+        });
+        tokio::task::yield_now().await;
+        chunk_tx
+            .send(Ok::<_, reqwest::Error>(Bytes::from_static(b"chunk")))
+            .await
+            .expect("chunk receiver should stay alive");
+        let chunk = match reader.await.expect("reader task should join") {
+            Ok(chunk) => chunk,
+            Err(_) => panic!("uncancelled token should not stop chunk reads"),
+        };
+
+        assert_eq!(chunk, Bytes::from_static(b"chunk"));
+    }
+
+    #[tokio::test]
+    async fn stats_update_send_wakes_on_cancellation_when_channel_is_full() {
+        let (tx, _rx) = flume::bounded(1);
+        tx.send(StatsAggregatorUpdate::EnableOpenAiFallback)
+            .expect("seed update should fill channel");
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
+
+        let task = tokio::spawn(async move {
+            send_stats_update(&tx, StatsAggregatorUpdate::EnableOpenAiFallback, &task_stop).await
+        });
+        tokio::task::yield_now().await;
+        stop.cancel();
+
+        let sent = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stats update send should wake on cancellation")
+            .expect("stats update send should not panic");
+        assert!(!sent);
+    }
+
+    #[test]
+    fn empty_engine_stats_chunks_force_reconnect_without_spinning() {
+        let config = EngineStatsStreamConfig::default();
+
+        assert!(matches!(
+            non_empty_engine_stats_chunk(&config, Bytes::new()),
+            Err(StreamReadOutcome::Retry("empty_chunk"))
+        ));
+        assert_eq!(
+            non_empty_engine_stats_chunk(&config, Bytes::from_static(b"chunk"))
+                .expect("non-empty chunks should continue draining"),
+            Bytes::from_static(b"chunk")
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_stats_line_length_allows_exact_limit_only() {
+        let line =
+            br#"{"v":1,"type":"stats","request_id":"req-1","model":"model-a","tokens_generated":1}"#;
+        let mut config = EngineStatsStreamConfig {
+            max_line_bytes: line.len(),
+            ..Default::default()
+        };
+        let stop = CancellationToken::new();
+        let (tx, rx) = flume::bounded(1);
+        let mut valid_event_seen = false;
+        let mut line_buffer = line.to_vec();
+        line_buffer.push(b'\n');
+
+        assert!(
+            process_buffered_engine_stats_lines(
+                &config,
+                &tx,
+                &mut valid_event_seen,
+                &mut line_buffer,
+                &stop,
+            )
+            .await
+            .is_none()
+        );
+        assert!(valid_event_seen);
+        assert!(line_buffer.is_empty());
+        assert!(matches!(
+            rx.try_recv()
+                .expect("exact-limit line should publish stats"),
+            StatsAggregatorUpdate::RequestCounters(_)
+        ));
+
+        let (tx, rx) = flume::bounded(1);
+        let mut valid_event_seen = false;
+        let mut line_buffer = br#"{"v":1,"type":"ping"}"#.to_vec();
+        line_buffer.push(b'\n');
+        line_buffer.extend_from_slice(line);
+        line_buffer.push(b'\n');
+
+        assert!(
+            process_buffered_engine_stats_lines(
+                &config,
+                &tx,
+                &mut valid_event_seen,
+                &mut line_buffer,
+                &stop,
+            )
+            .await
+            .is_none()
+        );
+        assert!(valid_event_seen);
+        assert!(line_buffer.is_empty());
+        assert!(matches!(
+            rx.try_recv()
+                .expect("exact-limit line should publish after a prior line"),
+            StatsAggregatorUpdate::RequestCounters(_)
+        ));
+
+        config.max_line_bytes = line.len() - 1;
+        let (tx, rx) = flume::bounded(1);
+        let mut valid_event_seen = false;
+        let mut line_buffer = line.to_vec();
+        line_buffer.push(b'\n');
+
+        assert!(
+            process_buffered_engine_stats_lines(
+                &config,
+                &tx,
+                &mut valid_event_seen,
+                &mut line_buffer,
+                &stop,
+            )
+            .await
+            .is_none()
+        );
+        assert!(!valid_event_seen);
+        assert!(line_buffer.is_empty());
+        assert!(rx.try_recv().is_err());
+
+        let metrics = PylonMetrics::new().expect("metrics should initialize");
+        config.metrics = Some(metrics.clone());
+        let (tx, rx) = flume::bounded(1);
+        let mut valid_event_seen = false;
+        let mut line_buffer = line.to_vec();
+        line_buffer.push(b'\n');
+        line_buffer.extend_from_slice(br#"{"v":1,"type":"ping"}"#);
+        line_buffer.push(b'\n');
+
+        assert!(
+            process_buffered_engine_stats_lines(
+                &config,
+                &tx,
+                &mut valid_event_seen,
+                &mut line_buffer,
+                &stop,
+            )
+            .await
+            .is_none()
+        );
+        assert!(valid_event_seen);
+        assert!(line_buffer.is_empty());
+        assert!(rx.try_recv().is_err());
+        let body = metrics.gather_text().expect("metrics should encode");
+        assert!(body.contains(
+            r#"pylon_engine_stats_stream_invalid_events_total{reason="line_too_large"} 1"#
+        ));
+        assert!(body.contains(r#"pylon_engine_stats_stream_events_total{type="ping"} 1"#));
+        assert!(!body.contains(r#"pylon_engine_stats_stream_invalid_events_total{reason="json"}"#));
+    }
+
+    #[tokio::test]
+    async fn blank_lf_and_crlf_engine_stats_lines_are_ignored() {
+        let metrics = PylonMetrics::new().expect("metrics should initialize");
+        let config = EngineStatsStreamConfig {
+            metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let stop = CancellationToken::new();
+        let (tx, rx) = flume::bounded(1);
+        let mut valid_event_seen = false;
+        let mut line_buffer = b"\n\r\n".to_vec();
+        line_buffer.extend_from_slice(
+            br#"{"v":1,"type":"stats","request_id":"req-1","model":"model-a","tokens_generated":1}"#,
+        );
+        line_buffer.extend_from_slice(b"\r\n");
+
+        assert!(
+            process_buffered_engine_stats_lines(
+                &config,
+                &tx,
+                &mut valid_event_seen,
+                &mut line_buffer,
+                &stop,
+            )
+            .await
+            .is_none()
+        );
+
+        assert!(valid_event_seen);
+        assert!(line_buffer.is_empty());
+        assert!(matches!(
+            rx.try_recv()
+                .expect("stats line after blank CRLF should publish"),
+            StatsAggregatorUpdate::RequestCounters(_)
+        ));
+        let body = metrics.gather_text().expect("metrics should encode");
+        assert!(!body.contains(r#"pylon_engine_stats_stream_invalid_events_total{reason="json"}"#));
+    }
+
+    #[test]
+    fn compact_engine_stats_line_buffer_keeps_partial_tail() {
+        let config = EngineStatsStreamConfig::default();
+        let mut line_buffer = b"{\"v\":1,\"type\":\"ping\"}\n{\"v\":1".to_vec();
+
+        compact_engine_stats_line_buffer(&config, &mut line_buffer, 22);
+
+        assert_eq!(line_buffer, br#"{"v":1"#);
+        compact_engine_stats_line_buffer(&config, &mut line_buffer, 6);
+        assert!(line_buffer.is_empty());
+
+        let config = EngineStatsStreamConfig {
+            max_line_bytes: 4,
+            ..Default::default()
+        };
+        let mut line_buffer = b"1234".to_vec();
+        compact_engine_stats_line_buffer(&config, &mut line_buffer, 0);
+        assert_eq!(line_buffer, b"1234");
+
+        let mut line_buffer = b"12345".to_vec();
+        compact_engine_stats_line_buffer(&config, &mut line_buffer, 0);
+        assert!(line_buffer.is_empty());
+    }
+
+    #[tokio::test]
     async fn auto_mode_enables_openai_fallback_when_endpoint_is_unsupported_before_events() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1066,7 +1416,6 @@ mod tests {
         });
 
         let (tx, rx) = flume::bounded(1);
-        let (_stop_tx, stop_rx) = watch::channel(false);
         let mut config = EngineStatsStreamConfig::new(
             &format!("http://{addr}"),
             "/pylon/v1/stats/stream",
@@ -1075,8 +1424,7 @@ mod tests {
         config.initial_reconnect_backoff = Duration::from_millis(1);
         config.max_reconnect_backoff = Duration::from_millis(1);
 
-        let handle =
-            start_engine_stats_stream(config, tx, stop_rx).expect("auto stats stream should start");
+        let handle = start_engine_stats_stream(config, tx).expect("auto stats stream should start");
         let update = tokio::time::timeout(Duration::from_secs(2), rx.recv_async())
             .await
             .expect("auto mode should enable fallback")
@@ -1106,7 +1454,6 @@ mod tests {
         });
 
         let (tx, rx) = flume::bounded(1);
-        let (stop_tx, stop_rx) = watch::channel(false);
         let mut config = EngineStatsStreamConfig::new(
             &format!("http://{addr}"),
             "/pylon/v1/stats/stream",
@@ -1115,8 +1462,8 @@ mod tests {
         config.initial_reconnect_backoff = Duration::from_millis(1);
         config.max_reconnect_backoff = Duration::from_millis(1);
 
-        let handle = start_engine_stats_stream(config, tx, stop_rx)
-            .expect("required stats stream should start");
+        let handle =
+            start_engine_stats_stream(config, tx).expect("required stats stream should start");
         assert!(
             tokio::time::timeout(Duration::from_millis(50), rx.recv_async())
                 .await
@@ -1124,7 +1471,6 @@ mod tests {
             "required mode must not enable OpenAI fallback"
         );
 
-        stop_tx.send(true).expect("stream should receive stop");
         handle.shutdown().await;
         server.abort();
     }
@@ -1158,7 +1504,6 @@ mod tests {
         });
 
         let (tx, rx) = flume::bounded(4);
-        let (stop_tx, stop_rx) = watch::channel(false);
         let mut config = EngineStatsStreamConfig::new(
             &format!("http://{addr}"),
             "/pylon/v1/stats/stream",
@@ -1167,8 +1512,7 @@ mod tests {
         config.initial_reconnect_backoff = Duration::from_millis(1);
         config.max_reconnect_backoff = Duration::from_millis(1);
 
-        let handle =
-            start_engine_stats_stream(config, tx, stop_rx).expect("auto stats stream should start");
+        let handle = start_engine_stats_stream(config, tx).expect("auto stats stream should start");
         let update = tokio::time::timeout(Duration::from_secs(2), rx.recv_async())
             .await
             .expect("valid stats event should be sent")
@@ -1181,8 +1525,78 @@ mod tests {
             "auto mode must not switch to fallback after any valid stream event"
         );
 
-        stop_tx.send(true).expect("stream should receive stop");
         handle.shutdown().await;
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn stream_invalid_events_record_metric_reasons_before_valid_update() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/pylon/v1/stats/stream",
+                get(|| async {
+                    concat!(
+                        "not-json\n",
+                        "[1]\n",
+                        "{\"type\":\"ping\"}\n",
+                        "{\"v\":2,\"type\":\"ping\"}\n",
+                        "{\"v\":1,\"type\":\"nope\"}\n",
+                        "{\"v\":1,\"type\":\"stats\",\"request_id\":\"req-empty\",\"model\":\"model-a\"}\n",
+                        "{\"v\":1,\"type\":\"stats\",\"request_id\":\"\",\"model\":\"model-a\",\"tokens_generated\":1}\n",
+                        "{\"v\":1,\"type\":\"stats\",\"request_id\":\"req-valid\",\"model\":\"model-a\",\"tokens_generated\":1}\n",
+                    )
+                }),
+            );
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let metrics = PylonMetrics::new().expect("metrics should initialize");
+        let (tx, rx) = flume::bounded(4);
+        let mut config = EngineStatsStreamConfig::new(
+            &format!("http://{addr}"),
+            "/pylon/v1/stats/stream",
+            EngineStatsStreamMode::Required,
+        );
+        config.initial_reconnect_backoff = Duration::from_secs(60);
+        config.max_reconnect_backoff = Duration::from_secs(60);
+        config.metrics = Some(metrics.clone());
+
+        let handle =
+            start_engine_stats_stream(config, tx).expect("required stats stream should start");
+        let update = tokio::time::timeout(Duration::from_secs(2), rx.recv_async())
+            .await
+            .expect("valid stats event should be sent")
+            .expect("stats update should be sent");
+        let StatsAggregatorUpdate::RequestCounters(update) = update else {
+            panic!("expected valid stream line to produce request counters");
+        };
+        assert_eq!(update.request_id, "req-valid");
+        assert_eq!(update.tokens_generated, Some(1));
+
+        handle.shutdown().await;
+        server.abort();
+
+        let body = metrics.gather_text().expect("metrics should encode");
+        for reason in [
+            "json",
+            "not_object",
+            "missing_field",
+            "version",
+            "type",
+            "empty_stats",
+            "field",
+        ] {
+            assert!(
+                body.contains(&format!(
+                    r#"pylon_engine_stats_stream_invalid_events_total{{reason="{reason}"}} 1"#
+                )),
+                "missing invalid-event metric for reason {reason}; body:\n{body}"
+            );
+        }
+        assert!(body.contains(r#"pylon_engine_stats_stream_events_total{type="stats"} 1"#));
     }
 }

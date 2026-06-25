@@ -65,7 +65,7 @@ async fn livez() -> StatusCode {
 
 async fn readyz(State(state): State<HealthState>) -> StatusCode {
     let snapshot = state.targets.borrow();
-    if snapshot.initialized && snapshot.ready_count() > 0 {
+    if snapshot.is_initialized() && snapshot.ready_count() > 0 {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -82,9 +82,51 @@ async fn metrics_handler(State(state): State<HealthState>) -> (StatusCode, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpoints::PodTarget;
     use axum::body::Body;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn readyz_requires_initialized_nonempty_snapshot() {
+        let metrics = Arc::new(RouterMetrics::new().expect("metrics should initialize"));
+        let (tx, rx) = watch::channel(TargetSnapshot::default());
+        let router = health_router(rx, metrics);
+        let ready_request = || {
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .expect("request should build")
+        };
+
+        let response = router
+            .clone()
+            .oneshot(ready_request())
+            .await
+            .expect("readiness request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        tx.send(TargetSnapshot::initialized([]))
+            .expect("initialized empty snapshot should publish");
+        let response = router
+            .clone()
+            .oneshot(ready_request())
+            .await
+            .expect("readiness request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        tx.send(TargetSnapshot::initialized([PodTarget {
+            pod_name: "stargate-0".to_string(),
+            grpc_addr: "10.0.0.10:50071".to_string(),
+            quic_addr: "10.0.0.10:50072".to_string(),
+        }]))
+        .expect("ready snapshot should publish");
+        let response = router
+            .oneshot(ready_request())
+            .await
+            .expect("readiness request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     #[tokio::test]
     async fn metrics_endpoint_exports_router_metrics() {

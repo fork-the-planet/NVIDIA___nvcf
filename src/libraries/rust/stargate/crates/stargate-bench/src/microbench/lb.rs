@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::hint::black_box;
 use std::io::Write;
 use std::sync::{Arc, Barrier};
@@ -24,37 +25,12 @@ use anyhow::Context;
 use clap::ValueEnum;
 use stargate::load_balancer::{
     LoadBalancerAlgorithm, LoadBalancerAlgorithmConfig, LoadBalancerConfig,
-    LoadBalancerModelConfig, LoadBalancerRequest, LoadBalancerRouter,
+    LoadBalancerModelConfig, LoadBalancerRequest, LoadBalancerRouter, LoadBalancerTargetState,
 };
 use stargate::routing::{RoutedClusterSnapshot, RoutingTargetKey};
 use stargate_proto::pb::{InferenceServerStatus, ModelStats};
 
-const MULTIREGION_MODEL_ID: &str = "lb-bench-multiregion";
-const MULTIREGION_ONE_EXCLUDED_MODEL_ID: &str = "lb-bench-multiregion-one-excluded";
-const MULTIREGION_IGNORE_QUEUE_MODEL_ID: &str = "lb-bench-multiregion-ignore-queue";
-const MULTIREGION_IGNORE_QUEUE_ONE_EXCLUDED_MODEL_ID: &str =
-    "lb-bench-multiregion-ignore-queue-one-excluded";
-const MULTIREGION_IGNORE_QUEUE_MULTI_EXCLUDED_MODEL_ID: &str =
-    "lb-bench-multiregion-ignore-queue-multi-excluded";
-const MULTIREGION_RTT_ONLY_MODEL_ID: &str = "lb-bench-multiregion-rtt-only";
-const MULTIREGION_RTT_ONLY_ONE_EXCLUDED_MODEL_ID: &str =
-    "lb-bench-multiregion-rtt-only-one-excluded";
-const MULTIREGION_RTT_ONLY_MULTI_EXCLUDED_MODEL_ID: &str =
-    "lb-bench-multiregion-rtt-only-multi-excluded";
-const MULTIREGION_AFFINITY_MODEL_ID: &str = "lb-bench-multiregion-affinity";
-const MULTIREGION_AFFINITY_ONE_EXCLUDED_MODEL_ID: &str =
-    "lb-bench-multiregion-affinity-one-excluded";
-const MULTIREGION_AFFINITY_MULTI_EXCLUDED_MODEL_ID: &str =
-    "lb-bench-multiregion-affinity-multi-excluded";
-const POWER_OF_TWO_MODEL_ID: &str = "lb-bench-power-of-two";
-const POWER_OF_TWO_ONE_EXCLUDED_MODEL_ID: &str = "lb-bench-power-of-two-one-excluded";
-const PULSAR_MODEL_ID: &str = "lb-bench-pulsar";
-const PULSAR_ONE_EXCLUDED_MODEL_ID: &str = "lb-bench-pulsar-one-excluded";
-const RANDOM_MODEL_ID: &str = "lb-bench-random";
-const RANDOM_ONE_EXCLUDED_MODEL_ID: &str = "lb-bench-random-one-excluded";
-const ROUND_ROBIN_ONE_EXCLUDED_MODEL_ID: &str = "lb-bench-round-robin-one-excluded";
-const ROUND_ROBIN_MULTI_EXCLUDED_MODEL_ID: &str = "lb-bench-round-robin-multi-excluded";
-
+#[repr(usize)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum LbMicrobenchScenario {
@@ -79,67 +55,126 @@ pub enum LbMicrobenchScenario {
     RoundRobinMultiExcluded,
 }
 
+#[derive(Clone, Copy)]
+struct LbMicrobenchScenarioMetadata {
+    scenario: LbMicrobenchScenario,
+    label: &'static str,
+    model_id: &'static str,
+}
+
+const LB_MICROBENCH_SCENARIOS: [LbMicrobenchScenarioMetadata; 19] = [
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::PowerOfTwo,
+        label: "power-of-two",
+        model_id: "lb-bench-power-of-two",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::PowerOfTwoOneExcluded,
+        label: "power-of-two-one-excluded",
+        model_id: "lb-bench-power-of-two-one-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregion,
+        label: "groq-multiregion",
+        model_id: "lb-bench-multiregion",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionOneExcluded,
+        label: "groq-multiregion-one-excluded",
+        model_id: "lb-bench-multiregion-one-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionIgnoreQueue,
+        label: "groq-multiregion-ignore-queue",
+        model_id: "lb-bench-multiregion-ignore-queue",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionIgnoreQueueOneExcluded,
+        label: "groq-multiregion-ignore-queue-one-excluded",
+        model_id: "lb-bench-multiregion-ignore-queue-one-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionIgnoreQueueMultiExcluded,
+        label: "groq-multiregion-ignore-queue-multi-excluded",
+        model_id: "lb-bench-multiregion-ignore-queue-multi-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionRttOnly,
+        label: "groq-multiregion-rtt-only",
+        model_id: "lb-bench-multiregion-rtt-only",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionRttOnlyOneExcluded,
+        label: "groq-multiregion-rtt-only-one-excluded",
+        model_id: "lb-bench-multiregion-rtt-only-one-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionRttOnlyMultiExcluded,
+        label: "groq-multiregion-rtt-only-multi-excluded",
+        model_id: "lb-bench-multiregion-rtt-only-multi-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionAffinity,
+        label: "groq-multiregion-affinity",
+        model_id: "lb-bench-multiregion-affinity",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionAffinityOneExcluded,
+        label: "groq-multiregion-affinity-one-excluded",
+        model_id: "lb-bench-multiregion-affinity-one-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::GroqMultiregionAffinityMultiExcluded,
+        label: "groq-multiregion-affinity-multi-excluded",
+        model_id: "lb-bench-multiregion-affinity-multi-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::Pulsar,
+        label: "pulsar",
+        model_id: "lb-bench-pulsar",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::PulsarOneExcluded,
+        label: "pulsar-one-excluded",
+        model_id: "lb-bench-pulsar-one-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::Random,
+        label: "random",
+        model_id: "lb-bench-random",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::RandomOneExcluded,
+        label: "random-one-excluded",
+        model_id: "lb-bench-random-one-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::RoundRobinOneExcluded,
+        label: "round-robin-one-excluded",
+        model_id: "lb-bench-round-robin-one-excluded",
+    },
+    LbMicrobenchScenarioMetadata {
+        scenario: LbMicrobenchScenario::RoundRobinMultiExcluded,
+        label: "round-robin-multi-excluded",
+        model_id: "lb-bench-round-robin-multi-excluded",
+    },
+];
+
 impl LbMicrobenchScenario {
-    fn label(self) -> &'static str {
-        match self {
-            Self::PowerOfTwo => "power-of-two",
-            Self::PowerOfTwoOneExcluded => "power-of-two-one-excluded",
-            Self::GroqMultiregion => "groq-multiregion",
-            Self::GroqMultiregionOneExcluded => "groq-multiregion-one-excluded",
-            Self::GroqMultiregionIgnoreQueue => "groq-multiregion-ignore-queue",
-            Self::GroqMultiregionIgnoreQueueOneExcluded => {
-                "groq-multiregion-ignore-queue-one-excluded"
-            }
-            Self::GroqMultiregionIgnoreQueueMultiExcluded => {
-                "groq-multiregion-ignore-queue-multi-excluded"
-            }
-            Self::GroqMultiregionRttOnly => "groq-multiregion-rtt-only",
-            Self::GroqMultiregionRttOnlyOneExcluded => "groq-multiregion-rtt-only-one-excluded",
-            Self::GroqMultiregionRttOnlyMultiExcluded => "groq-multiregion-rtt-only-multi-excluded",
-            Self::GroqMultiregionAffinity => "groq-multiregion-affinity",
-            Self::GroqMultiregionAffinityOneExcluded => "groq-multiregion-affinity-one-excluded",
-            Self::GroqMultiregionAffinityMultiExcluded => {
-                "groq-multiregion-affinity-multi-excluded"
-            }
-            Self::Pulsar => "pulsar",
-            Self::PulsarOneExcluded => "pulsar-one-excluded",
-            Self::Random => "random",
-            Self::RandomOneExcluded => "random-one-excluded",
-            Self::RoundRobinOneExcluded => "round-robin-one-excluded",
-            Self::RoundRobinMultiExcluded => "round-robin-multi-excluded",
-        }
+    fn metadata(self) -> &'static LbMicrobenchScenarioMetadata {
+        let metadata = &LB_MICROBENCH_SCENARIOS[self as usize];
+        debug_assert_eq!(metadata.scenario, self);
+        metadata
     }
 
     fn model_id(self) -> &'static str {
-        match self {
-            Self::PowerOfTwo => POWER_OF_TWO_MODEL_ID,
-            Self::PowerOfTwoOneExcluded => POWER_OF_TWO_ONE_EXCLUDED_MODEL_ID,
-            Self::GroqMultiregion => MULTIREGION_MODEL_ID,
-            Self::GroqMultiregionOneExcluded => MULTIREGION_ONE_EXCLUDED_MODEL_ID,
-            Self::GroqMultiregionIgnoreQueue => MULTIREGION_IGNORE_QUEUE_MODEL_ID,
-            Self::GroqMultiregionIgnoreQueueOneExcluded => {
-                MULTIREGION_IGNORE_QUEUE_ONE_EXCLUDED_MODEL_ID
-            }
-            Self::GroqMultiregionIgnoreQueueMultiExcluded => {
-                MULTIREGION_IGNORE_QUEUE_MULTI_EXCLUDED_MODEL_ID
-            }
-            Self::GroqMultiregionRttOnly => MULTIREGION_RTT_ONLY_MODEL_ID,
-            Self::GroqMultiregionRttOnlyOneExcluded => MULTIREGION_RTT_ONLY_ONE_EXCLUDED_MODEL_ID,
-            Self::GroqMultiregionRttOnlyMultiExcluded => {
-                MULTIREGION_RTT_ONLY_MULTI_EXCLUDED_MODEL_ID
-            }
-            Self::GroqMultiregionAffinity => MULTIREGION_AFFINITY_MODEL_ID,
-            Self::GroqMultiregionAffinityOneExcluded => MULTIREGION_AFFINITY_ONE_EXCLUDED_MODEL_ID,
-            Self::GroqMultiregionAffinityMultiExcluded => {
-                MULTIREGION_AFFINITY_MULTI_EXCLUDED_MODEL_ID
-            }
-            Self::Pulsar => PULSAR_MODEL_ID,
-            Self::PulsarOneExcluded => PULSAR_ONE_EXCLUDED_MODEL_ID,
-            Self::Random => RANDOM_MODEL_ID,
-            Self::RandomOneExcluded => RANDOM_ONE_EXCLUDED_MODEL_ID,
-            Self::RoundRobinOneExcluded => ROUND_ROBIN_ONE_EXCLUDED_MODEL_ID,
-            Self::RoundRobinMultiExcluded => ROUND_ROBIN_MULTI_EXCLUDED_MODEL_ID,
-        }
+        self.metadata().model_id
+    }
+}
+
+impl fmt::Display for LbMicrobenchScenario {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.metadata().label)
     }
 }
 
@@ -172,27 +207,10 @@ pub struct LbMicrobenchRow {
 }
 
 pub fn default_lb_microbench_scenarios() -> Vec<LbMicrobenchScenario> {
-    vec![
-        LbMicrobenchScenario::PowerOfTwo,
-        LbMicrobenchScenario::PowerOfTwoOneExcluded,
-        LbMicrobenchScenario::GroqMultiregion,
-        LbMicrobenchScenario::GroqMultiregionOneExcluded,
-        LbMicrobenchScenario::GroqMultiregionIgnoreQueue,
-        LbMicrobenchScenario::GroqMultiregionIgnoreQueueOneExcluded,
-        LbMicrobenchScenario::GroqMultiregionIgnoreQueueMultiExcluded,
-        LbMicrobenchScenario::GroqMultiregionRttOnly,
-        LbMicrobenchScenario::GroqMultiregionRttOnlyOneExcluded,
-        LbMicrobenchScenario::GroqMultiregionRttOnlyMultiExcluded,
-        LbMicrobenchScenario::GroqMultiregionAffinity,
-        LbMicrobenchScenario::GroqMultiregionAffinityOneExcluded,
-        LbMicrobenchScenario::GroqMultiregionAffinityMultiExcluded,
-        LbMicrobenchScenario::Pulsar,
-        LbMicrobenchScenario::PulsarOneExcluded,
-        LbMicrobenchScenario::Random,
-        LbMicrobenchScenario::RandomOneExcluded,
-        LbMicrobenchScenario::RoundRobinOneExcluded,
-        LbMicrobenchScenario::RoundRobinMultiExcluded,
-    ]
+    LB_MICROBENCH_SCENARIOS
+        .iter()
+        .map(|metadata| metadata.scenario)
+        .collect()
 }
 
 pub fn run_lb_microbench(config: &LbMicrobenchConfig) -> anyhow::Result<Vec<LbMicrobenchRow>> {
@@ -223,7 +241,7 @@ pub fn write_lb_microbench_csv<W: Write>(
         writeln!(
             writer,
             "{},{},{},{},{},{},{:.1},{},{:.3},{},{},{},{},{}",
-            row.scenario.label(),
+            row.scenario,
             row.candidates,
             row.iterations,
             row.warmup_iterations,
@@ -265,6 +283,7 @@ fn run_scenario(
     cache_keys: &[String],
 ) -> anyhow::Result<LbMicrobenchRow> {
     let router = Arc::new(router_for_scenario(scenario)?);
+    let target_state = LoadBalancerTargetState::default();
     let excluded_cluster_ids = excluded_cluster_ids_for_scenario(scenario);
     let target = RoutingTargetKey {
         routing_key: Some("tenant-a".to_string()),
@@ -279,7 +298,7 @@ fn run_scenario(
             received_at,
             excluded_cluster_ids.as_ref(),
         );
-        let _ = black_box(router.choose_candidate(&request, candidates));
+        let _ = black_box(router.choose_candidate(&target_state, &request, candidates));
     }
 
     let worker_count = config.concurrency.min(config.iterations);
@@ -287,6 +306,7 @@ fn run_scenario(
         router,
         LbMicrobenchRun {
             target: &target,
+            target_state: &target_state,
             candidates,
             cache_keys,
             config,
@@ -354,6 +374,7 @@ impl LbMicrobenchStats {
 
 struct LbMicrobenchRun<'a> {
     target: &'a RoutingTargetKey,
+    target_state: &'a LoadBalancerTargetState,
     candidates: &'a [RoutedClusterSnapshot],
     cache_keys: &'a [String],
     config: &'a LbMicrobenchConfig,
@@ -377,6 +398,7 @@ fn run_concurrent_measured_iterations(
             let (start_iteration, iteration_count) =
                 worker_iteration_range(run.config.iterations, run.worker_count, worker_index);
             let target_ref = run.target;
+            let target_state_ref = run.target_state;
             let candidates_ref = run.candidates;
             let cache_keys_ref = run.cache_keys;
             let warmup_iterations = run.config.warmup_iterations;
@@ -388,6 +410,7 @@ fn run_concurrent_measured_iterations(
                 let stats = run_worker_measured_iterations(LbMicrobenchWorker {
                     router: router.as_ref(),
                     target: target_ref,
+                    target_state: target_state_ref,
                     candidates: candidates_ref,
                     cache_keys: cache_keys_ref,
                     warmup_iterations,
@@ -453,6 +476,7 @@ where
 struct LbMicrobenchWorker<'a> {
     router: &'a LoadBalancerRouter,
     target: &'a RoutingTargetKey,
+    target_state: &'a LoadBalancerTargetState,
     candidates: &'a [RoutedClusterSnapshot],
     cache_keys: &'a [String],
     warmup_iterations: usize,
@@ -473,8 +497,11 @@ fn run_worker_measured_iterations(worker: LbMicrobenchWorker<'_>) -> LbMicrobenc
             worker.received_at,
             worker.excluded_cluster_ids,
         );
-        if let Some(choice) = black_box(worker.router.choose_candidate(&request, worker.candidates))
-        {
+        if let Some(choice) = black_box(worker.router.choose_candidate(
+            worker.target_state,
+            &request,
+            worker.candidates,
+        )) {
             stats.record(choice, worker.candidates);
         }
     }
@@ -564,7 +591,7 @@ fn router_for_scenario(scenario: LbMicrobenchScenario) -> anyhow::Result<LoadBal
         request_algorithms: HashMap::new(),
         models,
     })
-    .with_context(|| format!("failed to build {} load balancer", scenario.label()))
+    .with_context(|| format!("failed to build {scenario} load balancer"))
 }
 
 fn config_for_scenario(scenario: LbMicrobenchScenario) -> LoadBalancerAlgorithmConfig {
@@ -736,7 +763,7 @@ mod tests {
         assert_eq!(rows.len(), 19);
         assert!(
             rows.iter()
-                .any(|row| row.scenario.label() == "power-of-two")
+                .any(|row| row.scenario == LbMicrobenchScenario::PowerOfTwo)
         );
         assert!(rows.iter().all(|row| row.choices == row.iterations));
         assert!(rows.iter().all(|row| row.concurrency == 2));
@@ -749,6 +776,33 @@ mod tests {
                 .sum::<usize>()
                 == row.choices
         }));
+    }
+
+    #[test]
+    fn lb_microbench_scenario_display_matches_cli_value_names() {
+        for scenario in LbMicrobenchScenario::value_variants() {
+            let possible_value = scenario
+                .to_possible_value()
+                .expect("scenario should have a CLI value name");
+
+            assert_eq!(scenario.to_string(), possible_value.get_name());
+        }
+    }
+
+    #[test]
+    fn lb_microbench_scenario_metadata_covers_cli_inventory() {
+        let cli_scenarios = LbMicrobenchScenario::value_variants();
+        let default_scenarios = default_lb_microbench_scenarios();
+
+        assert_eq!(default_scenarios.as_slice(), cli_scenarios);
+
+        let mut model_ids = HashSet::new();
+        for scenario in cli_scenarios {
+            assert!(
+                model_ids.insert(scenario.model_id()),
+                "duplicate model ID for {scenario:?}"
+            );
+        }
     }
 
     #[test]
@@ -1019,7 +1073,7 @@ mod tests {
     fn measured_requests_start_after_warmup_key_range() {
         let target = RoutingTargetKey {
             routing_key: Some("tenant-a".to_string()),
-            model_id: PULSAR_MODEL_ID.to_string(),
+            model_id: LbMicrobenchScenario::Pulsar.model_id().to_string(),
         };
         let cache_keys = build_cache_keys(4);
         let received_at = Instant::now();

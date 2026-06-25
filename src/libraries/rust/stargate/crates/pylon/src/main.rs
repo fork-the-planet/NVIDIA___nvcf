@@ -13,92 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::SocketAddr;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
-
-use anyhow::{Context, Result, ensure};
-use pylon_lib::{
-    AuthTokenProvider, BringupConfig, EngineStatsStreamConfig, EngineStatsStreamMode,
-    InferenceServerRegistrationClient, InferenceServerRegistrationConfig, OutputTokenParserFactory,
-    PylonMetrics, PylonQueueMismatchRetryConfig, PylonRetryConfig, QueueAdmissionTracker,
-    QuicHttpTunnelConfig, RequestQualityMonitorConfig, StatsCollectorConfig,
-    TunnelTransportProtocol, request_observation_channel, start_engine_stats_stream,
-    start_metrics_server, start_quic_http_tunnel, start_stats_collector_with_engine_stats,
-    stats_aggregator_update_channel,
-};
-use reqwest::header::HeaderName;
-use stargate_proto::pb::InferenceServerStatus;
+use anyhow::Result;
+use pylon_lib::{EngineStatsStreamMode, TunnelTransportProtocol};
 use stargate_protocol::tunnel_contract::HEADER_STARGATE_UPSTREAM_RETRYABLE;
-use tracing::info;
 
 const DEFAULT_PYLON_RETRYABLE_UPSTREAM_STATUS_CODES: &str = "429,503";
 const DEFAULT_PYLON_UPSTREAM_RETRY_HEADER: &str = HEADER_STARGATE_UPSTREAM_RETRYABLE;
 
+mod startup;
 mod telemetry;
-
-struct DirectTunnelConfigParams {
-    listen_addr: SocketAddr,
-    upstream_http_base_url: String,
-    inference_server_id: String,
-    tls_cert_pem: Option<Vec<u8>>,
-    tls_key_pem: Option<Vec<u8>>,
-    quic_insecure: bool,
-    tunnel_protocol: TunnelTransportProtocol,
-    retry: PylonRetryConfig,
-    queue_mismatch_retry: PylonQueueMismatchRetryConfig,
-    queue_tracker: QueueAdmissionTracker,
-    request_quality_monitor: RequestQualityMonitorConfig,
-    metrics: Arc<PylonMetrics>,
-}
-
-fn build_direct_tunnel_config(params: DirectTunnelConfigParams) -> QuicHttpTunnelConfig {
-    let mut tunnel_config =
-        QuicHttpTunnelConfig::new(params.listen_addr, params.upstream_http_base_url);
-    tunnel_config.inference_server_id = Some(params.inference_server_id);
-    tunnel_config.tls_cert_pem = params.tls_cert_pem;
-    tunnel_config.tls_key_pem = params.tls_key_pem;
-    tunnel_config.quic_insecure = params.quic_insecure;
-    tunnel_config.tunnel_protocol = params.tunnel_protocol;
-    tunnel_config.retry = params.retry;
-    tunnel_config.queue_mismatch_retry = params.queue_mismatch_retry;
-    tunnel_config.queue_tracker = params.queue_tracker;
-    tunnel_config.request_quality_monitor = params.request_quality_monitor;
-    tunnel_config.metrics = Some(params.metrics);
-    tunnel_config
-}
-
-fn stats_collector_config_from_args(
-    args: &Args,
-    upstream: &str,
-    metrics: Arc<PylonMetrics>,
-    queue_tracker: QueueAdmissionTracker,
-    fixed_last_mean_input_tps: Option<f64>,
-) -> StatsCollectorConfig {
-    let mut metrics_config = StatsCollectorConfig {
-        configured_model_ids: args.model_name.clone(),
-        fixed_last_mean_input_tps,
-        openai_fallback_stats_enabled: args.engine_stats_stream == EngineStatsStreamMode::Off,
-        metrics: Some(metrics),
-        queue_tracker,
-        ..Default::default()
-    };
-    if let Some(path) = args.kv_cache_stats_path.as_deref() {
-        // Mock benchmark backends can expose live KV-cache occupancy over HTTP;
-        // real upstreams usually do not, so polling is explicit.
-        metrics_config.kv_cache_stats_url = Some(join_base_url_path(upstream, path));
-    }
-    metrics_config
-}
-
-fn join_base_url_path(base_url: &str, path: &str) -> String {
-    format!(
-        "{}/{}",
-        base_url.trim_end_matches('/'),
-        path.trim_start_matches('/')
-    )
-}
 
 #[derive(clap::Parser, Debug)]
 #[command(name = "pylon")]
@@ -127,11 +50,11 @@ struct Args {
     #[arg(long, value_name = "ID")]
     cluster_id: Option<String>,
 
-    /// Path to TLS certificate PEM for the QUIC tunnel (generates self-signed if omitted)
+    /// Path to the QUIC server identity in direct mode or trust anchor in reverse mode
     #[arg(long, env = "STARGATE_TLS_CERT_PATH", value_name = "PATH")]
     tls_cert_path: Option<String>,
 
-    /// Path to TLS private key PEM for the QUIC tunnel (generates self-signed if omitted)
+    /// Path to the QUIC server private key in direct mode
     #[arg(long, env = "STARGATE_TLS_KEY_PATH", value_name = "PATH")]
     tls_key_path: Option<String>,
 
@@ -348,270 +271,25 @@ async fn main() -> Result<()> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    let _telemetry_guard =
-        telemetry::init_telemetry(args.otel_endpoint.as_deref(), &args.otel_service_name)?;
-    let upstream = normalize_base_url(&args.upstream_http_base_url);
-    let cluster_id = effective_cluster_id(&args);
-    let pylon_retry = pylon_retry_config_from_args(&args)?;
-    let queue_mismatch_retry = pylon_queue_mismatch_retry_config_from_args(&args)?;
-    let fixed_last_mean_input_tps = benchmark_fixed_last_mean_input_tps_from_args(&args)?;
-    let queue_tracker = QueueAdmissionTracker::default();
-    if let Some(last_mean_input_tps) = fixed_last_mean_input_tps {
-        for model_id in &args.model_name {
-            queue_tracker.update_model_throughput(model_id, last_mean_input_tps);
-        }
-    }
-    let request_quality_monitor = request_quality_monitor_config_from_args(&args);
-
-    let metrics = PylonMetrics::new()?;
-    metrics.observe_target_info(
-        env!("CARGO_PKG_VERSION"),
-        env!("CARGO_PKG_NAME"),
-        option_env!("GIT_COMMIT_HASH")
-            .or(option_env!("GIT_COMMIT_SHA"))
-            .unwrap_or(""),
-    );
-    let metrics_addr: SocketAddr =
-        format!("{}:{}", args.metrics_host, args.metrics_port).parse()?;
-    let metrics_task = tokio::spawn({
-        let registry = metrics.registry();
-        async move {
-            if let Err(error) = start_metrics_server(metrics_addr, registry).await {
-                tracing::error!(error = %error, "pylon metrics server failed");
-            }
-        }
-    });
-    let metrics_config = stats_collector_config_from_args(
-        &args,
-        &upstream,
-        metrics.clone(),
-        queue_tracker.clone(),
-        fixed_last_mean_input_tps,
-    );
-    let (request_observation_tx, request_observation_rx) =
-        request_observation_channel(&metrics_config);
-    let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&metrics_config);
-    let (_metrics_stop_tx, metrics_stop_rx) = tokio::sync::watch::channel(false);
-    let mut engine_stats_stream_config = EngineStatsStreamConfig::new(
-        &upstream,
-        &args.engine_stats_stream_path,
-        args.engine_stats_stream,
-    );
-    engine_stats_stream_config.metrics = Some(metrics.clone());
-    let engine_stats_stream = start_engine_stats_stream(
-        engine_stats_stream_config,
-        stats_update_tx,
-        metrics_stop_rx.clone(),
-    );
-    let stats_update_rx = engine_stats_stream.as_ref().map(|_| stats_update_rx);
-
-    let tls_cert_pem = args.tls_cert_path.as_ref().map(std::fs::read).transpose()?;
-    let tls_key_pem = args.tls_key_path.as_ref().map(std::fs::read).transpose()?;
-
-    let auth_token_provider = if let Some(token) = args.auth_token {
-        Some(Arc::new(AuthTokenProvider::Static(token)))
-    } else {
-        args.auth_token_file
-            .map(|path| Arc::new(AuthTokenProvider::File(path.into())))
-    };
-
-    let reverse_mode = args.reverse_tunnel;
-    let tunnel = if reverse_mode {
-        None
-    } else {
-        let quic_addr: SocketAddr = args.quic_listen_addr.parse()?;
-        let mut tunnel_config = build_direct_tunnel_config(DirectTunnelConfigParams {
-            listen_addr: quic_addr,
-            upstream_http_base_url: upstream.clone(),
-            inference_server_id: args.inference_server_id.clone(),
-            tls_cert_pem,
-            tls_key_pem,
-            quic_insecure: args.quic_insecure,
-            tunnel_protocol: args.tunnel_protocol,
-            retry: pylon_retry.clone(),
-            queue_mismatch_retry: queue_mismatch_retry.clone(),
-            queue_tracker: queue_tracker.clone(),
-            request_quality_monitor: request_quality_monitor.clone(),
-            metrics: metrics.clone(),
-        });
-        tunnel_config.request_observation_tx = Some(request_observation_tx.clone());
-        let t = start_quic_http_tunnel(tunnel_config).await?;
-        info!(addr = %t.listen_addr(), url = %format!("quic://{}", t.listen_addr()), "QUIC tunnel listening");
-        Some(t)
-    };
-
-    let quic_url = tunnel
-        .as_ref()
-        .map(|t| format!("quic://{}", t.listen_addr()))
-        .unwrap_or_default();
-
-    let mut registration_client = InferenceServerRegistrationClient::default();
-    let channels = registration_client.start(
-        InferenceServerRegistrationConfig {
-            seeds: vec![args.stargate_address.clone()],
-            inference_server_id: args.inference_server_id.clone(),
-            cluster_id,
-            inference_server_url: if reverse_mode {
-                upstream.clone()
-            } else {
-                quic_url.clone()
-            },
-            upstream_http_base_url: Some(upstream.clone()),
-            min_update_interval: Duration::from_millis(args.min_update_interval_ms),
-            status: InferenceServerStatus::Active,
-            reverse_tunnel: reverse_mode,
-            quic_insecure: args.quic_insecure,
-            tunnel_protocol: args.tunnel_protocol,
-            bringup: BringupConfig {
-                enabled: !args.disable_bringup,
-                active_canary_interval: Duration::from_millis(args.active_canary_interval_ms),
-                canary_timeout: Duration::from_millis(args.bringup_canary_timeout_ms),
-                canary_max_generation_threshold: args.canary_max_generation_threshold,
-                calibration_requests: args.calibration_requests,
-                calibration_prompt_units: args.calibration_prompt_units,
-                calibration_max_concurrency: args.calibration_max_concurrency,
-                calibration_timeout: Duration::from_millis(args.bringup_calibration_timeout_ms),
-            },
-            output_token_parser_factory: OutputTokenParserFactory::vllm(),
-            request_observation_tx: Some(request_observation_tx),
-            request_quality_monitor,
-            metrics: Some(metrics),
-            retry: pylon_retry,
-            queue_mismatch_retry,
-            queue_tracker,
-            auth_token_provider,
-        },
-        args.model_name.clone(),
-    )?;
-    let stats_collector = start_stats_collector_with_engine_stats(
-        metrics_config,
-        request_observation_rx,
-        stats_update_rx,
-        channels.model_stats.clone(),
-        metrics_stop_rx,
-    );
-
-    if reverse_mode {
-        info!(
-            stargate = %args.stargate_address,
-            inference_server_id = %args.inference_server_id,
-            upstream = %upstream,
-            "registered with stargate (reverse tunnel mode)"
-        );
-    } else {
-        info!(
-            stargate = %args.stargate_address,
-            inference_server_id = %args.inference_server_id,
-            inference_server_url = %quic_url,
-            upstream = %upstream,
-            "registered with stargate"
-        );
-    }
-
-    info!("pylon running; Ctrl+C to exit");
-
-    tokio::signal::ctrl_c().await?;
-    info!("shutting down");
-
-    registration_client.shutdown().await;
-    if let Some(engine_stats_stream) = engine_stats_stream {
-        engine_stats_stream.shutdown().await;
-    }
-    stats_collector.shutdown().await;
-    metrics_task.abort();
-    let _ = metrics_task.await;
-    if let Some(t) = tunnel {
-        t.shutdown().await;
-    }
-
-    Ok(())
-}
-
-fn normalize_base_url(url: &str) -> String {
-    url.trim_end_matches('/').to_string()
-}
-
-fn effective_cluster_id(args: &Args) -> String {
-    args.cluster_id
-        .clone()
-        .unwrap_or_else(|| args.inference_server_id.clone())
-}
-
-fn pylon_retry_config_from_args(args: &Args) -> Result<PylonRetryConfig> {
-    Ok(PylonRetryConfig {
-        retryable_upstream_status_codes: parse_retryable_status_codes(
-            &args.pylon_retryable_upstream_status_codes,
-        )?,
-        require_upstream_retry_header: args.pylon_require_upstream_retry_header,
-        upstream_retry_header: HeaderName::from_str(args.pylon_upstream_retry_header.trim())
-            .with_context(|| {
-                format!(
-                    "invalid pylon upstream retry header: {}",
-                    args.pylon_upstream_retry_header
-                )
-            })?,
-        propagate_retry_after: args.pylon_propagate_retry_after,
-        local_connect_failures_retryable: args.pylon_local_connect_failures_retryable,
-    })
-}
-
-fn pylon_queue_mismatch_retry_config_from_args(
-    args: &Args,
-) -> Result<PylonQueueMismatchRetryConfig> {
-    ensure!(
-        args.pylon_queue_mismatch_tolerance_factor.is_finite()
-            && args.pylon_queue_mismatch_tolerance_factor > 0.0,
-        "pylon queue mismatch tolerance factor must be finite and positive"
-    );
-    Ok(PylonQueueMismatchRetryConfig {
-        enabled: args.pylon_queue_mismatch_retry_enabled,
-        min_delta_ms: args.pylon_queue_mismatch_min_delta_ms,
-        tolerance_factor: args.pylon_queue_mismatch_tolerance_factor,
-        retry_after_ms: args.pylon_queue_mismatch_retry_after_ms,
-    })
-}
-
-fn benchmark_fixed_last_mean_input_tps_from_args(args: &Args) -> Result<Option<f64>> {
-    if let Some(last_mean_input_tps) = args.benchmark_fixed_last_mean_input_tps {
-        ensure!(
-            last_mean_input_tps.is_finite() && last_mean_input_tps > 0.0,
-            "benchmark fixed last mean input TPS must be finite and positive"
-        );
-    }
-    Ok(args.benchmark_fixed_last_mean_input_tps)
-}
-
-fn parse_retryable_status_codes(value: &str) -> Result<Vec<reqwest::StatusCode>> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let code = part
-                .parse::<u16>()
-                .with_context(|| format!("invalid pylon retryable status code: {part}"))?;
-            reqwest::StatusCode::from_u16(code)
-                .with_context(|| format!("invalid pylon retryable status code: {part}"))
-        })
-        .collect()
-}
-
-fn request_quality_monitor_config_from_args(args: &Args) -> RequestQualityMonitorConfig {
-    RequestQualityMonitorConfig {
-        collect_quality_metrics: args.collect_quality_metrics,
-        collect_quality_metrics_min_tokens: args.collect_quality_metrics_min_tokens,
-        output_tokens_threshold_min: args.quality_output_tokens_threshold_min,
-        output_compression_threshold_max: args.quality_output_compression_threshold_max,
-        output_degeneracy_threshold_min: args.quality_output_degeneracy_threshold_min,
-        output_repetition_1gram_threshold_min: args.quality_output_repetition_1gram_threshold_min,
-        output_repetition_2gram_threshold_min: args.quality_output_repetition_2gram_threshold_min,
-        output_repetition_3gram_threshold_min: args.quality_output_repetition_3gram_threshold_min,
-        median_logprob_threshold_max: args.quality_median_logprob_threshold_max,
-    }
+    startup::run(args).await
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use pylon_lib::{
+        EngineStatsStreamMode, PylonMetrics, PylonQueueMismatchRetryConfig, PylonRetryConfig,
+        PylonRuntimeState, RequestQualityMonitorConfig, TunnelTransportProtocol,
+    };
+    use reqwest::header::HeaderName;
+
+    use super::startup::{
+        DirectTunnelConfigParams, benchmark_fixed_last_mean_input_tps_from_args,
+        build_direct_tunnel_config, effective_cluster_id, normalize_base_url,
+        pylon_queue_mismatch_retry_config_from_args, pylon_retry_config_from_args,
+        request_quality_monitor_config_from_args, stats_collector_config_from_args,
+    };
     use super::*;
 
     fn parse_args(extra: &[&str]) -> Args {
@@ -757,12 +435,9 @@ mod tests {
         let args = parse_args(&["--benchmark-fixed-last-mean-input-tps", "2200"]);
         let fixed_last_mean_input_tps = benchmark_fixed_last_mean_input_tps_from_args(&args)
             .expect("fixed benchmark input TPS should parse");
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
         let config = stats_collector_config_from_args(
             &args,
             "http://127.0.0.1:8090",
-            metrics,
-            QueueAdmissionTracker::default(),
             fixed_last_mean_input_tps,
         );
 
@@ -780,14 +455,7 @@ mod tests {
     fn engine_stats_stream_defaults_to_auto_mode_and_v1_path() {
         let args = parse_args(&[]);
         let upstream = normalize_base_url(&args.upstream_http_base_url);
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let metrics_config = stats_collector_config_from_args(
-            &args,
-            &upstream,
-            metrics,
-            QueueAdmissionTracker::default(),
-            None,
-        );
+        let metrics_config = stats_collector_config_from_args(&args, &upstream, None);
 
         assert_eq!(args.engine_stats_stream, EngineStatsStreamMode::Auto);
         assert_eq!(args.engine_stats_stream_path, "/pylon/v1/stats/stream");
@@ -802,14 +470,7 @@ mod tests {
     fn engine_stats_stream_can_be_disabled() {
         let args = parse_args(&["--engine-stats-stream", "off"]);
         let upstream = normalize_base_url(&args.upstream_http_base_url);
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let metrics_config = stats_collector_config_from_args(
-            &args,
-            &upstream,
-            metrics,
-            QueueAdmissionTracker::default(),
-            None,
-        );
+        let metrics_config = stats_collector_config_from_args(&args, &upstream, None);
 
         assert_eq!(args.engine_stats_stream, EngineStatsStreamMode::Off);
         assert!(metrics_config.kv_cache_stats_url.is_none());
@@ -820,14 +481,7 @@ mod tests {
     fn kv_cache_stats_path_enables_explicit_kv_cache_polling() {
         let args = parse_args(&["--kv-cache-stats-path", "/kv-cache/stats"]);
         let upstream = normalize_base_url(&args.upstream_http_base_url);
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let metrics_config = stats_collector_config_from_args(
-            &args,
-            &upstream,
-            metrics,
-            QueueAdmissionTracker::default(),
-            None,
-        );
+        let metrics_config = stats_collector_config_from_args(&args, &upstream, None);
 
         assert_eq!(
             metrics_config.kv_cache_stats_url,
@@ -839,14 +493,7 @@ mod tests {
     fn required_engine_stats_stream_disables_openai_fallback_stats() {
         let args = parse_args(&["--engine-stats-stream", "required"]);
         let upstream = normalize_base_url(&args.upstream_http_base_url);
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let metrics_config = stats_collector_config_from_args(
-            &args,
-            &upstream,
-            metrics,
-            QueueAdmissionTracker::default(),
-            None,
-        );
+        let metrics_config = stats_collector_config_from_args(&args, &upstream, None);
 
         assert_eq!(args.engine_stats_stream, EngineStatsStreamMode::Required);
         assert!(!metrics_config.openai_fallback_stats_enabled);
@@ -900,6 +547,28 @@ mod tests {
     }
 
     #[test]
+    fn startup_plan_preserves_direct_and_reverse_registration_inputs() {
+        let direct = startup::PylonStartupPlan::from_args(&parse_args(&[]))
+            .expect("direct startup plan should build");
+        assert_eq!(
+            direct.direct_tunnel_listen_addr(),
+            Some("127.0.0.1:0".parse().unwrap())
+        );
+        assert_eq!(
+            direct.registration_inference_server_url("quic://127.0.0.1:50072"),
+            "quic://127.0.0.1:50072"
+        );
+
+        let reverse = startup::PylonStartupPlan::from_args(&parse_args(&["--reverse-tunnel"]))
+            .expect("reverse startup plan should build");
+        assert_eq!(reverse.direct_tunnel_listen_addr(), None);
+        assert_eq!(
+            reverse.registration_inference_server_url("quic://ignored"),
+            "http://127.0.0.1:8090"
+        );
+    }
+
+    #[test]
     fn direct_tunnel_config_propagates_metrics() {
         let metrics = PylonMetrics::new().expect("metrics should initialize");
 
@@ -913,7 +582,7 @@ mod tests {
             tunnel_protocol: TunnelTransportProtocol::Http3,
             retry: PylonRetryConfig::default(),
             queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-            queue_tracker: QueueAdmissionTracker::default(),
+            runtime_state: PylonRuntimeState::default(),
             request_quality_monitor: RequestQualityMonitorConfig::default(),
             metrics: metrics.clone(),
         });
@@ -950,7 +619,7 @@ mod tests {
             tunnel_protocol: TunnelTransportProtocol::Custom,
             retry: PylonRetryConfig::default(),
             queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-            queue_tracker: QueueAdmissionTracker::default(),
+            runtime_state: PylonRuntimeState::default(),
             request_quality_monitor: request_quality_monitor.clone(),
             metrics,
         });

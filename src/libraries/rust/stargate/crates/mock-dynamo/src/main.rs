@@ -16,6 +16,9 @@
 mod kv_cache;
 mod openai;
 mod stats_stream;
+// mock-dynamo is an integration fixture, so its runtime image intentionally
+// exposes deterministic controls used by deployed behavior tests.
+mod test_control;
 mod timing;
 
 use std::sync::Arc;
@@ -23,7 +26,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use clap::Parser;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Semaphore, broadcast};
@@ -36,6 +39,8 @@ use kv_cache::*;
 use openai::*;
 #[cfg(test)]
 use stats_stream::*;
+#[cfg(test)]
+use test_control::*;
 #[cfg(test)]
 use timing::*;
 
@@ -100,6 +105,7 @@ struct AppState {
     health_delay: Duration,
     kv_cache: Arc<Mutex<kv_cache::KvCacheState>>,
     stats_events: broadcast::Sender<stats_stream::StatsStreamEvent>,
+    test_control: test_control::TestControlState,
 }
 
 #[tokio::main]
@@ -131,6 +137,7 @@ async fn main() -> Result<()> {
             args.kv_cache_capacity_tokens,
         ))),
         stats_events,
+        test_control: test_control::TestControlState::default(),
     };
 
     let app = Router::new()
@@ -139,6 +146,11 @@ async fn main() -> Result<()> {
         .route("/v1/embeddings", post(openai::embeddings))
         .route("/pylon/v1/stats/stream", get(stats_stream::stats_stream))
         .route("/kv-cache/stats", get(openai::kv_cache_stats))
+        .route(
+            "/test-control/models/{model}",
+            put(test_control::update_model_test_control),
+        )
+        .route("/test-control", get(test_control::test_control_snapshot))
         .route("/health", get(openai::health))
         .with_state(state);
 

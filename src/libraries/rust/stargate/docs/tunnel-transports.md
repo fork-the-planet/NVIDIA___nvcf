@@ -57,10 +57,24 @@ endpoint so `InferenceServerAck.reverse_tunnel_pylon_dial_addr` tells pylon
 where to dial while `reverse_tunnel_target` remains the per-pod QUIC
 SNI/routing identity.
 
+When a reverse-tunnel dial address resolves to more than one socket address,
+pylon and the WebTransport L7 proxy try IPv4 candidates first for compatibility,
+then IPv6 candidates, preserving DNS order within each family. They retry those
+candidates sequentially and bind each QUIC client endpoint in the matching
+address family. This is deterministic failover, not a racing Happy Eyeballs
+strategy.
+
 The local overlay mirrors the split with ClusterIP Services whose service ports
-(`443` and `8080`) differ from the router pod ports (`50071` and `50072`) so
-NetworkPolicy checks can verify traffic is admitted only on the router pod
-ports.
+(`443` and `8080`) differ from the router pod ports (`50071` and `50072`).
+
+### Development-Only Built-In Peer Relay
+
+The built-in relay that sends backend gRPC and reverse-QUIC traffic from one
+Stargate pod to another is a development test path, not a production transport
+choice. `--enable-dev-peer-forwarding` is CLI-only and defaults to `false`; it
+requires pod identity and DNS discovery, emits a startup warning, and must not
+be present in production manifests. Use `stargate-k8s-router` or the applicable
+L4/L7 path above for production backend traffic.
 
 Frontend services are unaffected:
 

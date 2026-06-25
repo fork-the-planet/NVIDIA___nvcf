@@ -132,7 +132,7 @@ mod tests {
         );
         assert_eq!(plans[1].protos, ["proto/llm_gateway.proto"]);
         assert_eq!(plans[1].includes, ["proto"]);
-        assert!(!plans[1].build_server);
+        assert!(plans[1].build_server);
         assert!(plans[1].type_attributes.is_empty());
         assert!(plans[1].field_attributes.is_empty());
         assert_eq!(crate::build_script::planned_proto_compile_count(), 2);

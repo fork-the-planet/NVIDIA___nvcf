@@ -15,9 +15,14 @@
 
 use std::path::PathBuf;
 use std::str;
+use std::sync::Arc;
 
 use anyhow::Context;
 use sonic_rs::JsonValueTrait;
+
+mod client_credentials;
+
+pub use client_credentials::ClientCredentialsProvider;
 
 /// Provides an authentication token from a configured source.
 ///
@@ -37,9 +42,26 @@ pub enum AuthTokenProvider {
     /// For example, `vec!["nvcfApiToken"]` reads a top-level key, while
     /// `vec!["auth", "token"]` reads a nested value.
     JsonFile { path: PathBuf, key: Vec<String> },
+    /// OAuth2 client-credentials grant: exchanges a client id/secret for a
+    /// short-lived token. See [`ClientCredentialsProvider`].
+    ClientCredentials(Arc<ClientCredentialsProvider>),
 }
 
 impl AuthTokenProvider {
+    /// OAuth2 client-credentials provider minting tokens with `scope` at
+    /// `<provider_host>/token`, reading the id/secret from `credentials_path`.
+    pub fn client_credentials(
+        provider_host: &str,
+        credentials_path: PathBuf,
+        scope: impl Into<String>,
+    ) -> Self {
+        Self::ClientCredentials(Arc::new(ClientCredentialsProvider::new(
+            provider_host,
+            credentials_path,
+            scope,
+        )))
+    }
+
     /// Resolves the current token value from the configured source.
     ///
     /// For file-backed variants the file is read on every call. Tokens are
@@ -67,6 +89,7 @@ impl AuthTokenProvider {
                     .ok_or_else(|| anyhow::anyhow!("token value at key path is not a string"))?;
                 Ok(s.to_owned())
             }
+            Self::ClientCredentials(provider) => provider.resolve().await,
         }
     }
 }

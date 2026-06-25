@@ -14,20 +14,26 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::stats::PylonMetrics;
-use crate::stats::token_metrics::{SNAPSHOT_THRESHOLD, TpsDistribution};
-use futures::future::join_all;
+#[cfg(test)]
 use reqwest::StatusCode;
-use serde::Deserialize;
-use stargate_protocol::tunnel_contract::{HEADER_INPUT_TOKENS, HEADER_MODEL, HEADER_REQUEST_ID};
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
-const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-const CALIBRATION_PROMPT_UNITS_FLOOR: usize = 256;
+mod calibration;
+mod lifecycle;
+mod upstream;
+
+pub(crate) use calibration::run_assigned_cluster_calibration;
+#[cfg(test)]
+use calibration::*;
+pub(crate) use lifecycle::start_bringup_supervisor;
+#[cfg(test)]
+use lifecycle::*;
+pub(crate) use upstream::BringupError;
+#[cfg(test)]
+use upstream::*;
+
 const DEFAULT_ACTIVE_CANARY_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_CANARY_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CANARY_MAX_GENERATION_THRESHOLD: u32 = 237;
@@ -35,8 +41,6 @@ const DEFAULT_CALIBRATION_REQUESTS: usize = 5;
 const DEFAULT_CALIBRATION_PROMPT_UNITS: usize = 4096;
 const DEFAULT_CALIBRATION_MAX_CONCURRENCY: usize = 4;
 const DEFAULT_CALIBRATION_TIMEOUT: Duration = Duration::from_secs(30);
-
-static BRINGUP_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct BringupConfig {
@@ -72,631 +76,12 @@ pub(crate) enum ModelBringupState {
     AdvertisingActive,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum BringupLifecycleState {
-    #[default]
-    Initializing,
-    Active,
-    Recovering,
-}
-
-impl BringupLifecycleState {
-    fn next_action(self) -> BringupLifecycleAction {
-        match self {
-            Self::Recovering => BringupLifecycleAction::RunRecoveryCanary,
-            Self::Active => BringupLifecycleAction::AdvertiseActive,
-            Self::Initializing => BringupLifecycleAction::AdvertiseInitialActive,
-        }
-    }
-
-    fn complete_initial_bringup(&mut self) {
-        match self {
-            Self::Initializing => *self = Self::Active,
-            Self::Active => panic!("initial bringup completed after model was already active"),
-            Self::Recovering => panic!("initial bringup completed while recovery was pending"),
-        }
-    }
-
-    fn require_recovery_canary(&mut self) {
-        match self {
-            Self::Active => *self = Self::Recovering,
-            Self::Recovering => {}
-            Self::Initializing => panic!("recovery canary requested before initial bringup"),
-        }
-    }
-
-    fn complete_recovery_canary(&mut self) {
-        match self {
-            Self::Recovering => *self = Self::Active,
-            Self::Initializing => panic!("recovery canary completed before initial bringup"),
-            Self::Active => panic!("recovery canary completed while model was already active"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BringupLifecycleAction {
-    RunRecoveryCanary,
-    AdvertiseActive,
-    AdvertiseInitialActive,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct BringupTaskConfig {
     pub upstream_http_base_url: String,
     pub model_id: String,
     pub config: BringupConfig,
     pub metrics: Option<Arc<PylonMetrics>>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct BringupModelUpdate {
-    pub model_id: String,
-    pub state: ModelBringupState,
-}
-
-pub(crate) fn start_bringup_supervisor(
-    task_configs: Vec<BringupTaskConfig>,
-    lifecycle_tx: flume::Sender<BringupModelUpdate>,
-    stop_rx: watch::Receiver<bool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut tasks = Vec::new();
-        for task_config in task_configs {
-            let task = tokio::spawn(run_bringup_task(
-                task_config,
-                lifecycle_tx.clone(),
-                stop_rx.clone(),
-            ));
-            tasks.push(task);
-        }
-
-        let mut stop_rx = stop_rx;
-        loop {
-            if *stop_rx.borrow() {
-                break;
-            }
-            if stop_rx.changed().await.is_err() {
-                break;
-            }
-        }
-
-        for task in tasks {
-            task.abort();
-        }
-    })
-}
-
-async fn run_bringup_task(
-    task_config: BringupTaskConfig,
-    lifecycle_tx: flume::Sender<BringupModelUpdate>,
-    stop_rx: watch::Receiver<bool>,
-) {
-    let BringupTaskConfig {
-        upstream_http_base_url,
-        model_id,
-        config,
-        metrics: _,
-    } = task_config;
-    let http_client = reqwest::Client::new();
-    let mut stop_rx = stop_rx;
-    let mut lifecycle = BringupLifecycleState::default();
-
-    if !config.enabled {
-        let _ = lifecycle_tx
-            .send_async(BringupModelUpdate {
-                model_id,
-                state: ModelBringupState::AdvertisingActive,
-            })
-            .await;
-        return;
-    }
-
-    loop {
-        if *stop_rx.borrow() {
-            return;
-        }
-
-        if !check_upstream_health(&http_client, &upstream_http_base_url, config.canary_timeout)
-            .await
-        {
-            let _ = lifecycle_tx
-                .send_async(BringupModelUpdate {
-                    model_id: model_id.clone(),
-                    state: ModelBringupState::ConnectingUnavailable,
-                })
-                .await;
-            if wait_or_stop(&mut stop_rx, CONNECT_RETRY_INTERVAL).await {
-                return;
-            }
-            continue;
-        }
-
-        match lifecycle.next_action() {
-            BringupLifecycleAction::RunRecoveryCanary => {
-                let _ = lifecycle_tx
-                    .send_async(BringupModelUpdate {
-                        model_id: model_id.clone(),
-                        state: ModelBringupState::Recovering,
-                    })
-                    .await;
-
-                match send_canary_request(
-                    &http_client,
-                    &upstream_http_base_url,
-                    &model_id,
-                    config.canary_timeout,
-                    config.canary_max_generation_threshold,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        lifecycle.complete_recovery_canary();
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(model_id, error = %error, "bringup recovery canary failed");
-                        if wait_or_stop(&mut stop_rx, CONNECT_RETRY_INTERVAL).await {
-                            return;
-                        }
-                        continue;
-                    }
-                }
-            }
-            BringupLifecycleAction::AdvertiseActive => {
-                let _ = lifecycle_tx
-                    .send_async(BringupModelUpdate {
-                        model_id: model_id.clone(),
-                        state: ModelBringupState::AdvertisingActive,
-                    })
-                    .await;
-            }
-            BringupLifecycleAction::AdvertiseInitialActive => {
-                let _ = lifecycle_tx
-                    .send_async(BringupModelUpdate {
-                        model_id: model_id.clone(),
-                        state: ModelBringupState::AdvertisingActive,
-                    })
-                    .await;
-                lifecycle.complete_initial_bringup();
-            }
-        }
-
-        if config.active_canary_interval.is_zero() {
-            loop {
-                if *stop_rx.borrow() {
-                    return;
-                }
-                if stop_rx.changed().await.is_err() {
-                    return;
-                }
-            }
-        }
-
-        let mut canary_interval = tokio::time::interval(config.active_canary_interval);
-        canary_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        canary_interval.tick().await;
-
-        loop {
-            tokio::select! {
-                _ = stop_rx.changed() => {
-                    if *stop_rx.borrow() {
-                        return;
-                    }
-                }
-                _ = canary_interval.tick() => {
-                    match send_canary_request(
-                        &http_client,
-                        &upstream_http_base_url,
-                        &model_id,
-                        config.canary_timeout,
-                        config.canary_max_generation_threshold,
-                    ).await {
-                        Ok(()) => {}
-                        Err(error) => {
-                            tracing::warn!(model_id, error = %error, "active canary failed");
-                            lifecycle.require_recovery_canary();
-                            let next_state = if check_upstream_health(
-                                &http_client,
-                                &upstream_http_base_url,
-                                config.canary_timeout,
-                            ).await {
-                                ModelBringupState::Recovering
-                            } else {
-                                ModelBringupState::ConnectingUnavailable
-                            };
-                            let _ = lifecycle_tx
-                                .send_async(BringupModelUpdate {
-                                    model_id: model_id.clone(),
-                                    state: next_state,
-                                })
-                                .await;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn wait_or_stop(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -> bool {
-    tokio::select! {
-        _ = stop_rx.changed() => *stop_rx.borrow(),
-        _ = tokio::time::sleep(duration) => *stop_rx.borrow(),
-    }
-}
-
-pub(crate) async fn run_assigned_cluster_calibration(
-    task_config: &BringupTaskConfig,
-) -> Result<f64, BringupError> {
-    let client = reqwest::Client::new();
-    let started_at = Instant::now();
-    let result = if check_upstream_health(
-        &client,
-        &task_config.upstream_http_base_url,
-        task_config.config.canary_timeout,
-    )
-    .await
-    {
-        run_calibration(
-            &client,
-            &task_config.upstream_http_base_url,
-            &task_config.model_id,
-            &task_config.config,
-        )
-        .await
-    } else {
-        Err(BringupError::UnhealthyUpstream)
-    };
-    if let Some(metrics) = task_config.metrics.as_deref() {
-        metrics.observe_model_calibration_duration(
-            &task_config.model_id,
-            started_at.elapsed(),
-            result.is_ok(),
-        );
-    }
-    result
-}
-
-async fn run_calibration(
-    http_client: &reqwest::Client,
-    upstream_http_base_url: &str,
-    model_id: &str,
-    config: &BringupConfig,
-) -> Result<f64, BringupError> {
-    if config.calibration_requests == 0 {
-        return Ok(0.0);
-    }
-
-    let mut distribution = TpsDistribution::default();
-    let mut last_error = None;
-
-    for batch in calibration_plan(config) {
-        match send_calibration_batch_with_prompt_backoff(
-            http_client,
-            upstream_http_base_url,
-            model_id,
-            config.calibration_timeout,
-            batch,
-        )
-        .await
-        {
-            Ok(observed_input_tps_samples) => {
-                for sample in observed_input_tps_samples {
-                    distribution.update(sample);
-                }
-            }
-            Err(BringupError::PromptTooLong) => {
-                last_error = Some(BringupError::PromptTooLong);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    let required_samples = config.calibration_requests.min(SNAPSHOT_THRESHOLD);
-    if distribution.count >= required_samples {
-        Ok(distribution.mean)
-    } else if let Some(error) = last_error {
-        Err(error)
-    } else {
-        Err(BringupError::InsufficientCalibrationSamples {
-            valid_samples: distribution.count,
-        })
-    }
-}
-
-async fn send_calibration_batch_with_prompt_backoff(
-    http_client: &reqwest::Client,
-    upstream_http_base_url: &str,
-    model_id: &str,
-    timeout: Duration,
-    batch: CalibrationBatch,
-) -> Result<Vec<f64>, BringupError> {
-    let mut prompt_units = batch.prompt_units.max(CALIBRATION_PROMPT_UNITS_FLOOR);
-
-    loop {
-        match send_calibration_batch(
-            http_client,
-            upstream_http_base_url,
-            model_id,
-            timeout,
-            prompt_units,
-            batch.concurrency,
-        )
-        .await
-        {
-            Err(BringupError::PromptTooLong) if prompt_units > CALIBRATION_PROMPT_UNITS_FLOOR => {
-                let next_prompt_units = ((prompt_units + CALIBRATION_PROMPT_UNITS_FLOOR) / 2)
-                    .max(CALIBRATION_PROMPT_UNITS_FLOOR);
-                if next_prompt_units >= prompt_units {
-                    return Err(BringupError::PromptTooLong);
-                }
-                prompt_units = next_prompt_units;
-            }
-            result => return result,
-        }
-    }
-}
-
-async fn check_upstream_health(
-    http_client: &reqwest::Client,
-    upstream_http_base_url: &str,
-    timeout: Duration,
-) -> bool {
-    let health_url = format!("{}/health", upstream_http_base_url.trim_end_matches('/'));
-    matches!(
-        http_client.get(health_url).timeout(timeout).send().await,
-        Ok(response) if response.status().is_success()
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CalibrationBatch {
-    prompt_units: usize,
-    concurrency: usize,
-}
-
-fn calibration_plan(config: &BringupConfig) -> Vec<CalibrationBatch> {
-    let requests = config.calibration_requests;
-    if requests == 0 {
-        return Vec::new();
-    }
-
-    let max_prompt_units = config
-        .calibration_prompt_units
-        .max(CALIBRATION_PROMPT_UNITS_FLOOR);
-    // A zero calibration concurrency override degrades to serial calibration.
-    let max_concurrency = config.calibration_max_concurrency.max(1).min(requests);
-    if requests == 1 {
-        return vec![CalibrationBatch {
-            prompt_units: max_prompt_units,
-            concurrency: 1,
-        }];
-    }
-
-    if max_concurrency == 1 {
-        return (0..requests)
-            .map(|index| {
-                let prompt_units = interpolate_usize(
-                    CALIBRATION_PROMPT_UNITS_FLOOR,
-                    max_prompt_units,
-                    index,
-                    requests - 1,
-                );
-                let concurrency = interpolate_usize(1, max_concurrency, index, requests - 1);
-                CalibrationBatch {
-                    prompt_units,
-                    concurrency,
-                }
-            })
-            .collect();
-    }
-
-    let final_concurrency = max_concurrency.min(requests - 1);
-    let single_request_runs = requests - final_concurrency;
-    let mut batches = Vec::with_capacity(single_request_runs + 1);
-    for index in 0..single_request_runs {
-        batches.push(CalibrationBatch {
-            prompt_units: interpolate_usize(
-                CALIBRATION_PROMPT_UNITS_FLOOR,
-                max_prompt_units,
-                index,
-                single_request_runs,
-            ),
-            concurrency: 1,
-        });
-    }
-    batches.push(CalibrationBatch {
-        prompt_units: max_prompt_units,
-        concurrency: final_concurrency,
-    });
-
-    batches
-}
-
-fn interpolate_usize(start: usize, end: usize, index: usize, last_index: usize) -> usize {
-    if last_index == 0 {
-        return end;
-    }
-    let span = end - start;
-    start + (span * index / last_index)
-}
-
-async fn send_calibration_batch(
-    http_client: &reqwest::Client,
-    upstream_http_base_url: &str,
-    model_id: &str,
-    timeout: Duration,
-    prompt_units: usize,
-    concurrency: usize,
-) -> Result<Vec<f64>, BringupError> {
-    assert!(concurrency > 0, "calibration batch concurrency must be > 0");
-    let prompt = "1".repeat(prompt_units);
-    let request = serde_json::json!({
-        "model": model_id,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1,
-        "seed": 33,
-        "temperature": 0.7,
-        "top_p": 1.0,
-        "stream": false,
-    });
-
-    let batch_started_at = Instant::now();
-    let requests = (0..concurrency).map(|_| {
-        let request = request.clone();
-        async move {
-            send_completion_request(http_client, upstream_http_base_url, timeout, request).await?;
-            Ok::<_, BringupError>(())
-        }
-    });
-    let _: Vec<()> = join_all(requests)
-        .await
-        .into_iter()
-        .collect::<Result<_, _>>()?;
-    // Sub-millisecond localhost tests should not report infinite calibrated throughput.
-    let elapsed = batch_started_at.elapsed().max(Duration::from_millis(1));
-    let aggregate_input_tps = (prompt_units as f64 * concurrency as f64) / elapsed.as_secs_f64();
-    Ok(vec![aggregate_input_tps; concurrency])
-}
-
-async fn send_canary_request(
-    http_client: &reqwest::Client,
-    upstream_http_base_url: &str,
-    model_id: &str,
-    timeout: Duration,
-    canary_max_generation_threshold: u32,
-) -> Result<(), BringupError> {
-    let request = serde_json::json!({
-        "model": model_id,
-        "messages": [{"role": "user", "content": "1+1="}],
-        "max_tokens": canary_max_generation_threshold,
-        "seed": 33,
-        "temperature": 0.7,
-        "top_p": 1.0,
-        "stream": false,
-    });
-
-    let completion =
-        send_completion_request(http_client, upstream_http_base_url, timeout, request).await?;
-    if completion.usage.completion_tokens == canary_max_generation_threshold {
-        return Err(BringupError::RunawayGeneration {
-            tokens: completion.usage.completion_tokens,
-        });
-    }
-    Ok(())
-}
-
-async fn send_completion_request(
-    http_client: &reqwest::Client,
-    upstream_http_base_url: &str,
-    timeout: Duration,
-    request: serde_json::Value,
-) -> Result<ChatCompletionResponse, BringupError> {
-    let request_id = BRINGUP_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let request_url = format!(
-        "{}/v1/chat/completions",
-        upstream_http_base_url.trim_end_matches('/')
-    );
-    let response = http_client
-        .post(request_url)
-        .timeout(timeout)
-        .header(HEADER_REQUEST_ID, format!("bringup-{request_id}"))
-        .header(
-            HEADER_MODEL,
-            request
-                .get("model")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default(),
-        )
-        .header(
-            HEADER_INPUT_TOKENS,
-            request
-                .get("messages")
-                .and_then(|value| value.as_array())
-                .and_then(|messages| messages.first())
-                .and_then(|message| message.get("content"))
-                .and_then(|value| value.as_str())
-                .map(|text| text.len().to_string())
-                .unwrap_or_else(|| "1".to_string()),
-        )
-        .json(&request)
-        .send()
-        .await?;
-
-    let status = response.status();
-    let body = response.bytes().await?;
-    if status.is_success() {
-        return serde_json::from_slice(&body)
-            .map_err(|error| BringupError::InvalidResponse(error.to_string()));
-    }
-
-    let message = extract_error_message(&body);
-    if is_prompt_too_long(status, &message) {
-        return Err(BringupError::PromptTooLong);
-    }
-    Err(BringupError::Api {
-        status,
-        message: message.unwrap_or_else(|| String::from_utf8_lossy(&body).into_owned()),
-    })
-}
-
-fn extract_error_message(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<ErrorResponse>(body)
-        .ok()
-        .map(|error| error.error.message)
-}
-
-fn is_prompt_too_long(status: StatusCode, message: &Option<String>) -> bool {
-    if !status.is_client_error() {
-        return false;
-    }
-    let Some(message) = message else {
-        return false;
-    };
-    let message = message.to_ascii_lowercase();
-    message.contains("prompt too long")
-        || message.contains("context length")
-        || message.contains("maximum context")
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum BringupError {
-    #[error("http request failed: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("upstream health check failed before assigned calibration")]
-    UnhealthyUpstream,
-    #[error("upstream rejected request ({status}): {message}")]
-    Api { status: StatusCode, message: String },
-    #[error("calibration prompt too long")]
-    PromptTooLong,
-    #[error("runaway generation detected at completion_tokens={tokens}")]
-    RunawayGeneration { tokens: u32 },
-    #[error("invalid completion response: {0}")]
-    InvalidResponse(String),
-    #[error("calibration produced only {valid_samples} valid samples")]
-    InsufficientCalibrationSamples { valid_samples: usize },
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    usage: Usage,
-}
-
-#[derive(Debug, Deserialize)]
-struct Usage {
-    completion_tokens: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct ErrorResponse {
-    error: ErrorBody,
-}
-
-#[derive(Debug, Deserialize)]
-struct ErrorBody {
-    message: String,
 }
 
 #[cfg(test)]
@@ -711,8 +96,38 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
     use serde_json::Value;
+    use stargate_proto::pb::InferenceServerStatus;
     use tokio::net::TcpListener;
-    use tokio::sync::{Barrier, Mutex, watch};
+    use tokio::sync::{Barrier, Mutex, Notify};
+    use tokio_util::sync::CancellationToken;
+
+    use crate::runtime_state::PylonRuntimeState;
+
+    async fn wait_for_bringup_state(
+        runtime_state: &PylonRuntimeState,
+        expected: ModelBringupState,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut poll = tokio::time::interval(Duration::from_millis(1));
+            loop {
+                poll.tick().await;
+                if runtime_state.model_bringup("test-model") == Some(expected) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("bringup task should publish expected state");
+    }
+
+    async fn wait_for_bringup_notification(notification: &Notify, expected_event: &str) {
+        if tokio::time::timeout(Duration::from_secs(2), notification.notified())
+            .await
+            .is_err()
+        {
+            panic!("bringup task should {expected_event}");
+        }
+    }
 
     #[test]
     fn detects_prompt_too_long_errors() {
@@ -750,6 +165,14 @@ mod tests {
 
         lifecycle.complete_recovery_canary();
         assert_eq!(lifecycle, BringupLifecycleState::Active);
+    }
+
+    #[tokio::test]
+    async fn wait_or_stop_returns_when_cancelled() {
+        let stop = CancellationToken::new();
+        stop.cancel();
+
+        assert!(wait_or_stop(&stop, Duration::from_secs(60)).await);
     }
 
     #[tokio::test]
@@ -944,63 +367,15 @@ mod tests {
         assert_eq!(max_in_flight.load(Ordering::SeqCst), 3);
     }
 
-    #[tokio::test]
-    async fn concurrent_calibration_batch_reports_aggregate_backend_capacity() {
-        let serial_base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: None,
-            calibration_barrier: None,
-            completion_delay: Some(Duration::from_millis(100)),
-            in_flight: None,
-            max_in_flight: None,
-            canary_failures_remaining: None,
-            health_ok: None,
-        })
-        .await;
-        let in_flight = Arc::new(AtomicUsize::new(0));
-        let max_in_flight = Arc::new(AtomicUsize::new(0));
-        let concurrent_base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: None,
-            calibration_barrier: Some(Arc::new(Barrier::new(3))),
-            completion_delay: Some(Duration::from_millis(100)),
-            in_flight: Some(in_flight),
-            max_in_flight: Some(max_in_flight.clone()),
-            canary_failures_remaining: None,
-            health_ok: None,
-        })
-        .await;
-        let client = reqwest::Client::new();
+    #[test]
+    fn calibration_batch_aggregate_capacity_scales_with_concurrency() {
+        let serial = aggregate_input_tps(256, 1, Duration::from_millis(100));
+        let concurrent = aggregate_input_tps(256, 3, Duration::from_millis(100));
+        let immediate = aggregate_input_tps(256, 3, Duration::ZERO);
 
-        let serial = send_calibration_batch(
-            &client,
-            &serial_base_url,
-            "test-model",
-            Duration::from_secs(1),
-            256,
-            1,
-        )
-        .await
-        .expect("serial calibration should succeed");
-        let concurrent = send_calibration_batch(
-            &client,
-            &concurrent_base_url,
-            "test-model",
-            Duration::from_secs(1),
-            256,
-            3,
-        )
-        .await
-        .expect("concurrent calibration should succeed");
-
-        let serial_tps = serial[0];
-        let concurrent_mean_tps = concurrent.iter().copied().sum::<f64>() / concurrent.len() as f64;
-        assert_eq!(concurrent.len(), 3);
-        assert_eq!(max_in_flight.load(Ordering::SeqCst), 3);
-        assert!(
-            concurrent_mean_tps > serial_tps * 1.8,
-            "concurrent calibration should report aggregate backend capacity: serial={serial_tps}, concurrent={concurrent_mean_tps}"
-        );
+        assert!((serial - 2_560.0).abs() < f64::EPSILON);
+        assert!((concurrent - 7_680.0).abs() < f64::EPSILON);
+        assert!(immediate.is_finite());
     }
 
     #[tokio::test]
@@ -1083,23 +458,69 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_canary_runs_after_initial_health_activation() {
-        let canary_failures_remaining = Arc::new(AtomicUsize::new(1));
-        let base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: None,
-            calibration_barrier: None,
-            completion_delay: None,
-            in_flight: None,
-            max_in_flight: None,
-            canary_failures_remaining: Some(canary_failures_remaining),
-            health_ok: None,
-        })
-        .await;
-        let (lifecycle_tx, lifecycle_rx) = flume::bounded(32);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let canary_requests = Arc::new(AtomicUsize::new(0));
+        let initial_canary_started = Arc::new(Notify::new());
+        let release_initial_canary = Arc::new(Notify::new());
+        let recovery_canary_started = Arc::new(Notify::new());
+        let release_recovery_canary = Arc::new(Notify::new());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_canary_requests = canary_requests.clone();
+        let server_initial_canary_started = initial_canary_started.clone();
+        let server_release_initial_canary = release_initial_canary.clone();
+        let server_recovery_canary_started = recovery_canary_started.clone();
+        let server_release_recovery_canary = release_recovery_canary.clone();
+        let server = tokio::spawn(async move {
+            let app = Router::new()
+                .route("/health", get(|| async { StatusCode::OK }))
+                .route(
+                    "/v1/chat/completions",
+                    post(move |Json(request): Json<Value>| {
+                        let canary_requests = server_canary_requests.clone();
+                        let initial_canary_started = server_initial_canary_started.clone();
+                        let release_initial_canary = server_release_initial_canary.clone();
+                        let recovery_canary_started = server_recovery_canary_started.clone();
+                        let release_recovery_canary = server_release_recovery_canary.clone();
+                        async move {
+                            let prompt = request
+                                .get("messages")
+                                .and_then(|value| value.as_array())
+                                .and_then(|messages| messages.first())
+                                .and_then(|message| message.get("content"))
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            let completion_tokens = if prompt == "1+1=" {
+                                match canary_requests.fetch_add(1, Ordering::SeqCst) {
+                                    0 => {
+                                        initial_canary_started.notify_one();
+                                        release_initial_canary.notified().await;
+                                        7
+                                    }
+                                    1 => {
+                                        recovery_canary_started.notify_one();
+                                        release_recovery_canary.notified().await;
+                                        1
+                                    }
+                                    _ => 1,
+                                }
+                            } else {
+                                1
+                            };
+                            Json(serde_json::json!({
+                                "usage": {"completion_tokens": completion_tokens}
+                            }))
+                            .into_response()
+                        }
+                    }),
+                );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let runtime_state =
+            PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()]);
+        let stop = CancellationToken::new();
         let task = tokio::spawn(run_bringup_task(
             BringupTaskConfig {
-                upstream_http_base_url: base_url,
+                upstream_http_base_url: format!("http://{addr}"),
                 model_id: "test-model".to_string(),
                 config: BringupConfig {
                     calibration_requests: 0,
@@ -1110,39 +531,145 @@ mod tests {
                 },
                 metrics: None,
             },
-            lifecycle_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
-        let mut states = Vec::new();
-        let observed = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let update = lifecycle_rx.recv_async().await.unwrap();
-                states.push(update.state);
-                let active_count = states
-                    .iter()
-                    .filter(|state| **state == ModelBringupState::AdvertisingActive)
-                    .count();
-                if active_count >= 2 && states.contains(&ModelBringupState::Recovering) {
-                    break;
-                }
-            }
-            states
-        })
-        .await
-        .expect("bringup task should recover after one canary failure");
+        wait_for_bringup_notification(&initial_canary_started, "start the initial canary").await;
+        assert_eq!(
+            runtime_state.model_bringup("test-model"),
+            Some(ModelBringupState::AdvertisingActive)
+        );
+        release_initial_canary.notify_one();
 
-        assert!(observed.contains(&ModelBringupState::Recovering));
-        assert!(
-            observed
-                .iter()
-                .filter(|state| **state == ModelBringupState::AdvertisingActive)
-                .count()
-                >= 2
+        wait_for_bringup_notification(&recovery_canary_started, "start the recovery canary").await;
+        assert_eq!(
+            runtime_state.model_bringup("test-model"),
+            Some(ModelBringupState::Recovering)
+        );
+        release_recovery_canary.notify_one();
+
+        wait_for_bringup_state(&runtime_state, ModelBringupState::AdvertisingActive).await;
+
+        stop.cancel();
+        let task_result = task.await;
+        server.abort();
+        task_result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_bringup_stops_when_cancelled() {
+        let base_url = spawn_test_server(TestServerState {
+            completion_tokens: 1,
+            prompt_too_long_above: None,
+            calibration_barrier: None,
+            completion_delay: None,
+            in_flight: None,
+            max_in_flight: None,
+            canary_failures_remaining: None,
+            health_ok: None,
+        })
+        .await;
+        let runtime_state =
+            PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()]);
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(run_bringup_task(
+            BringupTaskConfig {
+                upstream_http_base_url: base_url,
+                model_id: "test-model".to_string(),
+                config: BringupConfig {
+                    calibration_requests: 0,
+                    active_canary_interval: Duration::from_secs(60),
+                    canary_timeout: Duration::from_secs(1),
+                    ..BringupConfig::default()
+                },
+                metrics: None,
+            },
+            runtime_state.clone(),
+            stop.clone(),
+        ));
+
+        wait_for_bringup_state(&runtime_state, ModelBringupState::AdvertisingActive).await;
+
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("bringup task should stop when cancelled")
+            .expect("bringup task should not panic");
+    }
+
+    #[tokio::test]
+    async fn disabled_bringup_is_applied_without_ending_supervisor() {
+        let runtime_state =
+            PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()]);
+        let parent_stop = CancellationToken::new();
+        let supervisor = start_bringup_supervisor(
+            &parent_stop,
+            vec![BringupTaskConfig {
+                upstream_http_base_url: "http://127.0.0.1:1".to_string(),
+                model_id: "test-model".to_string(),
+                config: BringupConfig {
+                    enabled: false,
+                    ..BringupConfig::default()
+                },
+                metrics: None,
+            }],
+            runtime_state.clone(),
         );
 
-        let _ = stop_tx.send(true);
-        task.await.unwrap();
+        wait_for_bringup_state(&runtime_state, ModelBringupState::AdvertisingActive).await;
+
+        assert!(
+            !parent_stop.is_cancelled(),
+            "synchronously applied disabled bringup must not end the session"
+        );
+        supervisor.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn bringup_cancellation_interrupts_blocked_health_check() {
+        let health_entered = Arc::new(Barrier::new(2));
+        let server_health_entered = health_entered.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/health",
+                get(move || {
+                    let health_entered = server_health_entered.clone();
+                    async move {
+                        health_entered.wait().await;
+                        std::future::pending::<&'static str>().await
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let runtime_state =
+            PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()]);
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(run_bringup_task(
+            BringupTaskConfig {
+                upstream_http_base_url: format!("http://{addr}"),
+                model_id: "test-model".to_string(),
+                config: BringupConfig {
+                    canary_timeout: Duration::from_secs(60),
+                    ..BringupConfig::default()
+                },
+                metrics: None,
+            },
+            runtime_state,
+            stop.clone(),
+        ));
+        health_entered.wait().await;
+
+        stop.cancel();
+        let stopped = tokio::time::timeout(Duration::from_secs(1), task).await;
+        server.abort();
+
+        stopped
+            .expect("bringup cancellation should interrupt blocked health check")
+            .expect("bringup task should not panic");
     }
 
     #[derive(Clone)]

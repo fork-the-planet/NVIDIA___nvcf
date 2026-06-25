@@ -20,18 +20,21 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bringup::{BringupConfig, BringupModelUpdate, ModelBringupState};
+use crate::bringup::{BringupConfig, ModelBringupState};
 use crate::output_token_parser::OutputTokenParserFactory;
-use crate::queue_admission::{PylonQueueMismatchRetryConfig, QueueAdmissionTracker};
+use crate::queue_admission::PylonQueueMismatchRetryConfig;
 use crate::quic_http_tunnel::{
     PylonRetryConfig, ReverseQuicTunnelHandle, TunnelError, TunnelForwardingConfig,
 };
 use crate::request_quality_monitor::RequestQualityMonitorConfig;
+use crate::runtime_state::PylonRuntimeState;
 use crate::stats::PylonMetrics;
 use stargate_proto::pb::{
-    InferenceServerAck, InferenceServerModelRegistration, InferenceServerStatus, ModelStats,
+    CalibrationState, InferenceServerAck, InferenceServerModelRegistration,
+    InferenceServerRegistration, InferenceServerStatus, ModelCalibrationDirective, ModelStats,
 };
 use stargate_protocol::TunnelTransportProtocol;
+use stargate_runtime::OwnedTask;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -236,18 +239,20 @@ fn test_registration_config() -> InferenceServerRegistrationConfig {
         inference_server_url: "quic://127.0.0.1:8443".to_string(),
         upstream_http_base_url: Some("http://127.0.0.1:8090".to_string()),
         min_update_interval: Duration::from_secs(2),
-        status: InferenceServerStatus::Active,
         reverse_tunnel: false,
+        tls_cert_pem: None,
         quic_insecure: true,
         tunnel_protocol: TunnelTransportProtocol::Custom,
         bringup: BringupConfig::default(),
         output_token_parser_factory: OutputTokenParserFactory,
-        request_observation_tx: None,
+        runtime_state: PylonRuntimeState::new(
+            InferenceServerStatus::Active,
+            &["model-a".to_string()],
+        ),
         request_quality_monitor: RequestQualityMonitorConfig::default(),
         metrics: None,
         retry: PylonRetryConfig::default(),
         queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-        queue_tracker: QueueAdmissionTracker::default(),
         auth_token_provider: None,
     }
 }
@@ -276,6 +281,13 @@ fn registration_start_plan_rejects_invalid_startup_config() {
         Err(ClientError::Config(message)) if message == "stargate seeds are empty"
     ));
 
+    let mut empty_runtime = test_registration_config();
+    empty_runtime.runtime_state = PylonRuntimeState::default();
+    assert!(matches!(
+        RegistrationStartPlan::from_config(&empty_runtime),
+        Err(ClientError::Config(message)) if message == "pylon runtime state has no configured models"
+    ));
+
     let mut missing_upstream = test_registration_config();
     missing_upstream.inference_server_url = "quic://127.0.0.1:8443".to_string();
     missing_upstream.upstream_http_base_url = None;
@@ -297,124 +309,31 @@ fn registration_start_plan_rejects_invalid_startup_config() {
 }
 
 #[tokio::test]
-async fn cancelled_registration_join_wait_aborts_child_task() {
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-    let child = tokio::spawn(async move {
-        let _drop_notifier = DropNotifier(Some(dropped_tx));
-        let _ = entered_tx.send(());
-        std::future::pending::<()>().await;
-    });
+async fn registration_start_preserves_owner_configured_runtime_state() {
+    let runtime_state =
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["model-a".to_string()]);
+    runtime_state.set_model_stats(
+        "model-a",
+        CurrentModelStats {
+            output_tps: 12.5,
+            ..CurrentModelStats::default()
+        },
+    );
+    let mut config = test_registration_config();
+    config.bringup.enabled = false;
+    config.runtime_state = runtime_state.clone();
 
-    entered_rx.await.expect("child should start");
+    let mut client = InferenceServerRegistrationClient::default();
+    client.start(config).expect("registration should start");
 
-    {
-        let wait = await_named_join_handle(
-            NamedJoinHandle::new("pending registration child", child),
-            Duration::from_secs(30),
-        );
-        tokio::pin!(wait);
-        tokio::select! {
-            biased;
-            _ = &mut wait => panic!("pending child should not finish before cancellation"),
-            _ = tokio::task::yield_now() => {}
-        }
-    }
-
-    tokio::time::timeout(Duration::from_secs(1), dropped_rx)
-        .await
-        .expect("cancelled join wait should abort the child")
-        .expect("child drop notifier should send");
-}
-
-#[tokio::test]
-async fn registration_retry_sleep_wakes_on_parent_stop() {
-    let (parent_tx, parent_rx) = watch::channel(false);
-    let (_local_tx, local_rx) = watch::channel(false);
-    let cancel_token = CancellationToken::new();
-    let task_cancel_token = cancel_token.clone();
-
-    let task = tokio::spawn(async move {
-        let mut parent_rx = parent_rx;
-        let mut local_rx = local_rx;
-        sleep_until_registration_stop(
-            &mut parent_rx,
-            &mut local_rx,
-            &task_cancel_token,
-            Duration::from_secs(30),
-        )
-        .await
-    });
-
-    tokio::task::yield_now().await;
-    parent_tx
-        .send(true)
-        .expect("parent stop signal should send");
-
-    let stopped = tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("retry sleep should wake on parent stop")
-        .expect("retry task should not panic");
-    assert!(stopped);
-}
-
-#[tokio::test]
-async fn registration_retry_sleep_wakes_when_parent_stop_channel_closes() {
-    let (parent_tx, parent_rx) = watch::channel(false);
-    let (_local_tx, local_rx) = watch::channel(false);
-    let cancel_token = CancellationToken::new();
-    let task_cancel_token = cancel_token.clone();
-
-    let task = tokio::spawn(async move {
-        let mut parent_rx = parent_rx;
-        let mut local_rx = local_rx;
-        sleep_until_registration_stop(
-            &mut parent_rx,
-            &mut local_rx,
-            &task_cancel_token,
-            Duration::from_secs(30),
-        )
-        .await
-    });
-
-    tokio::task::yield_now().await;
-    // Close the parent stop channel to verify closed watch senders stop retry sleeps.
-    drop(parent_tx);
-
-    let stopped = tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("retry sleep should wake when parent stop channel closes")
-        .expect("retry task should not panic");
-    assert!(stopped);
-}
-
-#[tokio::test]
-async fn registration_retry_sleep_wakes_on_cancel_token() {
-    let (_parent_tx, parent_rx) = watch::channel(false);
-    let (_local_tx, local_rx) = watch::channel(false);
-    let cancel_token = CancellationToken::new();
-    let task_cancel_token = cancel_token.clone();
-
-    let task = tokio::spawn(async move {
-        let mut parent_rx = parent_rx;
-        let mut local_rx = local_rx;
-        sleep_until_registration_stop(
-            &mut parent_rx,
-            &mut local_rx,
-            &task_cancel_token,
-            Duration::from_secs(30),
-        )
-        .await
-    });
-
-    tokio::task::yield_now().await;
-    cancel_token.cancel();
-
-    let stopped = tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("retry sleep should wake on cancel token")
-        .expect("retry task should not panic");
-    assert!(stopped);
+    assert_eq!(
+        runtime_state
+            .model_stats("model-a")
+            .expect("configured model should remain present")
+            .output_tps,
+        12.5
+    );
+    client.stop();
 }
 
 #[test]
@@ -426,21 +345,19 @@ fn reverse_tunnel_registration_advertises_upstream_http_url() {
         inference_server_url: "quic://127.0.0.1:8443".to_string(),
         upstream_http_base_url: Some("http://127.0.0.1:8090".to_string()),
         min_update_interval: Duration::from_secs(2),
-        status: InferenceServerStatus::Active,
         reverse_tunnel: true,
+        tls_cert_pem: None,
         quic_insecure: true,
         tunnel_protocol: TunnelTransportProtocol::Custom,
         bringup: BringupConfig::default(),
         output_token_parser_factory: OutputTokenParserFactory,
-        request_observation_tx: None,
+        runtime_state: PylonRuntimeState::default(),
         request_quality_monitor: RequestQualityMonitorConfig::default(),
         metrics: None,
         retry: PylonRetryConfig::default(),
         queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-        queue_tracker: QueueAdmissionTracker::default(),
         auth_token_provider: None,
     };
-    let cancel_token = CancellationToken::new();
     let (cluster_calibration_directive_tx, _cluster_calibration_directive_rx) = flume::bounded(1);
 
     let task_template = RouterRegistrationTaskTemplate::from_registration_config(
@@ -451,7 +368,6 @@ fn reverse_tunnel_registration_advertises_upstream_http_url() {
             .as_deref()
             .expect("test config includes upstream HTTP base URL"),
         cluster_calibration_directive_tx,
-        &cancel_token,
     );
 
     let task_config = task_template.build_for_router(grpc_endpoint("router-a"));
@@ -479,20 +395,6 @@ fn build_inference_server_registration_includes_cluster_id() {
     assert_eq!(registration.inference_server_id, "client-a");
     assert_eq!(registration.cluster_id, "cluster-shared");
     assert!(registration.coordinated_calibration);
-}
-
-#[test]
-fn coordinated_calibration_registers_with_every_local_state_owner() {
-    let active_routers = BTreeSet::from([
-        grpc_endpoint("http://router-b"),
-        grpc_endpoint("http://router-a"),
-        grpc_endpoint("http://router-c"),
-    ]);
-
-    assert_eq!(
-        desired_registration_routers(&active_routers),
-        active_routers
-    );
 }
 
 #[test]
@@ -674,22 +576,13 @@ fn recursive_watch_discovery_ignores_disconnected_snapshot_cycles() {
 
 #[tokio::test]
 async fn stop_watched_endpoint_signals_and_awaits_task() {
-    let (stop_tx, mut stop_rx) = watch::channel(false);
     let (exited_tx, exited_rx) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(async move {
-        loop {
-            if *stop_rx.borrow() {
-                break;
-            }
-            if stop_rx.changed().await.is_err() {
-                break;
-            }
-        }
+    let task = OwnedTask::spawn("watch stargate endpoint", move |stop| async move {
+        stop.cancelled().await;
         let _ = exited_tx.send(());
     });
     let endpoint = WatchedEndpoint {
         generation: 0,
-        stop_tx,
         task,
         state: WatchEndpointState::Connecting,
     };
@@ -703,7 +596,7 @@ async fn stop_watched_endpoint_signals_and_awaits_task() {
 }
 
 #[tokio::test]
-async fn watch_endpoint_update_send_wakes_on_local_stop_when_channel_is_full() {
+async fn watch_endpoint_update_send_wakes_on_cancellation_when_channel_is_full() {
     let update = |generation| WatchEndpointUpdate {
         watch_url: "stargate.region-b:50071".to_string(),
         generation,
@@ -714,14 +607,14 @@ async fn watch_endpoint_update_send_wakes_on_local_stop_when_channel_is_full() {
         .send(update(1))
         .await
         .expect("seed update should fill channel");
-    let (_parent_tx, mut parent_rx) = watch::channel(false);
-    let (local_tx, mut local_rx) = watch::channel(false);
+    let stop = CancellationToken::new();
+    let task_stop = stop.clone();
 
     let task = tokio::spawn(async move {
-        send_watch_endpoint_update(&updates_tx, update(2), &mut parent_rx, &mut local_rx).await
+        send_watch_endpoint_update(&updates_tx, update(2), &task_stop).await
     });
     tokio::task::yield_now().await;
-    local_tx.send(true).expect("local stop should send");
+    stop.cancel();
 
     let sent = tokio::time::timeout(Duration::from_secs(1), task)
         .await
@@ -737,6 +630,157 @@ async fn watch_endpoint_update_send_wakes_on_local_stop_when_channel_is_full() {
         1
     );
     assert!(updates_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn registration_update_send_wakes_on_cancellation_when_channel_is_full() {
+    let (updates_tx, _updates_rx) = tokio::sync::mpsc::channel(1);
+    updates_tx
+        .send(InferenceServerRegistration::default())
+        .await
+        .expect("seed update should fill channel");
+    let stop = CancellationToken::new();
+    let task_stop = stop.clone();
+
+    let task = tokio::spawn(async move {
+        send_registration_update(
+            &updates_tx,
+            InferenceServerRegistration::default(),
+            &task_stop,
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    stop.cancel();
+
+    let sent = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("registration update send should wake on cancellation")
+        .expect("registration update send should not panic");
+    assert!(!sent);
+}
+
+#[tokio::test]
+async fn cluster_calibration_directive_publication_observes_stop_before_empty_batch() {
+    let (directives_tx, _directives_rx) = flume::bounded(1);
+    let stop = CancellationToken::new();
+    let router_endpoint = grpc_endpoint("stargate.region-a:50051");
+    stop.cancel();
+
+    assert!(
+        !publish_cluster_calibration_directives(
+            &directives_tx,
+            &router_endpoint,
+            Vec::new(),
+            &stop,
+        )
+        .await,
+        "stopped registration stream must not treat an empty directive batch as completed work"
+    );
+}
+
+#[tokio::test]
+async fn cluster_calibration_directive_publication_translates_supported_states_in_order() {
+    let model_directive = |model_id: &str, state: i32| ModelCalibrationDirective {
+        model_id: model_id.to_string(),
+        state,
+        assignment_token: format!("{model_id}-assignment"),
+    };
+    let (directives_tx, directives_rx) = flume::unbounded();
+    let router_endpoint = grpc_endpoint("stargate.region-a:50051");
+
+    assert!(
+        publish_cluster_calibration_directives(
+            &directives_tx,
+            &router_endpoint,
+            vec![
+                model_directive("unknown", i32::MAX),
+                model_directive("waiting", CalibrationState::Waiting as i32),
+                model_directive("run", CalibrationState::Run as i32),
+                model_directive("complete", CalibrationState::Complete as i32),
+            ],
+            &CancellationToken::new(),
+        )
+        .await
+    );
+
+    let received = directives_rx
+        .try_iter()
+        .map(|directive| {
+            let ClusterCalibrationDirective::Model {
+                router_endpoint,
+                model_id,
+                state,
+                assignment_token,
+            } = directive
+            else {
+                panic!("model directive publication emitted a disconnect");
+            };
+            (router_endpoint, model_id, state, assignment_token)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        received,
+        vec![
+            (
+                router_endpoint.clone(),
+                "waiting".to_string(),
+                ClusterCalibrationDirectiveState::Waiting,
+                "waiting-assignment".to_string(),
+            ),
+            (
+                router_endpoint.clone(),
+                "run".to_string(),
+                ClusterCalibrationDirectiveState::Run,
+                "run-assignment".to_string(),
+            ),
+            (
+                router_endpoint,
+                "complete".to_string(),
+                ClusterCalibrationDirectiveState::Complete,
+                "complete-assignment".to_string(),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn cluster_calibration_directive_publication_wakes_on_cancellation_when_channel_is_full() {
+    let (directives_tx, directives_rx) = flume::bounded(1);
+    directives_tx
+        .send(ClusterCalibrationDirective::Model {
+            router_endpoint: grpc_endpoint("seed-router"),
+            model_id: "seed-model".to_string(),
+            state: ClusterCalibrationDirectiveState::Waiting,
+            assignment_token: "seed-assignment".to_string(),
+        })
+        .expect("seed directive should fill the channel");
+    let stop = CancellationToken::new();
+    let task_stop = stop.clone();
+    let router_endpoint = grpc_endpoint("stargate.region-a:50051");
+
+    let task = tokio::spawn(async move {
+        publish_cluster_calibration_directives(
+            &directives_tx,
+            &router_endpoint,
+            vec![ModelCalibrationDirective {
+                model_id: "blocked-model".to_string(),
+                state: CalibrationState::Run as i32,
+                assignment_token: "blocked-assignment".to_string(),
+            }],
+            &task_stop,
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    stop.cancel();
+
+    let completed = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("directive publication should wake on local stop")
+        .expect("directive publication task should not panic");
+    assert!(!completed);
+    assert_eq!(directives_rx.len(), 1);
 }
 
 #[tokio::test]
@@ -758,15 +802,13 @@ async fn watch_endpoint_updates_ignore_removed_or_replaced_generations() {
     ));
     assert!(active_registration_routers(watched_endpoint_snapshots(&watched)).is_empty());
 
-    let (stop_tx, _stop_rx) = watch::channel(false);
-    let task = tokio::spawn(async {
+    let task = OwnedTask::spawn("watch stargate endpoint", |_| async {
         std::future::pending::<()>().await;
     });
     watched.insert(
         watch_url.clone(),
         WatchedEndpoint {
             generation: 1,
-            stop_tx,
             task,
             state: WatchEndpointState::Connecting,
         },
@@ -820,53 +862,98 @@ async fn watch_endpoint_updates_ignore_removed_or_replaced_generations() {
     }
 }
 
-#[test]
-fn watch_router_publish_gate_waits_for_initial_complete_or_timeout_then_allows_removal() {
+#[tokio::test]
+async fn registration_router_topology_generation_is_shared_latest_value() {
     let empty = BTreeSet::new();
     let seed_router = BTreeSet::from([grpc_endpoint("stargate-0.region-a:50071")]);
     let global_routers = BTreeSet::from([
         grpc_endpoint("stargate-0.region-a:50071"),
         grpc_endpoint("stargate-0.region-b:50071"),
     ]);
+    let (topology_tx, mut registration_rx) = watch::channel(RegistrationRouterTopology::default());
+    let mut calibration_rx = registration_rx.clone();
 
-    assert!(!should_publish_watch_routers(
+    assert_eq!(registration_rx.borrow().published_routers(), None);
+    assert!(!publish_registration_router_topology(
+        &topology_tx,
         &seed_router,
-        &empty,
-        false,
-        false,
         false
     ));
-    assert!(should_publish_watch_routers(
-        &seed_router,
+    assert!(!publish_registration_router_topology(
+        &topology_tx,
         &empty,
-        false,
-        true,
-        false
-    ));
-    assert!(!should_publish_watch_routers(
-        &empty, &empty, false, true, false
-    ));
-    assert!(should_publish_watch_routers(
-        &global_routers,
-        &empty,
-        true,
-        false,
-        false
-    ));
-    assert!(should_publish_watch_routers(
-        &seed_router,
-        &global_routers,
-        false,
-        false,
         true
     ));
-    assert!(!should_publish_watch_routers(
-        &seed_router,
-        &seed_router,
-        false,
-        false,
+    assert!(!registration_rx.has_changed().unwrap());
+    assert!(!calibration_rx.has_changed().unwrap());
+
+    assert!(publish_registration_router_topology(
+        &topology_tx,
+        &global_routers,
         true
     ));
+    registration_rx.changed().await.unwrap();
+    calibration_rx.changed().await.unwrap();
+    assert_eq!(
+        registration_rx.borrow().published_routers(),
+        Some(&global_routers)
+    );
+    assert_eq!(
+        calibration_rx.borrow().published_routers(),
+        Some(&global_routers)
+    );
+
+    assert!(!publish_registration_router_topology(
+        &topology_tx,
+        &global_routers,
+        false
+    ));
+    assert!(!registration_rx.has_changed().unwrap());
+    assert!(!calibration_rx.has_changed().unwrap());
+
+    assert!(publish_registration_router_topology(
+        &topology_tx,
+        &seed_router,
+        false
+    ));
+    registration_rx.changed().await.unwrap();
+    calibration_rx.changed().await.unwrap();
+    assert_eq!(
+        registration_rx.borrow().published_routers(),
+        Some(&seed_router)
+    );
+    assert_eq!(
+        calibration_rx.borrow().published_routers(),
+        Some(&seed_router)
+    );
+
+    assert!(publish_registration_router_topology(
+        &topology_tx,
+        &empty,
+        false
+    ));
+    registration_rx.changed().await.unwrap();
+    calibration_rx.changed().await.unwrap();
+    assert_eq!(registration_rx.borrow().published_routers(), Some(&empty));
+    assert_eq!(calibration_rx.borrow().published_routers(), Some(&empty));
+}
+
+#[tokio::test]
+async fn watch_discovery_stops_when_cancelled() {
+    let (topology_tx, _topology_rx) = watch::channel(RegistrationRouterTopology::default());
+    let stop = CancellationToken::new();
+    let task = tokio::spawn(run_watch_stargate_discovery(
+        Vec::new(),
+        topology_tx,
+        stop.clone(),
+    ));
+
+    stop.cancel();
+
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("watch discovery should stop when cancelled")
+        .expect("watch discovery should not panic");
 }
 
 #[tokio::test]
@@ -970,6 +1057,118 @@ async fn failed_calibration_submission_remains_retryable() {
     submission_tasks.abort_all();
 }
 
+#[tokio::test]
+async fn panicked_calibration_submission_remains_retryable() {
+    let key = (grpc_endpoint("http://router-a"), "model-a".to_string());
+    let mut submission_tasks = JoinSet::<CompletedCalibrationSubmission>::new();
+    let abort_handle = submission_tasks
+        .spawn(async { std::future::pending::<CompletedCalibrationSubmission>().await });
+    let task_id = abort_handle.id();
+    let mut work = HashMap::from([(
+        key.clone(),
+        RouterCalibrationWork::PendingSubmission {
+            result: PendingRouterCalibration {
+                assignment_token: "token-a".to_string(),
+                measured_last_mean_input_tps: 123.0,
+            },
+            task: Some(OwnedCalibrationTask::new(abort_handle)),
+        },
+    )]);
+
+    handle_panicked_calibration_task(&mut work, task_id);
+
+    assert!(
+        matches!(
+            work.get(&key),
+            Some(RouterCalibrationWork::PendingSubmission {
+                result,
+                task: None,
+            }) if result.assignment_token == "token-a"
+                && result.measured_last_mean_input_tps == 123.0
+        ),
+        "panicked submission task should keep its measured result retryable"
+    );
+    submission_tasks.abort_all();
+}
+
+#[tokio::test]
+async fn panicked_calibration_sweep_removes_matching_work_only() {
+    let sweep_key = (grpc_endpoint("http://router-a"), "model-a".to_string());
+    let submitted_key = (grpc_endpoint("http://router-b"), "model-b".to_string());
+    let mut sweep_tasks = JoinSet::<CompletedCalibrationSweep>::new();
+    let abort_handle =
+        sweep_tasks.spawn(async { std::future::pending::<CompletedCalibrationSweep>().await });
+    let task_id = abort_handle.id();
+    let mut work = HashMap::from([
+        (
+            sweep_key.clone(),
+            RouterCalibrationWork::Sweeping {
+                assignment_token: "token-a".to_string(),
+                task: OwnedCalibrationTask::new(abort_handle),
+            },
+        ),
+        (
+            submitted_key.clone(),
+            RouterCalibrationWork::Submitted {
+                assignment_token: "token-b".to_string(),
+            },
+        ),
+    ]);
+
+    handle_panicked_calibration_task(&mut work, task_id);
+
+    assert!(!work.contains_key(&sweep_key));
+    assert!(
+        matches!(
+            work.get(&submitted_key),
+            Some(RouterCalibrationWork::Submitted { assignment_token })
+                if assignment_token == "token-b"
+        ),
+        "unmatched submitted work should remain untouched"
+    );
+    sweep_tasks.abort_all();
+}
+
+#[tokio::test]
+async fn panicked_calibration_cleanup_ignores_unknown_task_id() {
+    let key = (grpc_endpoint("http://router-a"), "model-a".to_string());
+    let mut submission_tasks = JoinSet::<CompletedCalibrationSubmission>::new();
+    let unknown_task_id = submission_tasks
+        .spawn(async { std::future::pending::<CompletedCalibrationSubmission>().await })
+        .id();
+    let mut work = HashMap::from([(
+        key.clone(),
+        RouterCalibrationWork::PendingSubmission {
+            result: PendingRouterCalibration {
+                assignment_token: "token-a".to_string(),
+                measured_last_mean_input_tps: 123.0,
+            },
+            task: None,
+        },
+    )]);
+    work.insert(
+        (grpc_endpoint("http://router-b"), "model-b".to_string()),
+        RouterCalibrationWork::Submitted {
+            assignment_token: "token-b".to_string(),
+        },
+    );
+
+    handle_panicked_calibration_task(&mut work, unknown_task_id);
+
+    assert!(
+        matches!(
+            work.get(&key),
+            Some(RouterCalibrationWork::PendingSubmission {
+                result,
+                task: None,
+            }) if result.assignment_token == "token-a"
+                && result.measured_last_mean_input_tps == 123.0
+        ),
+        "unknown task ids should not alter calibration work"
+    );
+    submission_tasks.abort_all();
+}
+
 #[derive(Clone)]
 struct BlockedCalibrationUpstream {
     entered_tx: Arc<TokioMutex<Option<oneshot::Sender<()>>>>,
@@ -1014,8 +1213,10 @@ async fn assigned_sweep_does_not_block_directive_consumption() {
     let cancel_token = CancellationToken::new();
     let (directive_tx, directive_rx) = flume::bounded(1);
     let router_endpoint = grpc_endpoint("http://router-a");
-    let (_active_router_tx, active_router_rx) =
-        watch::channel(BTreeSet::from([router_endpoint.clone()]));
+    let (_router_topology_tx, router_topology_rx) =
+        watch::channel(RegistrationRouterTopology::Published(BTreeSet::from([
+            router_endpoint.clone(),
+        ])));
     let executor = tokio::spawn(run_cluster_calibration_executor(
         ClusterCalibrationExecutorTaskConfig {
             inference_server_id: "pylon-a".to_string(),
@@ -1030,17 +1231,18 @@ async fn assigned_sweep_does_not_block_directive_consumption() {
             },
             metrics: None,
             auth_token_provider: None,
-            cancel_token: cancel_token.clone(),
         },
         directive_rx,
-        active_router_rx,
+        router_topology_rx,
+        cancel_token.clone(),
     ));
-    let directive = |model_id: &str, state, assignment_token: &str| ClusterCalibrationDirective {
-        router_endpoint: router_endpoint.clone(),
-        model_id: model_id.to_string(),
-        state,
-        assignment_token: assignment_token.to_string(),
-    };
+    let directive =
+        |model_id: &str, state, assignment_token: &str| ClusterCalibrationDirective::Model {
+            router_endpoint: router_endpoint.clone(),
+            model_id: model_id.to_string(),
+            state,
+            assignment_token: assignment_token.to_string(),
+        };
 
     directive_tx
         .send_async(directive(
@@ -1088,8 +1290,10 @@ async fn router_removal_aborts_assigned_sweep() {
     let cancel_token = CancellationToken::new();
     let (directive_tx, directive_rx) = flume::bounded(1);
     let router_endpoint = grpc_endpoint("http://router-a");
-    let (active_router_tx, active_router_rx) =
-        watch::channel(BTreeSet::from([router_endpoint.clone()]));
+    let (router_topology_tx, router_topology_rx) =
+        watch::channel(RegistrationRouterTopology::Published(BTreeSet::from([
+            router_endpoint.clone(),
+        ])));
     let executor = tokio::spawn(run_cluster_calibration_executor(
         ClusterCalibrationExecutorTaskConfig {
             inference_server_id: "pylon-a".to_string(),
@@ -1104,14 +1308,14 @@ async fn router_removal_aborts_assigned_sweep() {
             },
             metrics: None,
             auth_token_provider: None,
-            cancel_token: cancel_token.clone(),
         },
         directive_rx,
-        active_router_rx,
+        router_topology_rx,
+        cancel_token.clone(),
     ));
 
     directive_tx
-        .send_async(ClusterCalibrationDirective {
+        .send_async(ClusterCalibrationDirective::Model {
             router_endpoint,
             model_id: "model-a".to_string(),
             state: ClusterCalibrationDirectiveState::Run,
@@ -1124,7 +1328,7 @@ async fn router_removal_aborts_assigned_sweep() {
         .expect("calibration sweep should begin before router removal")
         .expect("calibration sweep should begin before router removal");
 
-    active_router_tx.send_replace(BTreeSet::new());
+    router_topology_tx.send_replace(RegistrationRouterTopology::Published(BTreeSet::new()));
     tokio::time::timeout(Duration::from_secs(1), sweep_dropped_rx)
         .await
         .expect("router removal should abort the running calibration sweep")
@@ -1136,60 +1340,129 @@ async fn router_removal_aborts_assigned_sweep() {
         .expect("cancelled calibration executor should exit cleanly");
 }
 
+#[tokio::test]
+async fn registration_disconnect_aborts_assigned_sweep_while_router_remains_discovered() {
+    let (upstream_http_base_url, sweep_entered_rx, sweep_dropped_rx) =
+        spawn_blocked_calibration_upstream().await;
+    let cancel_token = CancellationToken::new();
+    let (directive_tx, directive_rx) = flume::bounded(1);
+    let router_endpoint = grpc_endpoint("http://router-a");
+    let (_router_topology_tx, router_topology_rx) =
+        watch::channel(RegistrationRouterTopology::Published(BTreeSet::from([
+            router_endpoint.clone(),
+        ])));
+    let executor = tokio::spawn(run_cluster_calibration_executor(
+        ClusterCalibrationExecutorTaskConfig {
+            inference_server_id: "pylon-a".to_string(),
+            cluster_id: "cluster-a".to_string(),
+            retry_interval: Duration::from_secs(30),
+            upstream_http_base_url,
+            bringup: BringupConfig {
+                calibration_requests: 1,
+                calibration_timeout: Duration::from_secs(30),
+                canary_timeout: Duration::from_secs(1),
+                ..BringupConfig::default()
+            },
+            metrics: None,
+            auth_token_provider: None,
+        },
+        directive_rx,
+        router_topology_rx,
+        cancel_token.clone(),
+    ));
+
+    directive_tx
+        .send_async(ClusterCalibrationDirective::Model {
+            router_endpoint: router_endpoint.clone(),
+            model_id: "model-a".to_string(),
+            state: ClusterCalibrationDirectiveState::Run,
+            assignment_token: "token-a".to_string(),
+        })
+        .await
+        .expect("run directive should be accepted");
+    tokio::time::timeout(Duration::from_secs(1), sweep_entered_rx)
+        .await
+        .expect("calibration sweep should begin before registration disconnect")
+        .expect("calibration sweep should begin before registration disconnect");
+
+    directive_tx
+        .send_async(ClusterCalibrationDirective::RouterDisconnected { router_endpoint })
+        .await
+        .expect("registration disconnect should be accepted");
+    tokio::time::timeout(Duration::from_secs(1), sweep_dropped_rx)
+        .await
+        .expect("registration disconnect should abort the running calibration sweep")
+        .expect("blocked calibration request should be dropped");
+
+    cancel_token.cancel();
+    executor
+        .await
+        .expect("cancelled calibration executor should exit cleanly");
+}
+
+#[test]
+fn runtime_state_directly_derives_one_coherent_registration_snapshot() {
+    let runtime_state =
+        PylonRuntimeState::new(InferenceServerStatus::Inactive, &["model-a".to_string()]);
+    let advertised_state = runtime_state.clone();
+
+    runtime_state.set_status(InferenceServerStatus::Active);
+    runtime_state.set_model_stats(
+        "model-a",
+        CurrentModelStats {
+            output_tps: 12.5,
+            ..CurrentModelStats::default()
+        },
+    );
+    runtime_state.set_model_bringup("model-a", ModelBringupState::AdvertisingActive);
+
+    let snapshot = advertised_state.advertised_models();
+    let model = &snapshot["model-a"];
+
+    assert_eq!(model.status, InferenceServerStatus::Active as i32);
+    assert_eq!(
+        model
+            .stats
+            .as_ref()
+            .expect("stats should be present")
+            .output_tps,
+        12.5
+    );
+}
+
 #[test]
 fn snapshot_forwards_collected_model_stats_exactly() {
-    let (_status_tx, status_rx) = flume::bounded(1);
-    let (stats_tx, stats_rx) = flume::bounded(1);
-    let (bringup_state_tx, bringup_state_rx) = flume::bounded(1);
-    let shared_state = SharedInstState::new(
-        InferenceServerStatus::Active,
-        &["model-a".to_string()],
-        SharedInstStateChannels {
-            status_rx,
-            stats_rx,
-            bringup_state_rx,
-        },
-        false,
-    );
+    let runtime_state =
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["model-a".to_string()]);
+    runtime_state.set_model_bringup("model-a", ModelBringupState::AdvertisingActive);
 
     let queue_time_estimate_ms_by_priority = HashMap::from([(0, 11), (2, 7)]);
-    stats_tx
-        .send((
-            "model-a".to_string(),
-            CurrentModelStats {
-                output_tps: 2.5,
-                embedding_item_tps: 0.0,
-                last_mean_input_tps: 3.5,
-                queue_size: 4,
-                queued_input_size: 5,
-                max_output_tps: 6.5,
-                max_embedding_item_tps: 0.0,
-                kv_cache_capacity_tokens: 7,
-                kv_cache_used_tokens: 8,
-                kv_cache_free_tokens: 9,
-                num_running_queries: 10,
-                max_engine_concurrency: Some(11),
-                total_query_input_size: 12,
-                input_processing_queries: 13,
-                output_generation_queries: 14,
-                stats_observed_at_unix_ms: 15,
-                stats_capabilities: vec!["request.output.chunk_usage".to_string()],
-                stats_sources: vec!["chunk_usage".to_string()],
-                queue_time_estimate_ms_by_priority: Some(
-                    queue_time_estimate_ms_by_priority.clone(),
-                ),
-            },
-        ))
-        .unwrap();
-    bringup_state_tx
-        .send(BringupModelUpdate {
-            model_id: "model-a".to_string(),
-            state: ModelBringupState::AdvertisingActive,
-        })
-        .unwrap();
-    shared_state.drain_updates();
+    runtime_state.set_model_stats(
+        "model-a",
+        CurrentModelStats {
+            output_tps: 2.5,
+            embedding_item_tps: 0.0,
+            last_mean_input_tps: 3.5,
+            queue_size: 4,
+            queued_input_size: 5,
+            max_output_tps: 6.5,
+            max_embedding_item_tps: 0.0,
+            kv_cache_capacity_tokens: 7,
+            kv_cache_used_tokens: 8,
+            kv_cache_free_tokens: 9,
+            num_running_queries: 10,
+            max_engine_concurrency: Some(11),
+            total_query_input_size: 12,
+            input_processing_queries: 13,
+            output_generation_queries: 14,
+            stats_observed_at_unix_ms: 15,
+            stats_capabilities: vec!["request.output.chunk_usage".to_string()],
+            stats_sources: vec!["chunk_usage".to_string()],
+            queue_time_estimate_ms_by_priority: Some(queue_time_estimate_ms_by_priority.clone()),
+        },
+    );
 
-    let snapshot = shared_state.snapshot();
+    let snapshot = runtime_state.advertised_models();
     let model = &snapshot["model-a"];
     assert_eq!(model.status, InferenceServerStatus::Active as i32);
     let stats = model.stats.as_ref().expect("stats should be present");
@@ -1219,107 +1492,16 @@ fn snapshot_forwards_collected_model_stats_exactly() {
 }
 
 #[test]
-fn merge_current_model_stats_preserves_existing_kv_metrics_when_incoming_has_none() {
-    let existing = CurrentModelStats {
-        kv_cache_capacity_tokens: 4096,
-        kv_cache_used_tokens: 1024,
-        kv_cache_free_tokens: 3072,
-        ..CurrentModelStats::default()
-    };
-    let incoming = CurrentModelStats {
-        output_tps: 20.0,
-        last_mean_input_tps: 30.0,
-        max_output_tps: 40.0,
-        queue_size: 5,
-        queued_input_size: 6,
-        ..CurrentModelStats::default()
-    };
-
-    let merged = merge_current_model_stats(&existing, &incoming);
-    assert_eq!(merged.last_mean_input_tps, 30.0);
-    assert_eq!(merged.queue_size, 5);
-    assert_eq!(merged.kv_cache_capacity_tokens, 4096);
-    assert_eq!(merged.kv_cache_used_tokens, 1024);
-    assert_eq!(merged.kv_cache_free_tokens, 3072);
-}
-
-#[test]
-fn merge_current_model_stats_preserves_existing_backend_only_metrics_when_incoming_has_none() {
-    let existing = CurrentModelStats {
-        max_engine_concurrency: Some(8),
-        queue_time_estimate_ms_by_priority: Some(HashMap::from([(4, 120)])),
-        ..CurrentModelStats::default()
-    };
-    let incoming = CurrentModelStats {
-        output_tps: 20.0,
-        last_mean_input_tps: 30.0,
-        max_output_tps: 40.0,
-        queue_size: 5,
-        queued_input_size: 6,
-        ..CurrentModelStats::default()
-    };
-
-    let merged = merge_current_model_stats(&existing, &incoming);
-    assert_eq!(merged.last_mean_input_tps, 30.0);
-    assert_eq!(merged.queue_size, 5);
-    assert_eq!(merged.max_engine_concurrency, Some(8));
-    assert_eq!(
-        merged.queue_time_estimate_ms_by_priority,
-        Some(HashMap::from([(4, 120)]))
-    );
-}
-
-#[test]
-fn merge_current_model_stats_accepts_explicit_backend_only_metric_clears() {
-    let existing = CurrentModelStats {
-        max_engine_concurrency: Some(8),
-        queue_time_estimate_ms_by_priority: Some(HashMap::from([(4, 120)])),
-        ..CurrentModelStats::default()
-    };
-    let incoming = CurrentModelStats {
-        max_engine_concurrency: Some(0),
-        queue_time_estimate_ms_by_priority: Some(HashMap::new()),
-        ..CurrentModelStats::default()
-    };
-
-    let merged = merge_current_model_stats(&existing, &incoming);
-    assert_eq!(merged.max_engine_concurrency, Some(0));
-    assert_eq!(
-        merged.queue_time_estimate_ms_by_priority,
-        Some(HashMap::new())
-    );
-}
-
-#[test]
-fn merge_current_model_stats_accepts_non_zero_incoming_kv_metrics() {
-    let existing = CurrentModelStats {
-        kv_cache_capacity_tokens: 4096,
-        kv_cache_used_tokens: 1024,
-        kv_cache_free_tokens: 3072,
-        ..CurrentModelStats::default()
-    };
-    let incoming = CurrentModelStats {
-        kv_cache_capacity_tokens: 8192,
-        kv_cache_used_tokens: 2048,
-        kv_cache_free_tokens: 6144,
-        ..CurrentModelStats::default()
-    };
-
-    let merged = merge_current_model_stats(&existing, &incoming);
-    assert_eq!(merged.kv_cache_capacity_tokens, 8192);
-    assert_eq!(merged.kv_cache_used_tokens, 2048);
-    assert_eq!(merged.kv_cache_free_tokens, 6144);
-}
-
-#[test]
 fn reverse_tunnel_config_propagates_metrics() {
     let metrics = PylonMetrics::new().expect("metrics should initialize");
     let mut forwarding = TunnelForwardingConfig::new("http://127.0.0.1:8090/".to_string());
+    forwarding.max_sse_buffer_bytes = 1234;
     forwarding.metrics = Some(metrics.clone());
     let config = build_reverse_quic_tunnel_config(ReverseQuicTunnelConfigParams {
         dial_addr: "127.0.0.1:12345".to_string(),
         sni_override: None,
         inference_server_id: "inst-a".to_string(),
+        tls_cert_pem: Some(b"trusted reverse cert".to_vec()),
         quic_insecure: true,
         tunnel_protocol: TunnelTransportProtocol::Http3,
         forwarding,
@@ -1331,6 +1513,11 @@ fn reverse_tunnel_config_propagates_metrics() {
         "reverse tunnel config should carry pylon metrics"
     );
     assert_eq!(config.tunnel_protocol, TunnelTransportProtocol::Http3);
+    assert_eq!(config.max_sse_buffer_bytes, 1234);
+    assert_eq!(
+        config.tls_cert_pem.as_deref(),
+        Some(&b"trusted reverse cert"[..])
+    );
 }
 
 #[test]
@@ -1370,6 +1557,40 @@ fn reverse_tunnel_endpoint_from_ack_rejects_empty_pylon_dial_addr() {
     assert!(endpoint.is_none());
 }
 
+#[test]
+fn reverse_tunnel_state_replaces_connected_endpoint_atomically() {
+    let endpoint_a = ReverseTunnelEndpoint {
+        routing_target_addr: "router-a:50072".to_string(),
+        pylon_dial_addr: "dial-a:50072".to_string(),
+        sni_override: Some("router-a".to_string()),
+    };
+    let endpoint_b = ReverseTunnelEndpoint {
+        routing_target_addr: "router-b:50072".to_string(),
+        pylon_dial_addr: "dial-b:50072".to_string(),
+        sni_override: Some("router-b".to_string()),
+    };
+    let mut state = ReverseTunnelState::default();
+
+    assert!(state.replace_endpoint(Some(endpoint_a.clone())));
+    assert!(state.mark_connected(&endpoint_a));
+    assert!(state.is_connected());
+
+    assert!(state.replace_endpoint(Some(endpoint_b.clone())));
+    assert_eq!(state.endpoint(), Some(&endpoint_b));
+    assert!(!state.is_connected());
+    assert!(
+        !state.mark_connected(&endpoint_a),
+        "a delayed connection for the replaced endpoint must be rejected"
+    );
+    assert!(state.mark_connected(&endpoint_b));
+    assert!(state.is_connected());
+    assert!(!state.replace_endpoint(Some(endpoint_b.clone())));
+    assert!(
+        state.is_connected(),
+        "a repeated ACK for the same endpoint must preserve connectivity"
+    );
+}
+
 #[tokio::test]
 async fn reverse_tunnel_connect_attempt_times_out() {
     let result = reverse_tunnel_connect_with_timeout(
@@ -1404,6 +1625,7 @@ fn reverse_tunnel_config_propagates_request_quality_monitor() {
         dial_addr: "127.0.0.1:12345".to_string(),
         sni_override: None,
         inference_server_id: "inst-a".to_string(),
+        tls_cert_pem: None,
         quic_insecure: true,
         tunnel_protocol: TunnelTransportProtocol::Custom,
         forwarding,
@@ -1477,28 +1699,25 @@ fn router_registration_task_harness_propagates_request_quality_monitor_to_each_r
         inference_server_url: "quic://127.0.0.1:8443".to_string(),
         upstream_http_base_url: Some("http://127.0.0.1:8090".to_string()),
         min_update_interval: Duration::from_secs(2),
-        status: InferenceServerStatus::Active,
         reverse_tunnel: true,
+        tls_cert_pem: Some(b"trusted reverse cert".to_vec()),
         quic_insecure: true,
         tunnel_protocol: TunnelTransportProtocol::Http3,
         bringup: BringupConfig::default(),
         output_token_parser_factory: OutputTokenParserFactory,
-        request_observation_tx: None,
+        runtime_state: PylonRuntimeState::default(),
         request_quality_monitor: request_quality_monitor.clone(),
         metrics: None,
         retry: PylonRetryConfig::default(),
         queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-        queue_tracker: QueueAdmissionTracker::default(),
         auth_token_provider: None,
     };
-    let cancel_token = CancellationToken::new();
     let (cluster_calibration_directive_tx, _cluster_calibration_directive_rx) = flume::bounded(1);
     let task_template = RouterRegistrationTaskTemplate::from_registration_config(
         &register_config,
         &register_config.cluster_id,
         register_config.upstream_http_base_url.as_deref().unwrap(),
         cluster_calibration_directive_tx,
-        &cancel_token,
     );
 
     for router in ["router-a", "router-b"] {
@@ -1510,6 +1729,10 @@ fn router_registration_task_harness_propagates_request_quality_monitor_to_each_r
         assert_eq!(task_config.min_update_interval, Duration::from_secs(2));
         assert!(task_config.reverse_tunnel);
         assert!(task_config.coordinated_calibration);
+        assert_eq!(
+            task_config.tls_cert_pem.as_deref(),
+            Some(&b"trusted reverse cert"[..])
+        );
         assert!(task_config.quic_insecure);
         assert_eq!(task_config.tunnel_protocol, TunnelTransportProtocol::Http3);
         assert_eq!(

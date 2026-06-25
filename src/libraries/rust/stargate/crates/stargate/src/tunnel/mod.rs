@@ -21,15 +21,20 @@ use stargate_protocol::TunnelTransportProtocol;
 use stargate_tls::ServerTlsIdentity;
 
 mod body;
+mod connection;
+mod custom;
 mod direct;
+mod endpoint;
 mod http3;
+mod registration_tunnel;
+mod request;
 mod reverse;
-mod watcher;
 mod webtransport;
 
 pub use body::StreamingBody;
+pub(crate) use connection::RegistrationConnections;
 pub use direct::QuicHttpProxy;
-pub use watcher::{ConnectionWatcher, EnsureConnectedResult};
+pub use registration_tunnel::{EnsureConnectedResult, RegistrationTunnel};
 
 #[derive(Clone, Debug)]
 pub struct QuicTunnelConfig {

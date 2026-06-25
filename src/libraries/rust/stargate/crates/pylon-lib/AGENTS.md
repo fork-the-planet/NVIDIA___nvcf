@@ -13,6 +13,17 @@
 - Request observation assumes streamed responses. Derive output progress from SSE `data:` events, not non-streaming JSON bodies.
 - Terminal request-observer transitions are invariants. Calling terminalization from a terminal state should fail loudly.
 - Model advertisement is gated by both caller-provided status and bringup lifecycle state.
+- Keep current registration advertisement inputs in one authoritative shared snapshot; do not split status, stats, and bringup state across private watch channels.
+- A registration client is idle or owns one complete running session root; discovery, bringup, calibration, registration, router, reverse-tunnel, and model-bringup tasks derive child cancellation from that root.
+- Every production pylon background task must be owned by the shared abort-on-drop task owner or a `JoinSet`; do not store or return bare `JoinHandle`s.
+- Keep cooperative cancellation inside physical task ownership: `OwnedTask` owns the cancellation token, nested tasks derive child tokens, sibling shutdown signals every task before awaiting any one, and `watch` channels carry state only.
+- Treat nested `OwnedTask` work as long-lived and failure-supervised: unexpected return or panic cancels the physical parent, while finite work is applied synchronously or modeled explicitly instead of being spawned as a critical child.
+- The Pylon process supervisor observes registration, stats, metrics, required engine-stats, and direct-tunnel roots; unexpected critical-root exit fails the process, successful auto-mode engine-stats fallback remains nonfatal, and SIGINT/SIGTERM stop top-level siblings together.
+- Keep registration-router topology in one awaiting-initial-or-published watch generation shared directly by discovery, registration workers, and coordinated calibration; do not relay or mirror it through parallel router sets or channels.
+- Keep each cumulative request-counter identity in one live-or-finalized lifecycle map; a counted live total may mirror membership only to preserve O(1) metrics.
+- Keep queue-admission request identity and per-model aggregate state under one locked owner. Queue phases only advance, and valid queue-time overflow must saturate instead of appearing idle or unknown.
+- Keep request lifecycle transitions source-owned. Queue projection, lifecycle metrics, and stats publication must derive from one transition event; do not replay observations or reconstruct request identity in metrics.
+- Keep input-throughput distributions, threshold decisions, sticky throughput, and runtime queue updates inside `StatsAggregator`; do not relay fallback samples through a parallel task, channel, or per-model map.
 - Reverse-tunnel connectivity gates advertisement per stargate even when local model calibration has completed.
 
 ## Bringup And Canaries

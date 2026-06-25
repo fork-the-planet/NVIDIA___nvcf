@@ -35,17 +35,17 @@ use crate::output_token_parser::{
     OutputTokenParser, OutputTokenParserFactory, OutputTokenProgress,
 };
 use crate::queue_admission::{
-    PylonQueueMismatchRetryConfig, QueueAdmissionDecision, QueueAdmissionTracker,
-    QueueTrackedRequestGuard, RETRY_REASON_QUEUE_ESTIMATE_MISMATCH,
+    PylonQueueMismatchRetryConfig, QueueAdmissionDecision, QueueTrackedRequestGuard,
+    RETRY_REASON_QUEUE_ESTIMATE_MISMATCH,
 };
 use crate::request_observer::{
-    EmbeddingsRequestObserver, MissingRequiredHeaderError, RequestObservation,
-    RequestObservationEndpoint, RequestObserver, RequiredTunnelHeaders,
-    embedding_items_from_request_body, validate_required_tunnel_headers,
+    MissingRequiredHeaderError, RequestObservationEndpoint, RequestObserver, RequiredTunnelHeaders,
+    TunnelRequestObserver, validate_required_tunnel_headers,
 };
 use crate::request_quality_monitor::{
     RequestOutputTokenProgress, RequestQualityMonitorConfig, RequestQualityRecorder,
 };
+use crate::runtime_state::PylonRuntimeState;
 use crate::sse_message_stream::{
     ParsedSseMessage, SseMessage, SseReadTimeoutPhase, UpstreamSseMessageStream,
     UpstreamSseReadError, upstream_sse_message_stream,
@@ -53,6 +53,11 @@ use crate::sse_message_stream::{
 use crate::stats::PylonMetrics;
 
 pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+// This bounds only one upstream SSE event waiting for its blank-line delimiter,
+// not the request body or completed response events. One MiB accommodates
+// unusually large structured chunks while a missing delimiter cannot make the
+// pylon retain unbounded upstream bytes.
+pub const DEFAULT_MAX_SSE_BUFFER_BYTES: usize = 1024 * 1024;
 pub(super) const DEFAULT_FIRST_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const DEFAULT_OUTPUT_CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const MAX_SPECULATIVE_REQUEST_BODY_PREALLOC_BYTES: usize = 64 * 1024;
@@ -88,14 +93,17 @@ impl Default for PylonRetryConfig {
 pub struct TunnelForwardingConfig {
     pub upstream_http_base_url: String,
     pub max_request_body_bytes: usize,
+    /// Maximum bytes in one upstream SSE event before its blank-line delimiter.
+    /// Completed events are forwarded and released immediately, independently
+    /// of the request-body limit.
+    pub max_sse_buffer_bytes: usize,
     pub first_output_timeout: Duration,
     pub output_chunk_timeout: Duration,
     pub output_token_parser_factory: OutputTokenParserFactory,
-    pub request_observation_tx: Option<flume::Sender<RequestObservation>>,
+    pub runtime_state: PylonRuntimeState,
     pub request_quality_monitor: RequestQualityMonitorConfig,
     pub retry: PylonRetryConfig,
     pub queue_mismatch_retry: PylonQueueMismatchRetryConfig,
-    pub queue_tracker: QueueAdmissionTracker,
     pub metrics: Option<Arc<PylonMetrics>>,
     #[cfg(test)]
     pub webtransport_stream_header_wait_tx: Option<flume::Sender<()>>,
@@ -106,14 +114,14 @@ impl TunnelForwardingConfig {
         Self {
             upstream_http_base_url,
             max_request_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            max_sse_buffer_bytes: DEFAULT_MAX_SSE_BUFFER_BYTES,
             first_output_timeout: DEFAULT_FIRST_OUTPUT_TIMEOUT,
             output_chunk_timeout: DEFAULT_OUTPUT_CHUNK_TIMEOUT,
             output_token_parser_factory: OutputTokenParserFactory,
-            request_observation_tx: None,
+            runtime_state: PylonRuntimeState::default(),
             request_quality_monitor: RequestQualityMonitorConfig::default(),
             retry: PylonRetryConfig::default(),
             queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-            queue_tracker: QueueAdmissionTracker::default(),
             metrics: None,
             #[cfg(test)]
             webtransport_stream_header_wait_tx: None,
@@ -127,103 +135,17 @@ pub(super) struct TunnelServerApp {
     pub(super) inference_server_id: String,
     pub(super) upstream_http_base_url: String,
     pub(super) max_request_body_bytes: usize,
+    pub(super) max_sse_buffer_bytes: usize,
     pub(super) first_output_timeout: Duration,
     pub(super) output_chunk_timeout: Duration,
     pub(super) output_token_parser_factory: OutputTokenParserFactory,
-    pub(super) request_observation_tx: Option<flume::Sender<RequestObservation>>,
+    pub(super) runtime_state: PylonRuntimeState,
     pub(super) request_quality_monitor: RequestQualityMonitorConfig,
     pub(super) retry: PylonRetryConfig,
     pub(super) queue_mismatch_retry: PylonQueueMismatchRetryConfig,
-    pub(super) queue_tracker: QueueAdmissionTracker,
     pub(super) metrics: Option<Arc<PylonMetrics>>,
     #[cfg(test)]
     pub(super) webtransport_stream_header_wait_tx: Option<flume::Sender<()>>,
-}
-
-/// RAII guard that ensures `observer.fail()` is called if the observer has not
-/// reached a terminal state by the time this guard is dropped.
-pub(super) struct ObserverGuard(pub(super) RequestObserver);
-
-impl std::ops::Deref for ObserverGuard {
-    type Target = RequestObserver;
-    fn deref(&self) -> &RequestObserver {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for ObserverGuard {
-    fn deref_mut(&mut self) -> &mut RequestObserver {
-        &mut self.0
-    }
-}
-
-impl Drop for ObserverGuard {
-    fn drop(&mut self) {
-        if !self.0.is_terminal() {
-            self.0.fail();
-        }
-    }
-}
-
-struct EmbeddingsObserverGuard(EmbeddingsRequestObserver);
-
-impl std::ops::Deref for EmbeddingsObserverGuard {
-    type Target = EmbeddingsRequestObserver;
-    fn deref(&self) -> &EmbeddingsRequestObserver {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for EmbeddingsObserverGuard {
-    fn deref_mut(&mut self) -> &mut EmbeddingsRequestObserver {
-        &mut self.0
-    }
-}
-
-impl Drop for EmbeddingsObserverGuard {
-    fn drop(&mut self) {
-        if !self.0.is_terminal() {
-            self.0.fail();
-        }
-    }
-}
-
-fn embeddings_observer_for_request(
-    method: &reqwest::Method,
-    path_and_query: &str,
-    required_tunnel_headers: Option<RequiredTunnelHeaders>,
-    observation_tx: Option<flume::Sender<RequestObservation>>,
-) -> Result<Option<EmbeddingsObserverGuard>> {
-    if !is_embeddings_request(method, path_and_query) {
-        return Ok(None);
-    }
-
-    let required = required_tunnel_headers
-        .ok_or_else(|| anyhow::anyhow!("required tunnel headers missing for embeddings request"))?;
-    Ok(Some(EmbeddingsObserverGuard(
-        EmbeddingsRequestObserver::accepted(required, observation_tx),
-    )))
-}
-
-fn update_embeddings_observer_items(
-    embeddings_observer: &mut Option<EmbeddingsObserverGuard>,
-    body_bytes: &[u8],
-) {
-    if let Some(obs) = embeddings_observer.as_deref_mut() {
-        obs.update_embedding_items(embedding_items_from_request_body(body_bytes));
-    }
-}
-
-fn fail_tunnel_observers(
-    observer: &mut Option<ObserverGuard>,
-    embeddings_observer: &mut Option<EmbeddingsObserverGuard>,
-) {
-    if let Some(obs) = observer.as_deref_mut() {
-        obs.fail();
-    }
-    if let Some(obs) = embeddings_observer.as_deref_mut() {
-        obs.fail();
-    }
 }
 
 fn evaluate_queue_admission(
@@ -231,7 +153,7 @@ fn evaluate_queue_admission(
     required_tunnel_headers: &RequiredTunnelHeaders,
     request_headers: &HeaderMap,
 ) -> QueueAdmissionDecision {
-    let decision = app.queue_tracker.evaluate(
+    let decision = app.runtime_state.evaluate_queue_admission(
         &app.queue_mismatch_retry,
         required_tunnel_headers,
         request_headers,
@@ -289,7 +211,7 @@ fn tracked_queue_request_for_required_headers(
     app: &TunnelServerApp,
     required_tunnel_headers: Option<&RequiredTunnelHeaders>,
 ) -> Option<QueueTrackedRequestGuard> {
-    required_tunnel_headers.map(|required| app.queue_tracker.track_request(required))
+    required_tunnel_headers.map(|required| app.runtime_state.track_request(required))
 }
 
 fn observe_queue_output(queue_request: &mut Option<QueueTrackedRequestGuard>) {
@@ -300,46 +222,10 @@ fn observe_queue_output(queue_request: &mut Option<QueueTrackedRequestGuard>) {
 
 fn cleanup_rejected_queue_request(app: &TunnelServerApp, required: &RequiredTunnelHeaders) {
     // Observers are created before admission so body validation and terminal
-    // accounting keep their existing order. Remove synchronously before sending
-    // the rejection so an observation that won the race cannot self-count or
-    // briefly leak in the tracker.
-    app.queue_tracker.remove_request_id(&required.request_id);
-}
-
-fn tunnel_observers_on_upstream_response_headers(
-    observer: &mut Option<ObserverGuard>,
-    embeddings_observer: &mut Option<EmbeddingsObserverGuard>,
-    queue_request: &mut Option<QueueTrackedRequestGuard>,
-    response_headers: &HeaderMap,
-    status: reqwest::StatusCode,
-) {
-    if let Some(queue_request) = queue_request.as_mut() {
-        queue_request.on_upstream_response_headers();
-    }
-    if let Some(obs) = observer.as_deref_mut() {
-        obs.on_upstream_response_headers(response_headers, status.as_u16());
-    }
-    if let Some(obs) = embeddings_observer.as_deref_mut() {
-        obs.on_upstream_response_headers(status.as_u16());
-    }
-}
-
-fn finish_tunnel_observers(
-    observer: &mut Option<ObserverGuard>,
-    embeddings_observer: &mut Option<EmbeddingsObserverGuard>,
-    queue_request: &mut Option<QueueTrackedRequestGuard>,
-) {
-    if let Some(obs) = observer.as_deref_mut()
-        && !obs.is_terminal()
-    {
-        obs.finish();
-    }
-    if let Some(obs) = embeddings_observer.as_deref_mut() {
-        obs.finish();
-    }
-    if let Some(queue_request) = queue_request.as_mut() {
-        queue_request.finish();
-    }
+    // accounting keep their existing order. Remove the queue projection before
+    // sending the rejection; the observed projection remains until fail()
+    // terminalizes it and clears lifecycle metrics.
+    app.runtime_state.finish_queue_request(&required.request_id);
 }
 
 enum TunnelRequestLifecycleInitError {
@@ -348,10 +234,8 @@ enum TunnelRequestLifecycleInitError {
 }
 
 struct TunnelRequestLifecycle {
-    streaming_endpoint: Option<RequestObservationEndpoint>,
     required_tunnel_headers: Option<RequiredTunnelHeaders>,
-    observer: Option<ObserverGuard>,
-    embeddings_observer: Option<EmbeddingsObserverGuard>,
+    observer: Option<TunnelRequestObserver>,
     queue_request: Option<QueueTrackedRequestGuard>,
     quality_recorder: Option<RequestQualityRecorder>,
 }
@@ -363,7 +247,7 @@ impl TunnelRequestLifecycle {
         path_and_query: &str,
         request_headers: &HeaderMap,
     ) -> std::result::Result<Self, TunnelRequestLifecycleInitError> {
-        let streaming_endpoint = stream_request_observation_endpoint(method, path_and_query);
+        let observation_endpoint = request_observation_endpoint(method, path_and_query);
         let required_tunnel_headers = if is_health_request_path(path_and_query) {
             None
         } else {
@@ -372,21 +256,21 @@ impl TunnelRequestLifecycle {
                     .map_err(TunnelRequestLifecycleInitError::BadRequiredHeaders)?,
             )
         };
-        let observer = if let Some(endpoint) = streaming_endpoint {
+        let observer = if let Some(endpoint) = observation_endpoint {
             let required = required_tunnel_headers.clone().ok_or_else(|| {
                 TunnelRequestLifecycleInitError::Internal(anyhow::anyhow!(
-                    "required tunnel headers missing for streaming request"
+                    "required tunnel headers missing for observed request"
                 ))
             })?;
-            Some(ObserverGuard(RequestObserver::from_required(
+            Some(TunnelRequestObserver::accepted(
                 endpoint,
                 required,
-                app.request_observation_tx.clone(),
-            )))
+                app.runtime_state.clone(),
+            ))
         } else {
             None
         };
-        let quality_recorder = if streaming_endpoint
+        let quality_recorder = if observation_endpoint
             == Some(RequestObservationEndpoint::ChatCompletions)
             && app.request_quality_monitor.enabled()
         {
@@ -394,19 +278,10 @@ impl TunnelRequestLifecycle {
         } else {
             None
         };
-        let embeddings_observer = embeddings_observer_for_request(
-            method,
-            path_and_query,
-            required_tunnel_headers.clone(),
-            app.request_observation_tx.clone(),
-        )
-        .map_err(TunnelRequestLifecycleInitError::Internal)?;
 
         Ok(Self {
-            streaming_endpoint,
             required_tunnel_headers,
             observer,
-            embeddings_observer,
             queue_request: None,
             quality_recorder,
         })
@@ -418,7 +293,9 @@ impl TunnelRequestLifecycle {
         path_and_query: &str,
         body_bytes: &[u8],
     ) -> std::result::Result<(), RequestBodyValidationError> {
-        update_embeddings_observer_items(&mut self.embeddings_observer, body_bytes);
+        if let Some(observer) = self.observer.as_mut() {
+            observer.observe_request_body(body_bytes);
+        }
         if let Err(error) = validate_request_body(method, path_and_query, body_bytes) {
             self.fail();
             return Err(error);
@@ -448,28 +325,35 @@ impl TunnelRequestLifecycle {
     }
 
     fn fail(&mut self) {
-        fail_tunnel_observers(&mut self.observer, &mut self.embeddings_observer);
+        if let Some(observer) = self.observer.as_mut() {
+            observer.fail();
+        }
     }
 
     fn on_upstream_headers(&mut self, response_headers: &HeaderMap, status: reqwest::StatusCode) {
-        tunnel_observers_on_upstream_response_headers(
-            &mut self.observer,
-            &mut self.embeddings_observer,
-            &mut self.queue_request,
-            response_headers,
-            status,
-        );
+        if let Some(queue_request) = self.queue_request.as_mut() {
+            queue_request.on_upstream_response_headers();
+        }
+        if let Some(observer) = self.observer.as_mut() {
+            observer.on_upstream_response_headers(response_headers, status.as_u16());
+        }
     }
 
     fn should_relay_sse(&self, response_headers: &HeaderMap) -> bool {
-        self.streaming_endpoint.is_some() && is_sse_response(response_headers)
+        self.observer
+            .as_ref()
+            .is_some_and(TunnelRequestObserver::is_streaming)
+            && is_sse_response(response_headers)
     }
 
     fn observe_raw_success(&mut self, status: reqwest::StatusCode) {
         if status.is_success() {
             observe_queue_output(&mut self.queue_request);
         }
-        if let Some(obs) = self.observer.as_deref_mut()
+        if let Some(obs) = self
+            .observer
+            .as_mut()
+            .and_then(TunnelRequestObserver::generation_mut)
             && status.is_success()
         {
             obs.observe_output_message();
@@ -489,11 +373,13 @@ impl TunnelRequestLifecycle {
             response.bytes_stream(),
             app.first_output_timeout,
             app.output_chunk_timeout,
+            app.max_sse_buffer_bytes,
         );
         let mut output_token_parser = app.output_token_parser_factory.create();
         let obs = self
             .observer
-            .as_deref_mut()
+            .as_mut()
+            .and_then(TunnelRequestObserver::generation_mut)
             .ok_or_else(|| anyhow::anyhow!("observer missing for observed streaming request"))?;
         relay_remaining_output(
             &mut upstream_messages,
@@ -507,11 +393,12 @@ impl TunnelRequestLifecycle {
     }
 
     fn finish(&mut self) {
-        finish_tunnel_observers(
-            &mut self.observer,
-            &mut self.embeddings_observer,
-            &mut self.queue_request,
-        );
+        if let Some(observer) = self.observer.as_mut() {
+            observer.finish();
+        }
+        if let Some(queue_request) = self.queue_request.as_mut() {
+            queue_request.finish();
+        }
     }
 
     fn finalize_quality_check(&self, app: &TunnelServerApp, request_headers: &HeaderMap) {
@@ -849,7 +736,8 @@ fn validate_request_body(
         return Err(RequestBodyValidationError::InvalidJson);
     }
 
-    if let Some(endpoint) = stream_required_endpoint(method, path_and_query)
+    if let Some(endpoint) =
+        request_observation_endpoint(method, path_and_query).and_then(stream_required_endpoint_path)
         && !sonic_rs::get(body_bytes, &["stream"])
             .ok()
             .and_then(|value| value.as_bool())
@@ -868,7 +756,7 @@ pub(super) fn is_health_request_path(path_and_query: &str) -> bool {
         .is_some_and(|path| path == "/health")
 }
 
-fn stream_request_observation_endpoint(
+fn request_observation_endpoint(
     method: &reqwest::Method,
     path_and_query: &str,
 ) -> Option<RequestObservationEndpoint> {
@@ -879,31 +767,17 @@ fn stream_request_observation_endpoint(
     match path_and_query.split('?').next() {
         Some("/v1/chat/completions") => Some(RequestObservationEndpoint::ChatCompletions),
         Some("/v1/responses") => Some(RequestObservationEndpoint::Responses),
+        Some("/v1/embeddings") => Some(RequestObservationEndpoint::Embeddings),
         _ => None,
     }
 }
 
-fn stream_required_endpoint(
-    method: &reqwest::Method,
-    path_and_query: &str,
-) -> Option<&'static str> {
-    if method != reqwest::Method::POST {
-        return None;
+fn stream_required_endpoint_path(endpoint: RequestObservationEndpoint) -> Option<&'static str> {
+    match endpoint {
+        RequestObservationEndpoint::ChatCompletions => Some("/v1/chat/completions"),
+        RequestObservationEndpoint::Responses => Some("/v1/responses"),
+        RequestObservationEndpoint::Embeddings => None,
     }
-
-    match path_and_query.split('?').next() {
-        Some("/v1/chat/completions") => Some("/v1/chat/completions"),
-        Some("/v1/responses") => Some("/v1/responses"),
-        _ => None,
-    }
-}
-
-fn is_embeddings_request(method: &reqwest::Method, path_and_query: &str) -> bool {
-    method == reqwest::Method::POST
-        && path_and_query
-            .split('?')
-            .next()
-            .is_some_and(|path| path == "/v1/embeddings")
 }
 
 fn is_sse_response(headers: &HeaderMap) -> bool {
@@ -1018,6 +892,15 @@ async fn read_next_upstream_sse_message(
         Err(UpstreamSseReadError::Timeout(SseReadTimeoutPhase::FirstOutput)) => {
             observer.fail();
             bail!("timed out waiting for first output event from upstream");
+        }
+        Err(UpstreamSseReadError::BufferLimitExceeded {
+            max_buffer_bytes,
+            buffered_bytes,
+        }) => {
+            observer.fail();
+            bail!(
+                "upstream SSE buffer exceeded {max_buffer_bytes} bytes while waiting for an event boundary (buffered {buffered_bytes} bytes)"
+            );
         }
         Err(UpstreamSseReadError::Upstream(error)) => {
             observer.fail();

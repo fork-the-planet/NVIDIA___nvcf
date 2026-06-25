@@ -34,31 +34,30 @@ async fn multi_model_single_instance() {
     let (inst_addr, quic_url, _tunnel) = start_dummy_inst("model-alpha").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "mm-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url,
-                upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["model-alpha".to_string(), "model-beta".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "mm-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url,
+            upstream_http_base_url: Some(format!("http://{inst_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["model-alpha".to_string(), "model-beta".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "model-alpha", Duration::from_secs(5)).await;
@@ -111,59 +110,57 @@ async fn multiple_instances_different_models() {
     let (inst_addr_y, quic_url_y, _tunnel_y) = start_dummy_inst("model-y").await;
 
     let mut reg_client_x = InferenceServerRegistrationClient::default();
-    let _channels_x = reg_client_x
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "inst-x".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url_x,
-                upstream_http_base_url: Some(format!("http://{inst_addr_x}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["model-x".to_string()],
-        )
+    reg_client_x
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "inst-x".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url_x,
+            upstream_http_base_url: Some(format!("http://{inst_addr_x}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["model-x".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     let mut reg_client_y = InferenceServerRegistrationClient::default();
-    let _channels_y = reg_client_y
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "inst-y".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url_y,
-                upstream_http_base_url: Some(format!("http://{inst_addr_y}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["model-y".to_string()],
-        )
+    reg_client_y
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "inst-y".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url_y,
+            upstream_http_base_url: Some(format!("http://{inst_addr_y}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["model-y".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "model-x", Duration::from_secs(5)).await;

@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -63,6 +65,8 @@ pub(super) fn resolve_nodeport_host() -> anyhow::Result<String> {
 #[derive(Clone, Debug)]
 pub(super) struct Kubectl {
     program: PathBuf,
+    #[cfg(test)]
+    base_args: Vec<OsString>,
 }
 
 impl Default for Kubectl {
@@ -75,11 +79,35 @@ impl Kubectl {
     pub(super) fn new(program: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
+            #[cfg(test)]
+            base_args: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_args<I, A>(program: impl Into<PathBuf>, args: I) -> Self
+    where
+        I: IntoIterator<Item = A>,
+        A: Into<OsString>,
+    {
+        Self {
+            program: program.into(),
+            base_args: args.into_iter().map(Into::into).collect(),
         }
     }
 
     fn command(&self) -> Command {
-        Command::new(&self.program)
+        #[cfg(not(test))]
+        {
+            Command::new(&self.program)
+        }
+
+        #[cfg(test)]
+        {
+            let mut command = Command::new(&self.program);
+            command.args(&self.base_args);
+            command
+        }
     }
 
     pub(super) fn apply(&self, run: &BenchmarkK8sRun) -> anyhow::Result<()> {

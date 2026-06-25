@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use std::borrow::Cow;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -39,6 +40,35 @@ pub fn generate_self_signed_cert_for_names(names: Vec<String>) -> Result<(Vec<u8
 }
 
 pub type ServerTlsPemPair<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
+
+/// Orders resolved dial addresses while preserving each address family's
+/// resolver order. IPv4 remains preferred for compatibility with existing
+/// deployments, but IPv6 candidates stay available for fallback.
+pub fn ordered_dial_candidates(
+    resolved_addrs: impl IntoIterator<Item = SocketAddr>,
+) -> Vec<SocketAddr> {
+    let mut ipv4 = Vec::new();
+    let mut ipv6 = Vec::new();
+    for addr in resolved_addrs {
+        if addr.is_ipv4() {
+            ipv4.push(addr);
+        } else {
+            ipv6.push(addr);
+        }
+    }
+    ipv4.extend(ipv6);
+    ipv4
+}
+
+/// Returns an ephemeral unspecified local address compatible with `remote_addr`.
+pub fn quic_client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
+    let ip = if remote_addr.is_ipv4() {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    };
+    SocketAddr::new(ip, 0)
+}
 
 /// TLS identity used by QUIC tunnel servers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -96,6 +126,27 @@ pub fn build_insecure_quic_client_config_with_alpn(
     )))
 }
 
+/// Builds a QUIC client config that verifies servers against the supplied PEM
+/// trust anchor and advertises the supplied ALPN protocol list.
+pub fn build_trusted_quic_client_config_with_alpn(
+    cert_pem: &[u8],
+    alpn_protocols: Vec<Vec<u8>>,
+) -> Result<ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut &*cert_pem) {
+        roots
+            .add(cert.context("failed to parse cert PEM")?)
+            .context("failed to add cert to root store")?;
+    }
+    let mut tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls_config.alpn_protocols = alpn_protocols;
+    Ok(ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)?,
+    )))
+}
+
 #[derive(Debug)]
 struct InsecureServerCertVerifier;
 
@@ -138,6 +189,8 @@ impl ServerCertVerifier for InsecureServerCertVerifier {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use super::*;
 
     #[test]
@@ -171,6 +224,14 @@ mod tests {
     }
 
     #[test]
+    fn trusted_client_config_with_alpn_accepts_pem_root() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (cert_pem, _) = generate_self_signed_cert().unwrap();
+        let _config =
+            build_trusted_quic_client_config_with_alpn(&cert_pem, vec![b"h3".to_vec()]).unwrap();
+    }
+
+    #[test]
     fn server_tls_identity_requires_complete_pem_pair() {
         let cert_pem = b"cert".to_vec();
         let key_pem = b"key".to_vec();
@@ -189,5 +250,17 @@ mod tests {
         );
         assert!(ServerTlsIdentity::from_optional_pem(Some(cert_pem), None).is_err());
         assert!(ServerTlsIdentity::from_optional_pem(None, Some(key_pem)).is_err());
+    }
+
+    #[test]
+    fn ordered_dial_candidates_prioritize_ipv4_without_discarding_ipv6() {
+        let ipv6: SocketAddr = "[fd00::1]:50072"
+            .parse()
+            .expect("IPv6 address should parse");
+        let ipv4: SocketAddr = "10.0.0.4:50072".parse().expect("IPv4 address should parse");
+
+        assert_eq!(ordered_dial_candidates([ipv6, ipv4]), vec![ipv4, ipv6]);
+        assert_eq!(quic_client_bind_addr(ipv4), "0.0.0.0:0".parse().unwrap());
+        assert_eq!(quic_client_bind_addr(ipv6), "[::]:0".parse().unwrap());
     }
 }

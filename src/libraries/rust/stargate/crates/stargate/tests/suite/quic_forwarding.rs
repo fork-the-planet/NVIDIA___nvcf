@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::{
-    MapResolver, base_config, bind_ephemeral, bind_ephemeral_udp, init_crypto, start_dummy_backend,
-    wait_for_routing, wait_for_unroutable,
+    MapResolver, base_config, bind_ephemeral, bind_ephemeral_udp, init_crypto,
+    localhost_reverse_tunnel_config, start_dummy_backend, wait_for_routing, wait_for_unroutable,
 };
 use pylon_lib::{
     OutputTokenParserFactory, ReverseQuicTunnelConfig, ReverseQuicTunnelHandle,
@@ -94,7 +94,8 @@ impl TwoStargatesQuic {
     }
 }
 
-/// Spins up two stargates with reverse tunnel + QUIC forwarding.
+/// Spins up two stargates with reverse tunnel + development-only QUIC peer
+/// relay coverage.
 /// Resolver on A maps "sg-b.stargate.external" -> B's reverse tunnel addr.
 /// Resolver on B maps "sg-a.stargate.external" -> A's reverse tunnel addr.
 async fn start_two_stargates_with_quic() -> TwoStargatesQuic {
@@ -131,8 +132,7 @@ async fn start_two_stargates_with_quic_tls(
     let discovery_a = crate::common::SharedDiscovery::new("sg-a", grpc_a, http_a, peers.clone());
     let mut config_a = base_config("sg-a", grpc_a, http_a);
     config_a.dns_poll_interval = Duration::from_secs(1);
-    config_a.advertised_hostname_template = Some("localhost".to_string());
-    config_a.reverse_tunnel_listen_addr = Some(reverse_a);
+    config_a.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_a));
     // Exercise both secure and insecure QUIC relay modes from the same topology helper.
     config_a.proxy_transport.tls_cert_pem = tls_cert_pem.clone();
     config_a.proxy_transport.server_tls_identity = server_tls_identity.clone();
@@ -147,8 +147,7 @@ async fn start_two_stargates_with_quic_tls(
     let discovery_b = crate::common::SharedDiscovery::new("sg-b", grpc_b, http_b, peers.clone());
     let mut config_b = base_config("sg-b", grpc_b, http_b);
     config_b.dns_poll_interval = Duration::from_secs(1);
-    config_b.advertised_hostname_template = Some("localhost".to_string());
-    config_b.reverse_tunnel_listen_addr = Some(reverse_b);
+    config_b.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_b));
     // Exercise both secure and insecure QUIC relay modes from the same topology helper.
     config_b.proxy_transport.tls_cert_pem = tls_cert_pem;
     config_b.proxy_transport.server_tls_identity = server_tls_identity;
@@ -637,8 +636,7 @@ async fn relayed_tunnel_peer_unreachable() {
     let discovery_a = crate::common::SharedDiscovery::new("sg-a", grpc_a, http_a, peers.clone());
     let mut config_a = base_config("sg-a", grpc_a, http_a);
     config_a.dns_poll_interval = Duration::from_secs(1);
-    config_a.advertised_hostname_template = Some("localhost".to_string());
-    config_a.reverse_tunnel_listen_addr = Some(reverse_a);
+    config_a.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_a));
     let runtime_a = stargate::runtime::StargateRuntime::new(config_a, Box::new(discovery_a))
         .with_forwarding(resolver_a)
         .with_grpc_listener(grpc_listener_a)

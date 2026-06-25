@@ -13,31 +13,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use indexmap::IndexMap;
 use tokio::time::Instant as TokioInstant;
+use tokio_util::sync::CancellationToken;
 
-use crate::queue_admission::QueueAdmissionTracker;
-use crate::{CurrentModelStats, RequestObservation};
+#[cfg(test)]
+use crate::RequestObservation;
+use crate::{CurrentModelStats, PylonRuntimeState, RequestObservationEvent};
+use stargate_runtime::{OwnedTask, TASK_SHUTDOWN_TIMEOUT};
 
-use super::aggregator::{
-    InFlightRequestState, KvCacheStatsSnapshot, ModelMetricsState, SharedStatsAggregator,
-    current_unix_millis, effective_last_mean_input_tps, fixed_last_mean_input_tps,
-    valid_last_mean_input_tps,
-};
-use super::mean_input_tps::{
-    MeanInputTpsAggregatorConfig, MeanInputTpsObservation, run_mean_input_tps_aggregator,
-};
+use super::aggregator::{KvCacheStatsSnapshot, StatsAggregator, fixed_last_mean_input_tps};
+#[cfg(test)]
 use super::metrics::PylonMetrics;
-use super::projection::{
-    attach_lifecycle_load, fallback_updates_from_observation, record_lifecycle_observation,
-    record_observation, shared_snapshots_with_lifecycle_load, snapshot_model_stats,
-    stream_mode_observation_updates_from_observation,
-};
 
 const DEFAULT_OBSERVATION_CHANNEL_CAPACITY: usize = 1024;
 const DEFAULT_SMOOTHING_WINDOW_SIZE: usize = 8;
@@ -67,8 +56,6 @@ pub struct StatsCollectorConfig {
     pub engine_stats_model_ttl: Duration,
     pub engine_stats_sweep_interval: Duration,
     pub openai_fallback_stats_enabled: bool,
-    pub queue_tracker: QueueAdmissionTracker,
-    pub metrics: Option<Arc<PylonMetrics>>,
 }
 
 impl Default for StatsCollectorConfig {
@@ -88,19 +75,8 @@ impl Default for StatsCollectorConfig {
             engine_stats_model_ttl: DEFAULT_ENGINE_STATS_MODEL_TTL,
             engine_stats_sweep_interval: DEFAULT_ENGINE_STATS_SWEEP_INTERVAL,
             openai_fallback_stats_enabled: true,
-            queue_tracker: QueueAdmissionTracker::default(),
-            metrics: None,
         }
     }
-}
-
-pub fn request_observation_channel(
-    config: &StatsCollectorConfig,
-) -> (
-    flume::Sender<RequestObservation>,
-    flume::Receiver<RequestObservation>,
-) {
-    flume::bounded(config.observation_channel_capacity)
 }
 
 pub fn stats_aggregator_update_channel(
@@ -113,13 +89,16 @@ pub fn stats_aggregator_update_channel(
 }
 
 pub struct StatsCollectorHandle {
-    task: JoinHandle<()>,
+    task: OwnedTask,
 }
 
 impl StatsCollectorHandle {
+    pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
+        self.task.wait_for_exit().await
+    }
+
     pub async fn shutdown(self) {
-        self.task.abort();
-        let _ = self.task.await;
+        self.task.shutdown(TASK_SHUTDOWN_TIMEOUT).await;
     }
 }
 
@@ -132,7 +111,6 @@ pub enum StatsUpdateSource {
 #[derive(Debug, Clone)]
 pub enum StatsAggregatorUpdate {
     RequestCounters(RequestCounterUpdate),
-    RequestObservation(RequestObservationStatsUpdate),
     FinalizeRequest(FinalizeRequestUpdate),
     EnableOpenAiFallback,
 }
@@ -183,16 +161,6 @@ impl RequestCounterUpdate {
 }
 
 #[derive(Debug, Clone)]
-pub struct RequestObservationStatsUpdate {
-    pub(crate) model_id: String,
-    pub(crate) input_tokens: Option<u64>,
-    pub(crate) input_duration: Option<Duration>,
-    pub(crate) clamp_input_duration_to_floor: bool,
-    pub(crate) embedding_items: Option<u64>,
-    pub(crate) embedding_duration: Option<Duration>,
-}
-
-#[derive(Debug, Clone)]
 pub struct FinalizeRequestUpdate {
     pub(crate) source: StatsUpdateSource,
     pub(crate) request_id: String,
@@ -215,281 +183,83 @@ impl FinalizeRequestUpdate {
 
 pub fn start_stats_collector(
     config: StatsCollectorConfig,
-    observation_rx: flume::Receiver<RequestObservation>,
-    model_stats_tx: flume::Sender<(String, CurrentModelStats)>,
-    stop_rx: watch::Receiver<bool>,
+    observation_rx: flume::Receiver<RequestObservationEvent>,
+    runtime_state: PylonRuntimeState,
 ) -> StatsCollectorHandle {
-    start_stats_collector_with_engine_stats(config, observation_rx, None, model_stats_tx, stop_rx)
+    start_stats_collector_with_engine_stats(config, observation_rx, None, runtime_state)
 }
 
 pub fn start_stats_collector_with_engine_stats(
     mut config: StatsCollectorConfig,
-    observation_rx: flume::Receiver<RequestObservation>,
+    observation_rx: flume::Receiver<RequestObservationEvent>,
     stats_update_rx: Option<flume::Receiver<StatsAggregatorUpdate>>,
-    model_stats_tx: flume::Sender<(String, CurrentModelStats)>,
-    stop_rx: watch::Receiver<bool>,
+    runtime_state: PylonRuntimeState,
 ) -> StatsCollectorHandle {
     if stats_update_rx.is_some() {
         // A wired engine stats stream is the throughput source of truth. Auto
         // mode falls back only after the stream task sends EnableOpenAiFallback.
         config.openai_fallback_stats_enabled = false;
     }
-    let task = tokio::spawn(async move {
-        run_stats_collector(
-            config,
-            observation_rx,
-            stats_update_rx,
-            model_stats_tx,
-            stop_rx,
-        )
-        .await;
+    let task = OwnedTask::spawn("stats collector", move |stop| async move {
+        run_stats_collector(config, observation_rx, stats_update_rx, runtime_state, stop).await;
     });
     StatsCollectorHandle { task }
 }
 
-#[derive(Clone, Copy)]
-enum ModelStatsSendMode {
-    Await,
-    TryFirst,
-}
-
-async fn send_model_stats_update(
-    config: &StatsCollectorConfig,
-    model_stats_tx: &flume::Sender<(String, CurrentModelStats)>,
+fn publish_model_stats_update(
+    runtime_state: &PylonRuntimeState,
     model_id: String,
     stats: CurrentModelStats,
-    reason: &'static str,
-    mode: ModelStatsSendMode,
-) -> bool {
-    observe_model_metric(config, &model_id, &stats);
-    match mode {
-        ModelStatsSendMode::Await => {
-            let log_model_id = model_id.clone();
-            if let Err(error) = model_stats_tx.send_async((model_id, stats)).await {
-                tracing::warn!(
-                    model_id = %log_model_id,
-                    reason,
-                    error = %error,
-                    "dropping model stats update"
-                );
-                return false;
-            }
-        }
-        ModelStatsSendMode::TryFirst => match model_stats_tx.try_send((model_id, stats)) {
-            Ok(()) => {}
-            Err(flume::TrySendError::Full(update)) => {
-                let log_model_id = update.0.clone();
-                if let Err(error) = model_stats_tx.send_async(update).await {
-                    tracing::warn!(
-                        model_id = %log_model_id,
-                        reason,
-                        error = %error,
-                        "dropping model stats update"
-                    );
-                    return false;
-                }
-            }
-            Err(flume::TrySendError::Disconnected((model_id, _))) => {
-                tracing::warn!(
-                    model_id = %model_id,
-                    reason,
-                    "dropping model stats update after receiver closed"
-                );
-                return false;
-            }
-        },
-    }
-    true
+) {
+    observe_model_metric(runtime_state, &model_id, &stats);
+    runtime_state.set_model_stats(model_id, stats);
 }
 
-async fn send_model_stats_updates(
-    config: &StatsCollectorConfig,
-    model_stats_tx: &flume::Sender<(String, CurrentModelStats)>,
+fn publish_model_stats_updates(
+    runtime_state: &PylonRuntimeState,
     updates: Vec<(String, CurrentModelStats)>,
-    reason: &'static str,
-    mode: ModelStatsSendMode,
-) -> bool {
+) {
     for (model_id, stats) in updates {
-        if !send_model_stats_update(config, model_stats_tx, model_id, stats, reason, mode).await {
-            return false;
-        }
+        publish_model_stats_update(runtime_state, model_id, stats);
     }
-    true
 }
 
 async fn run_stats_collector(
     config: StatsCollectorConfig,
-    observation_rx: flume::Receiver<RequestObservation>,
+    observation_rx: flume::Receiver<RequestObservationEvent>,
     mut stats_update_rx: Option<flume::Receiver<StatsAggregatorUpdate>>,
-    model_stats_tx: flume::Sender<(String, CurrentModelStats)>,
-    mut stop_rx: watch::Receiver<bool>,
+    runtime_state: PylonRuntimeState,
+    stop: CancellationToken,
 ) {
-    let mut per_model = HashMap::<String, ModelMetricsState>::new();
-    let mut in_flight = HashMap::<String, InFlightRequestState>::new();
+    let mut aggregator = StatsAggregator::new(config.clone(), runtime_state.clone());
     if let Some(last_mean_input_tps) = fixed_last_mean_input_tps(&config) {
         for model_id in &config.configured_model_ids {
-            config
-                .queue_tracker
-                .update_model_throughput(model_id, last_mean_input_tps);
-            let stats = snapshot_model_stats(&config, &mut per_model, &in_flight, model_id);
-            if !send_model_stats_update(
-                &config,
-                &model_stats_tx,
-                model_id.clone(),
-                stats,
-                "configured fixed input TPS stats",
-                ModelStatsSendMode::Await,
-            )
-            .await
-            {
-                return;
-            }
+            runtime_state.update_model_throughput(model_id, last_mean_input_tps);
+            let stats = aggregator.snapshot(model_id);
+            publish_model_stats_update(&runtime_state, model_id.clone(), stats);
         }
     }
-    let mut shared_aggregator = SharedStatsAggregator::new(config.clone());
-    let (mean_input_tps_tx, mean_input_tps_rx) =
-        flume::bounded(config.observation_channel_capacity);
-    // This carries thresholded per-model mean updates, not raw request observations. Keep it
-    // non-blocking so bounded input backpressure cannot deadlock the collector and aggregator.
-    let (mean_input_tps_update_tx, mean_input_tps_update_rx) = flume::unbounded();
-    let mean_input_tps_config = MeanInputTpsAggregatorConfig::from(&config);
-    let mean_input_tps_task = tokio::spawn(run_mean_input_tps_aggregator(
-        mean_input_tps_config,
-        mean_input_tps_rx,
-        mean_input_tps_update_tx,
-    ));
     let http_client = reqwest::Client::new();
     let mut kv_cache_poll = tokio::time::interval(config.kv_cache_poll_interval);
     kv_cache_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut engine_stats_sweep = tokio::time::interval(config.engine_stats_sweep_interval);
     engine_stats_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut openai_fallback_stats_enabled = config.openai_fallback_stats_enabled;
     let mut stats_aggregator_updated_models = Vec::with_capacity(2);
-    let mut stats_aggregator_latest_models = Vec::with_capacity(2);
+    let mut stats_aggregator_latest_models = IndexMap::with_capacity(2);
 
     'collector: loop {
         tokio::select! {
-            _ = stop_rx.changed() => {
-                if *stop_rx.borrow() {
-                    break 'collector;
-                }
-            }
-            observation = observation_rx.recv_async() => {
-                let Ok(observation) = observation else {
+            _ = stop.cancelled() => break 'collector,
+            event = observation_rx.recv_async() => {
+                let Ok(event) = event else {
                     break 'collector;
                 };
-                if openai_fallback_stats_enabled {
-                    let mean_input_observation =
-                        MeanInputTpsObservation::from_request_observation(&observation);
-                    if let Err(error) = mean_input_tps_tx.send_async(mean_input_observation).await {
-                        tracing::warn!(error = %error, "stopping stats collector after mean input TPS aggregator closed");
-                        break 'collector;
-                    }
-                    let updated_models = record_observation(
-                        &config,
-                        &mut per_model,
-                        &mut in_flight,
-                        &observation,
-                    );
-                    observe_request_metric(&config, &observation);
-                    if !send_model_stats_updates(
-                        &config,
-                        &model_stats_tx,
-                        updated_models,
-                        "collected stats",
-                        ModelStatsSendMode::Await,
-                    )
-                    .await
-                    {
-                        break 'collector;
-                    }
+                let updated_models = if aggregator.openai_fallback_stats_enabled() {
+                    aggregator.apply_fallback_observation(&event)
                 } else {
-                    observe_request_metric(&config, &observation);
-                    let updated_model_ids = record_lifecycle_observation(
-                        &config,
-                        &mut per_model,
-                        &mut in_flight,
-                        &observation,
-                    );
-                    let updated_models = shared_snapshots_with_lifecycle_load(
-                        &config,
-                        &mut per_model,
-                        &in_flight,
-                        &shared_aggregator,
-                        updated_model_ids,
-                    );
-                    if !send_model_stats_updates(
-                        &config,
-                        &model_stats_tx,
-                        updated_models,
-                        "stream-mode request lifecycle stats",
-                        ModelStatsSendMode::Await,
-                    )
-                    .await
-                    {
-                        break 'collector;
-                    }
-                    for update in stream_mode_observation_updates_from_observation(&observation) {
-                        let mut updated_models = shared_aggregator.apply_update(update);
-                        attach_lifecycle_load(&config, &mut per_model, &in_flight, &mut updated_models);
-                        if !send_model_stats_updates(
-                            &config,
-                            &model_stats_tx,
-                            updated_models,
-                            "stream-mode request observation stats aggregator update",
-                            ModelStatsSendMode::Await,
-                        )
-                        .await
-                        {
-                            break 'collector;
-                        }
-                    }
-                }
-                if openai_fallback_stats_enabled {
-                    for update in fallback_updates_from_observation(&observation) {
-                        let mut updated_models = shared_aggregator.apply_update(update);
-                        attach_lifecycle_load(&config, &mut per_model, &in_flight, &mut updated_models);
-                        if !send_model_stats_updates(
-                            &config,
-                            &model_stats_tx,
-                            updated_models,
-                            "fallback stats aggregator update",
-                            ModelStatsSendMode::Await,
-                        )
-                        .await
-                        {
-                            break 'collector;
-                        }
-                    }
-                }
-            }
-            update = mean_input_tps_update_rx.recv_async() => {
-                let Ok(update) = update else {
-                    break 'collector;
+                    aggregator.apply_stream_observation(&event)
                 };
-                if !valid_last_mean_input_tps(update.last_mean_input_tps) {
-                    continue;
-                }
-                let last_mean_input_tps =
-                    effective_last_mean_input_tps(&config, update.last_mean_input_tps);
-                let model_state = per_model.entry(update.model_id.clone()).or_default();
-                model_state.last_mean_input_tps = last_mean_input_tps;
-                config
-                    .queue_tracker
-                    .update_model_throughput(&update.model_id, last_mean_input_tps);
-                let updated_stats = snapshot_model_stats(&config, &mut per_model, &in_flight, &update.model_id);
-                if !send_model_stats_update(
-                    &config,
-                    &model_stats_tx,
-                    update.model_id,
-                    updated_stats,
-                    "collected mean input TPS stats",
-                    ModelStatsSendMode::Await,
-                )
-                .await
-                {
-                    break 'collector;
-                }
+                publish_model_stats_updates(&runtime_state, updated_models);
             }
             update = async {
                 match &stats_update_rx {
@@ -501,135 +271,76 @@ async fn run_stats_collector(
                     stats_update_rx = None;
                     continue;
                 };
-                if apply_engine_stats_control_update(
-                    &config,
-                    &mut openai_fallback_stats_enabled,
-                    &update,
-                ) {
+                if aggregator.apply_control_update(&update) {
                     continue;
                 }
                 stats_aggregator_updated_models.clear();
-                shared_aggregator.apply_update_into(update, &mut stats_aggregator_updated_models);
+                aggregator.apply_update_into(update, &mut stats_aggregator_updated_models);
                 if let Some(rx) = &stats_update_rx {
                     while let Ok(update) = rx.try_recv() {
-                        if apply_engine_stats_control_update(
-                            &config,
-                            &mut openai_fallback_stats_enabled,
-                            &update,
-                        ) {
+                        if aggregator.apply_control_update(&update) {
                             continue;
                         }
-                        shared_aggregator.apply_update_into(
-                            update,
-                            &mut stats_aggregator_updated_models,
-                        );
+                        aggregator.apply_update_into(update, &mut stats_aggregator_updated_models);
                     }
                 }
                 retain_latest_model_updates(
                     &mut stats_aggregator_updated_models,
                     &mut stats_aggregator_latest_models,
                 );
-                attach_lifecycle_load(
-                    &config,
-                    &mut per_model,
-                    &in_flight,
-                    &mut stats_aggregator_updated_models,
-                );
-                if let Some(metrics) = &config.metrics {
+                if let Some(metrics) = runtime_state.metrics() {
                     metrics.observe_engine_stats_live_requests(
                         "engine_stats_stream",
-                        shared_aggregator.live_request_count(),
+                        aggregator.live_request_count(),
                     );
                     metrics.observe_engine_stats_model_states(
                         "engine_stats_stream",
-                        shared_aggregator.model_state_count(),
+                        aggregator.model_state_count(),
                     );
                 }
-                if !send_model_stats_updates(
-                    &config,
-                    &model_stats_tx,
+                publish_model_stats_updates(
+                    &runtime_state,
                     std::mem::take(&mut stats_aggregator_updated_models),
-                    "collected engine stats stream stats",
-                    ModelStatsSendMode::TryFirst,
-                )
-                .await
-                {
-                    break 'collector;
-                }
+                );
             }
             _ = engine_stats_sweep.tick() => {
-                let mut updated_models = shared_aggregator.sweep_stale(TokioInstant::now());
-                attach_lifecycle_load(&config, &mut per_model, &in_flight, &mut updated_models);
-                if let Some(metrics) = &config.metrics {
+                let updated_models = aggregator.sweep_stale(TokioInstant::now());
+                if let Some(metrics) = runtime_state.metrics() {
                     metrics.observe_engine_stats_live_requests(
                         "engine_stats_stream",
-                        shared_aggregator.live_request_count(),
+                        aggregator.live_request_count(),
                     );
                 }
-                if !send_model_stats_updates(
-                    &config,
-                    &model_stats_tx,
-                    updated_models,
-                    "stale engine stats cleanup update",
-                    ModelStatsSendMode::Await,
-                )
-                .await
-                {
-                    break 'collector;
-                }
+                publish_model_stats_updates(&runtime_state, updated_models);
             }
             _ = kv_cache_poll.tick(), if config.kv_cache_stats_url.is_some() => {
-                let Some(kv_cache) = poll_kv_cache_stats(&config, &http_client).await else {
+                let Some(kv_cache) = stop
+                    .run_until_cancelled(poll_kv_cache_stats(&config, &http_client))
+                    .await
+                else {
+                    break 'collector;
+                };
+                let Some(kv_cache) = kv_cache else {
                     continue;
                 };
                 if kv_cache.model.is_empty() {
                     tracing::warn!("dropping KV-cache stats without model id");
                     continue;
                 }
-                if !kv_cache_stats_model_allowed(&config, &kv_cache) {
+                let model_id = kv_cache.model.clone();
+                let Some((model_id, updated_stats)) = aggregator.apply_kv_cache_stats(kv_cache)
+                else {
                     tracing::warn!(
-                        model_id = %kv_cache.model,
+                        model_id,
                         configured_models = ?config.configured_model_ids,
                         "dropping KV-cache stats for unconfigured model"
                     );
                     continue;
-                }
-                let model_id = kv_cache.model.clone();
-                let model_state = per_model.entry(model_id.clone()).or_default();
-                model_state.kv_cache = kv_cache;
-                model_state.kv_cache_stats_observed = true;
-                model_state.stats_observed_at_unix_ms = current_unix_millis();
-                let updated_stats =
-                    snapshot_model_stats(&config, &mut per_model, &in_flight, &model_id);
-                if !send_model_stats_update(
-                    &config,
-                    &model_stats_tx,
-                    model_id,
-                    updated_stats,
-                    "collected KV-cache stats",
-                    ModelStatsSendMode::Await,
-                )
-                .await
-                {
-                    break 'collector;
-                }
+                };
+                publish_model_stats_update(&runtime_state, model_id, updated_stats);
             }
         }
     }
-
-    mean_input_tps_task.abort();
-    let _ = mean_input_tps_task.await;
-}
-
-fn kv_cache_stats_model_allowed(
-    config: &StatsCollectorConfig,
-    kv_cache: &KvCacheStatsSnapshot,
-) -> bool {
-    config.configured_model_ids.is_empty()
-        || config
-            .configured_model_ids
-            .iter()
-            .any(|model_id| model_id == &kv_cache.model)
 }
 
 async fn poll_kv_cache_stats(
@@ -662,76 +373,87 @@ async fn poll_kv_cache_stats(
     }
 }
 
-fn observe_request_metric(config: &StatsCollectorConfig, observation: &RequestObservation) {
-    let Some(metrics) = &config.metrics else {
-        return;
-    };
-
-    metrics.observe_request_observation(observation);
-}
-
-fn observe_model_metric(config: &StatsCollectorConfig, model_id: &str, stats: &CurrentModelStats) {
-    let Some(metrics) = &config.metrics else {
+fn observe_model_metric(
+    runtime_state: &PylonRuntimeState,
+    model_id: &str,
+    stats: &CurrentModelStats,
+) {
+    let Some(metrics) = runtime_state.metrics() else {
         return;
     };
 
     metrics.observe_model_stats(model_id, stats);
 }
 
-fn apply_engine_stats_control_update(
-    config: &StatsCollectorConfig,
-    openai_fallback_stats_enabled: &mut bool,
-    update: &StatsAggregatorUpdate,
-) -> bool {
-    if !matches!(update, StatsAggregatorUpdate::EnableOpenAiFallback) {
-        return false;
-    }
-    if !*openai_fallback_stats_enabled {
-        *openai_fallback_stats_enabled = true;
-        tracing::warn!("OpenAI fallback stats enabled after engine stats stream was unsupported");
-        if let Some(metrics) = &config.metrics {
-            metrics.observe_engine_stats_source_transition(
-                "engine_stats_stream",
-                "openai_fallback",
-                "unsupported",
-            );
-        }
-    }
-    true
-}
-
 fn retain_latest_model_updates(
     updates: &mut Vec<(String, CurrentModelStats)>,
-    scratch: &mut Vec<(String, CurrentModelStats)>,
+    latest_by_model: &mut IndexMap<String, CurrentModelStats>,
 ) {
-    scratch.clear();
-    while let Some(update) = updates.pop() {
-        if !scratch.iter().any(|(model_id, _)| model_id == &update.0) {
-            scratch.push(update);
-        }
+    latest_by_model.clear();
+    while let Some((model_id, stats)) = updates.pop() {
+        latest_by_model.entry(model_id).or_insert(stats);
     }
-    while let Some(update) = scratch.pop() {
+    while let Some(update) = latest_by_model.pop() {
         updates.push(update);
     }
 }
 #[cfg(test)]
 mod tests {
-    use super::super::aggregator::{
-        KvCacheStatsSnapshot, ModelMetricsState, SharedStatsAggregator,
-    };
-    use super::super::mean_input_tps::{
-        MeanInputTpsAggregator, MeanInputTpsAggregatorConfig, MeanInputTpsObservation,
-        MeanInputTpsUpdate,
-    };
-    use super::super::projection::{
-        fallback_updates_from_observation, record_lifecycle_observation, record_observation,
-        snapshot_model_stats, stream_mode_observation_updates_from_observation,
-    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::super::aggregator::{KvCacheStatsSnapshot, StatsAggregator};
+    use super::super::projection::fallback_update_from_observation;
     use super::*;
     use crate::request_observer::RequestObservationEndpoint;
     use crate::request_observer::RequestObservationState;
     use axum::{Json, Router, routing::get};
     use tokio::net::TcpListener;
+
+    const MODEL_STATS_TEST_TIMEOUT: Duration = Duration::from_millis(500);
+
+    fn observed_runtime(
+        config: &StatsCollectorConfig,
+    ) -> (PylonRuntimeState, flume::Receiver<RequestObservationEvent>) {
+        PylonRuntimeState::observed(
+            stargate_proto::pb::InferenceServerStatus::Unknown,
+            &[],
+            config.observation_channel_capacity,
+            None,
+        )
+    }
+
+    fn observed_runtime_with_metrics(
+        config: &StatsCollectorConfig,
+        metrics: Arc<PylonMetrics>,
+    ) -> (PylonRuntimeState, flume::Receiver<RequestObservationEvent>) {
+        PylonRuntimeState::observed(
+            stargate_proto::pb::InferenceServerStatus::Unknown,
+            &[],
+            config.observation_channel_capacity,
+            Some(metrics),
+        )
+    }
+
+    fn apply_fallback_observation(
+        aggregator: &mut StatsAggregator,
+        observation: &RequestObservation,
+    ) -> Vec<(String, CurrentModelStats)> {
+        let event = aggregator
+            .runtime_state
+            .transition_request_observation(observation.clone());
+        aggregator.apply_fallback_observation(&event)
+    }
+
+    fn apply_stream_observation(
+        aggregator: &mut StatsAggregator,
+        observation: &RequestObservation,
+    ) -> Vec<(String, CurrentModelStats)> {
+        let event = aggregator
+            .runtime_state
+            .transition_request_observation(observation.clone());
+        aggregator.apply_stream_observation(&event)
+    }
 
     fn completed_observation(
         input_tokens: u64,
@@ -818,22 +540,6 @@ mod tests {
         }
     }
 
-    async fn receive_mean_input_update(
-        update_rx: &flume::Receiver<MeanInputTpsUpdate>,
-    ) -> MeanInputTpsUpdate {
-        for _ in 0..20 {
-            if let Ok(update) = update_rx.try_recv() {
-                return update;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("mean input TPS update was not published");
-    }
-
-    fn mean_input_observation(observation: &RequestObservation) -> MeanInputTpsObservation {
-        MeanInputTpsObservation::from_request_observation(observation)
-    }
-
     #[test]
     fn latest_model_update_retention_keeps_last_snapshot_per_model() {
         let mut updates = vec![
@@ -858,17 +564,33 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            (
+                "model-c".to_string(),
+                CurrentModelStats {
+                    output_tps: 4.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "model-b".to_string(),
+                CurrentModelStats {
+                    output_tps: 5.0,
+                    ..Default::default()
+                },
+            ),
         ];
-        let mut scratch = Vec::new();
+        let mut latest_by_model = indexmap::IndexMap::new();
 
-        retain_latest_model_updates(&mut updates, &mut scratch);
+        retain_latest_model_updates(&mut updates, &mut latest_by_model);
 
-        assert_eq!(updates.len(), 2);
-        assert_eq!(updates[0].0, "model-b");
-        assert_eq!(updates[0].1.output_tps, 2.0);
-        assert_eq!(updates[1].0, "model-a");
-        assert_eq!(updates[1].1.output_tps, 3.0);
-        assert!(scratch.is_empty());
+        assert_eq!(updates.len(), 3);
+        assert_eq!(updates[0].0, "model-a");
+        assert_eq!(updates[0].1.output_tps, 3.0);
+        assert_eq!(updates[1].0, "model-c");
+        assert_eq!(updates[1].1.output_tps, 4.0);
+        assert_eq!(updates[2].0, "model-b");
+        assert_eq!(updates[2].1.output_tps, 5.0);
+        assert!(latest_by_model.is_empty());
     }
 
     fn stream_counter_update(
@@ -925,31 +647,51 @@ mod tests {
         })
     }
 
-    async fn receive_model_stats_with_last_mean_input_tps(
-        model_stats_rx: &flume::Receiver<(String, CurrentModelStats)>,
-        expected_last_mean_input_tps: f64,
+    fn counter_update_for_model(
+        source: StatsUpdateSource,
+        request_id: &str,
+        model_id: &str,
+        tokens_processed: u64,
+        tokens_generated: u64,
+        finished: bool,
+        observed_at: TokioInstant,
+    ) -> StatsAggregatorUpdate {
+        StatsAggregatorUpdate::RequestCounters(RequestCounterUpdate {
+            source,
+            request_id: request_id.to_string(),
+            model_id: model_id.to_string(),
+            tokens_processed: Some(tokens_processed),
+            tokens_generated: Some(tokens_generated),
+            finished,
+            observed_at,
+        })
+    }
+
+    async fn wait_for_model_stats(
+        runtime_state: &PylonRuntimeState,
+        model_id: &str,
+        context: &str,
+        predicate: impl Fn(&CurrentModelStats) -> bool,
     ) -> CurrentModelStats {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(MODEL_STATS_TEST_TIMEOUT, async {
+            let mut poll = tokio::time::interval(Duration::from_millis(1));
             loop {
-                let (model_id, stats) = model_stats_rx
-                    .recv_async()
-                    .await
-                    .expect("model stats channel should stay open");
-                if model_id == "model-a"
-                    && stats.last_mean_input_tps == expected_last_mean_input_tps
+                poll.tick().await;
+                if let Some(stats) = runtime_state.model_stats(model_id)
+                    && predicate(&stats)
                 {
                     return stats;
                 }
             }
         })
         .await
-        .expect("model stats with expected last_mean_input_tps were not published")
+        .unwrap_or_else(|_| panic!("{context}"))
     }
 
     #[test]
-    fn stats_stream_cumulative_request_counters_drive_shared_aggregator() {
+    fn stats_stream_cumulative_request_counters_drive_stats_aggregator() {
         let config = StatsCollectorConfig::default();
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         aggregator.apply_update(stream_counter_update("req-a", 0, 0, false, start));
@@ -996,7 +738,7 @@ mod tests {
             fixed_last_mean_input_tps: Some(2_200.0),
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         let stats = aggregator
@@ -1034,7 +776,7 @@ mod tests {
             duration_floor: Duration::from_millis(100),
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         let stats = aggregator
@@ -1074,7 +816,7 @@ mod tests {
             duration_floor: Duration::from_millis(100),
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         let label_stats = aggregator
@@ -1108,7 +850,7 @@ mod tests {
             duration_floor: Duration::from_millis(10),
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         aggregator.apply_update(stream_counter_update("req-live", 0, 0, false, start));
@@ -1161,7 +903,7 @@ mod tests {
             duration_floor: Duration::from_millis(10),
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         aggregator.apply_update(stream_counter_partial_update(
@@ -1217,7 +959,7 @@ mod tests {
             min_output_tokens: 5,
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         aggregator.apply_update(stream_counter_update("req-min", 0, 0, false, start));
@@ -1254,8 +996,9 @@ mod tests {
     fn fallback_and_stream_cumulative_counters_share_stats_math() {
         let config = StatsCollectorConfig::default();
         let start = TokioInstant::now();
-        let mut stream_aggregator = SharedStatsAggregator::new(config.clone());
-        let mut fallback_aggregator = SharedStatsAggregator::new(config);
+        let mut stream_aggregator =
+            StatsAggregator::new(config.clone(), PylonRuntimeState::default());
+        let mut fallback_aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
         for tick in 0..=5 {
             let observed_at = start + Duration::from_millis(tick * 100);
@@ -1295,18 +1038,91 @@ mod tests {
     }
 
     #[test]
+    fn request_counter_model_reset_finalizes_without_late_replay() {
+        let config = StatsCollectorConfig::default();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+        let start = TokioInstant::now();
+
+        let original_model = aggregator
+            .apply_update(counter_update_for_model(
+                StatsUpdateSource::EngineStatsStream,
+                "req-reused",
+                "model-a",
+                0,
+                0,
+                false,
+                start,
+            ))
+            .pop()
+            .expect("first stream event should publish model-a source labels");
+        assert_eq!(original_model.0, "model-a");
+        assert_eq!(original_model.1.output_tps, 0.0);
+        assert_eq!(aggregator.live_request_count(), 1);
+
+        let replacement_model = aggregator
+            .apply_update(counter_update_for_model(
+                StatsUpdateSource::EngineStatsStream,
+                "req-reused",
+                "model-b",
+                0,
+                0,
+                false,
+                start + Duration::from_millis(50),
+            ))
+            .pop()
+            .expect("model change should reset request state and publish model-b source labels");
+        assert_eq!(replacement_model.0, "model-b");
+        assert_eq!(replacement_model.1.output_tps, 0.0);
+        assert_eq!(aggregator.live_request_count(), 1);
+
+        let finalized = aggregator
+            .apply_update(counter_update_for_model(
+                StatsUpdateSource::OpenAiFallback,
+                "req-reused",
+                "model-b",
+                10,
+                4,
+                true,
+                start + Duration::from_millis(150),
+            ))
+            .pop()
+            .expect("fallback finalization should publish the replacement model snapshot");
+        assert_eq!(finalized.0, "model-b");
+        assert_eq!(finalized.1.output_tps, 40.0);
+        assert_eq!(finalized.1.max_output_tps, 40.0);
+        assert_eq!(
+            finalized.1.stats_sources,
+            vec!["engine_stats_stream".to_string()]
+        );
+        assert_eq!(aggregator.live_request_count(), 0);
+
+        let late_replay = aggregator.apply_update(counter_update_for_model(
+            StatsUpdateSource::EngineStatsStream,
+            "req-reused",
+            "model-b",
+            10,
+            8,
+            true,
+            start + Duration::from_millis(200),
+        ));
+        assert!(
+            late_replay.is_empty(),
+            "late stream replay after fallback finalization must not double-count"
+        );
+        assert_eq!(aggregator.live_request_count(), 0);
+    }
+
+    #[test]
     fn dirty_fallback_counter_snapshots_preserve_lifecycle_load() {
         let config = StatsCollectorConfig::default();
         let start = TokioInstant::now();
-        let mut aggregator = SharedStatsAggregator::new(config.clone());
-        let mut per_model: HashMap<String, ModelMetricsState> = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let observation = active_chat_observation(
             "req-fallback-live-load",
             RequestObservationState::OutputGeneration,
         );
 
-        record_lifecycle_observation(&config, &mut per_model, &mut in_flight, &observation);
+        apply_stream_observation(&mut aggregator, &observation);
         assert!(
             aggregator
                 .apply_update(fallback_counter_update(
@@ -1320,15 +1136,14 @@ mod tests {
             "first fallback counter is a baseline"
         );
 
-        let mut updates = aggregator.apply_update(fallback_counter_update(
-            "req-fallback-live-load",
-            0,
-            4,
-            false,
-            start + Duration::from_millis(100),
-        ));
-        attach_lifecycle_load(&config, &mut per_model, &in_flight, &mut updates);
-        let stats = updates
+        let stats = aggregator
+            .apply_update(fallback_counter_update(
+                "req-fallback-live-load",
+                0,
+                4,
+                false,
+                start + Duration::from_millis(100),
+            ))
             .pop()
             .expect("second fallback counter should publish output TPS")
             .1;
@@ -1344,24 +1159,18 @@ mod tests {
     fn engine_stream_snapshots_preserve_local_kv_cache_stats() {
         let config = StatsCollectorConfig::default();
         let start = TokioInstant::now();
-        let mut aggregator = SharedStatsAggregator::new(config.clone());
-        let mut updates =
-            aggregator.apply_update(stream_counter_update("req-stream-kv", 0, 10, true, start));
-        let mut per_model: HashMap<String, ModelMetricsState> = HashMap::new();
-        let model_state = per_model.entry("model-a".to_string()).or_default();
-        model_state.kv_cache = KvCacheStatsSnapshot {
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+        aggregator.apply_kv_cache_stats(KvCacheStatsSnapshot {
             model: "model-a".to_string(),
             kv_cache_capacity_tokens: 1_000,
             kv_cache_used_tokens: 400,
             kv_cache_free_tokens: 600,
-        };
-        model_state.kv_cache_stats_observed = true;
-        let in_flight = HashMap::new();
+        });
 
-        attach_lifecycle_load(&config, &mut per_model, &in_flight, &mut updates);
-        let stats = updates
+        let stats = aggregator
+            .apply_update(stream_counter_update("req-stream-kv", 0, 10, true, start))
             .pop()
-            .expect("stream counter should publish stats with local KV overlay")
+            .expect("stream counter should publish stats with owned KV state")
             .1;
 
         assert_eq!(stats.kv_cache_capacity_tokens, 1_000);
@@ -1384,9 +1193,106 @@ mod tests {
     }
 
     #[test]
-    fn shared_aggregator_keeps_embeddings_observation_with_stream_output_stats() {
+    fn stats_aggregator_owns_lifecycle_engine_and_kv_state() {
+        let config = StatsCollectorConfig {
+            openai_fallback_stats_enabled: false,
+            ..Default::default()
+        };
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+        let observation = active_chat_observation(
+            "req-single-owner-lifecycle",
+            RequestObservationState::OutputGeneration,
+        );
+
+        let lifecycle_stats = apply_stream_observation(&mut aggregator, &observation)
+            .pop()
+            .expect("lifecycle observation should publish a snapshot")
+            .1;
+        assert_eq!(lifecycle_stats.num_running_queries, 1);
+        assert_eq!(lifecycle_stats.output_generation_queries, 1);
+
+        let kv_stats = aggregator
+            .apply_kv_cache_stats(KvCacheStatsSnapshot {
+                model: "model-a".to_string(),
+                kv_cache_capacity_tokens: 1_000,
+                kv_cache_used_tokens: 400,
+                kv_cache_free_tokens: 600,
+            })
+            .expect("KV stats should publish a snapshot")
+            .1;
+        assert_eq!(kv_stats.num_running_queries, 1);
+        assert_eq!(kv_stats.kv_cache_capacity_tokens, 1_000);
+
+        let start = TokioInstant::now();
+        aggregator.apply_update(stream_counter_update(
+            "req-single-owner-stream",
+            0,
+            0,
+            false,
+            start,
+        ));
+        let stats = aggregator
+            .apply_update(stream_counter_update(
+                "req-single-owner-stream",
+                0,
+                10,
+                true,
+                start + Duration::from_secs(1),
+            ))
+            .pop()
+            .expect("engine counters should publish the complete owned snapshot")
+            .1;
+
+        assert_eq!(stats.output_tps, 10.0);
+        assert_eq!(stats.num_running_queries, 1);
+        assert_eq!(stats.output_generation_queries, 1);
+        assert_eq!(stats.kv_cache_capacity_tokens, 1_000);
+        assert_eq!(
+            stats.stats_sources,
+            vec![
+                "engine_stats_stream".to_string(),
+                "kv_cache_stats".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn engine_stats_model_state_count_excludes_lifecycle_and_kv_only_models() {
+        let config = StatsCollectorConfig {
+            openai_fallback_stats_enabled: false,
+            ..Default::default()
+        };
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+
+        apply_stream_observation(
+            &mut aggregator,
+            &active_chat_observation(
+                "req-lifecycle-only",
+                RequestObservationState::OutputGeneration,
+            ),
+        );
+        aggregator.apply_kv_cache_stats(KvCacheStatsSnapshot {
+            model: "model-b".to_string(),
+            kv_cache_capacity_tokens: 1_000,
+            kv_cache_used_tokens: 400,
+            kv_cache_free_tokens: 600,
+        });
+        assert_eq!(aggregator.model_state_count(), 0);
+
+        aggregator.apply_update(stream_counter_update(
+            "req-engine-state",
+            0,
+            0,
+            false,
+            TokioInstant::now(),
+        ));
+        assert_eq!(aggregator.model_state_count(), 1);
+    }
+
+    #[test]
+    fn stats_aggregator_keeps_embeddings_observation_with_stream_output_stats() {
         let config = StatsCollectorConfig::default();
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         aggregator.apply_update(stream_counter_update("req-stream", 0, 0, false, start));
@@ -1415,12 +1321,10 @@ mod tests {
                     Duration::from_secs(2),
                 )
             };
-            for update in stream_mode_observation_updates_from_observation(&observation) {
-                latest = aggregator
-                    .apply_update(update)
-                    .pop()
-                    .map(|(_, stats)| stats);
-            }
+            latest = apply_stream_observation(&mut aggregator, &observation)
+                .into_iter()
+                .find(|(model_id, _)| model_id == "model-a")
+                .map(|(_, stats)| stats);
         }
 
         let stats = latest.expect("fifth embeddings observation should publish stats");
@@ -1443,7 +1347,7 @@ mod tests {
             duration_floor: Duration::from_millis(100),
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         let mut latest = None;
@@ -1473,12 +1377,10 @@ mod tests {
                     Duration::from_secs(2),
                 )
             };
-            for update in stream_mode_observation_updates_from_observation(&observation) {
-                latest = aggregator
-                    .apply_update(update)
-                    .pop()
-                    .map(|(_, stats)| stats);
-            }
+            latest = apply_stream_observation(&mut aggregator, &observation)
+                .into_iter()
+                .find(|(model_id, _)| model_id == "model-a")
+                .map(|(_, stats)| stats);
         }
 
         let stats = latest.expect("embeddings observations should publish item throughput");
@@ -1493,19 +1395,18 @@ mod tests {
         let config = StatsCollectorConfig {
             observation_channel_capacity: 16,
             openai_fallback_stats_enabled: false,
-            metrics: Some(metrics.clone()),
             ..Default::default()
         };
-        let (observation_tx, observation_rx) = request_observation_channel(&config);
+        let (runtime_state, observation_rx) =
+            observed_runtime_with_metrics(&config, metrics.clone());
         let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             Some(stats_update_rx),
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
         let fallback_observation = RequestObservation {
@@ -1514,15 +1415,14 @@ mod tests {
             output_tokens_from_chunk_usage: true,
             ..completed_observation(20, 1, 10, Duration::from_secs(1), Duration::from_secs(3))
         };
-        observation_tx
-            .send_async(fallback_observation)
-            .await
-            .expect("collector should receive fallback-disabled observation");
-        let (_model_id, stats) =
-            tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                .await
-                .expect("fallback-disabled observation should publish lifecycle-only stats")
-                .expect("collector should publish model stats");
+        runtime_state.observe_request(fallback_observation);
+        let stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "fallback-disabled observation should publish lifecycle-only stats",
+            |_| true,
+        )
+        .await;
         assert_eq!(stats.output_tps, 0.0);
         assert!(!stats.stats_sources.contains(&"chunk_usage".to_string()));
 
@@ -1546,25 +1446,24 @@ mod tests {
             ),
             "collector should process fallback control update before fallback observations are accepted"
         );
-        observation_tx
-            .send_async(RequestObservation {
-                request_id: "req-fallback-enabled".to_string(),
-                output_tokens_explicit: true,
-                output_tokens_from_chunk_usage: true,
-                ..completed_observation(20, 1, 10, Duration::from_secs(1), Duration::from_secs(3))
-            })
-            .await
-            .expect("collector should receive fallback-enabled observation");
+        runtime_state.observe_request(RequestObservation {
+            request_id: "req-fallback-enabled".to_string(),
+            output_tokens_explicit: true,
+            output_tokens_from_chunk_usage: true,
+            ..completed_observation(20, 1, 10, Duration::from_secs(1), Duration::from_secs(3))
+        });
 
-        let (_model_id, stats) =
-            tokio::time::timeout(Duration::from_secs(2), model_stats_rx.recv_async())
-                .await
-                .expect("fallback-enabled observation should publish model stats")
-                .expect("collector should publish model stats");
+        let stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "fallback-enabled observation should publish model stats",
+            |stats| stats.output_tps == 5.0,
+        )
+        .await;
         assert_eq!(stats.output_tps, 5.0);
         assert!(stats.stats_sources.contains(&"chunk_usage".to_string()));
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
 
@@ -1575,16 +1474,15 @@ mod tests {
             openai_fallback_stats_enabled: false,
             ..Default::default()
         };
-        let (observation_tx, observation_rx) = request_observation_channel(&config);
+        let (runtime_state, observation_rx) = observed_runtime(&config);
         let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             Some(stats_update_rx),
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
         let start = TokioInstant::now();
@@ -1608,34 +1506,26 @@ mod tests {
             ))
             .await
             .expect("collector should receive stream finish");
-        let mut saw_stream_output = false;
-        for _ in 0..10 {
-            let (_model_id, stats) =
-                tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                    .await
-                    .expect("stream finish should publish stats")
-                    .expect("collector should keep model stats channel open");
-            if stats.output_tps == 10.0 {
-                saw_stream_output = true;
-                break;
-            }
-        }
-        assert!(saw_stream_output);
+        wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "stream finish should publish stats",
+            |stats| stats.output_tps == 10.0,
+        )
+        .await;
 
-        observation_tx
-            .send_async(active_chat_observation(
-                "req-stream-lifecycle",
-                RequestObservationState::InputProcessing,
-            ))
-            .await
-            .expect("collector should receive stream-mode lifecycle observation");
+        runtime_state.observe_request(active_chat_observation(
+            "req-stream-lifecycle",
+            RequestObservationState::InputProcessing,
+        ));
 
-        let (model_id, stats) =
-            tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                .await
-                .expect("stream mode lifecycle observation should publish stats")
-                .expect("collector should keep model stats channel open");
-        assert_eq!(model_id, "model-a");
+        let stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "stream mode lifecycle observation should publish stats",
+            |stats| stats.input_processing_queries == 1,
+        )
+        .await;
         assert_eq!(stats.num_running_queries, 1);
         assert_eq!(stats.queue_size, 1);
         assert_eq!(stats.queued_input_size, 32);
@@ -1644,7 +1534,7 @@ mod tests {
         assert_eq!(stats.output_generation_queries, 0);
         assert_eq!(stats.output_tps, 10.0);
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
 
@@ -1655,16 +1545,15 @@ mod tests {
             openai_fallback_stats_enabled: false,
             ..Default::default()
         };
-        let (observation_tx, observation_rx) = request_observation_channel(&config);
+        let (runtime_state, observation_rx) = observed_runtime(&config);
         let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             Some(stats_update_rx),
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
         let start = TokioInstant::now();
@@ -1676,14 +1565,14 @@ mod tests {
         let mut terminal_observation =
             completed_observation(32, 1, 10, Duration::from_millis(50), Duration::from_secs(1));
         terminal_observation.request_id = "req-stream-race".to_string();
-        observation_tx
-            .send_async(terminal_observation)
-            .await
-            .expect("collector should receive terminal request observation");
-        tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-            .await
-            .expect("terminal observation should publish lifecycle stats")
-            .expect("collector should keep model stats channel open");
+        runtime_state.observe_request(terminal_observation);
+        wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "terminal observation should publish lifecycle stats",
+            |_| true,
+        )
+        .await;
 
         stats_update_tx
             .send_async(stream_counter_update(
@@ -1696,21 +1585,15 @@ mod tests {
             .await
             .expect("collector should receive late stream finish");
 
-        let mut saw_final_stream_stats = false;
-        for _ in 0..10 {
-            let (_model_id, stats) =
-                tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                    .await
-                    .expect("late stream finish should publish stats")
-                    .expect("collector should keep model stats channel open");
-            if stats.output_tps == 10.0 && stats.max_output_tps == 10.0 {
-                saw_final_stream_stats = true;
-                break;
-            }
-        }
-        assert!(saw_final_stream_stats);
+        wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "late stream finish should publish stats",
+            |stats| stats.output_tps == 10.0 && stats.max_output_tps == 10.0,
+        )
+        .await;
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
 
@@ -1720,16 +1603,13 @@ mod tests {
             observation_channel_capacity: 16,
             ..Default::default()
         };
-        let (observation_tx, observation_rx) = request_observation_channel(&config);
+        let (runtime_state, observation_rx) = observed_runtime(&config);
         let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
         let collector = start_stats_collector_with_engine_stats(
             config,
             observation_rx,
             Some(stats_update_rx),
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
         );
 
         let start = TokioInstant::now();
@@ -1747,10 +1627,7 @@ mod tests {
         let mut terminal_observation =
             completed_observation(32, 0, 0, Duration::from_millis(50), Duration::from_secs(1));
         terminal_observation.request_id = "req-helper-stream".to_string();
-        observation_tx
-            .send_async(terminal_observation)
-            .await
-            .expect("collector should receive terminal request observation");
+        runtime_state.observe_request(terminal_observation);
 
         stats_update_tx
             .send_async(stream_counter_update(
@@ -1763,26 +1640,20 @@ mod tests {
             .await
             .expect("collector should receive delayed stream finish");
 
-        let mut saw_final_stream_stats = false;
-        for _ in 0..10 {
-            let (_model_id, stats) =
-                tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                    .await
-                    .expect("delayed stream finish should publish stats")
-                    .expect("collector should keep model stats channel open");
-            if stats.output_tps == 10.0 && stats.max_output_tps == 10.0 {
-                saw_final_stream_stats = true;
-                break;
-            }
-        }
-        assert!(saw_final_stream_stats);
+        wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "delayed stream finish should publish stats",
+            |stats| stats.output_tps == 10.0 && stats.max_output_tps == 10.0,
+        )
+        .await;
 
-        stop_tx.send(true).expect("collector should receive stop");
         collector.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn stats_collector_sweeps_stream_state_after_stats_receiver_closes() {
+        let metrics = PylonMetrics::new().expect("metrics should initialize");
         let config = StatsCollectorConfig {
             observation_channel_capacity: 16,
             engine_stats_request_ttl: Duration::from_secs(1),
@@ -1791,16 +1662,16 @@ mod tests {
             openai_fallback_stats_enabled: false,
             ..Default::default()
         };
-        let (_observation_tx, observation_rx) = request_observation_channel(&config);
+        let (runtime_state, observation_rx) =
+            observed_runtime_with_metrics(&config, metrics.clone());
         let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             Some(stats_update_rx),
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
         let start = TokioInstant::now();
@@ -1816,33 +1687,33 @@ mod tests {
             .expect("collector should receive stream start");
         drop(stats_update_tx);
 
-        let (_model_id, label_stats) = model_stats_rx
-            .recv_async()
-            .await
-            .expect("initial stream label snapshot should publish");
+        let label_stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "initial stream label snapshot should publish",
+            |stats| stats.stats_sources == ["engine_stats_stream"],
+        )
+        .await;
         assert_eq!(
             label_stats.stats_sources,
             vec!["engine_stats_stream".to_string()]
         );
 
         tokio::time::advance(Duration::from_secs(2)).await;
-        tokio::task::yield_now().await;
-
-        let mut stale_snapshot = None;
         for _ in 0..50 {
-            if let Ok((model_id, stats)) = model_stats_rx.try_recv()
-                && model_id == "model-a"
+            let body = metrics.gather_text().expect("metrics should encode");
+            if body.contains(r#"pylon_engine_stats_live_requests{source="engine_stats_stream"} 0"#)
             {
-                stale_snapshot = Some(stats);
                 break;
             }
             tokio::task::yield_now().await;
         }
-        let stats = stale_snapshot.expect("stale stream request should be swept after close");
-        assert_eq!(stats.stats_sources, vec!["engine_stats_stream".to_string()]);
-        assert_eq!(stats.num_running_queries, 0);
+        let body = metrics.gather_text().expect("metrics should encode");
+        assert!(
+            body.contains(r#"pylon_engine_stats_live_requests{source="engine_stats_stream"} 0"#)
+        );
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
 
@@ -1852,51 +1723,34 @@ mod tests {
             observation_channel_capacity: 16,
             ..Default::default()
         };
-        let (observation_tx, observation_rx) = request_observation_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let (runtime_state, observation_rx) = observed_runtime(&config);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             None,
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
-        observation_tx
-            .send_async(active_chat_observation(
-                "req-fallback-live-load",
-                RequestObservationState::OutputGeneration,
-            ))
-            .await
-            .expect("collector should receive fallback observation");
+        runtime_state.observe_request(active_chat_observation(
+            "req-fallback-live-load",
+            RequestObservationState::OutputGeneration,
+        ));
 
-        let mut snapshots = Vec::new();
-        let (model_id, stats) =
-            tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                .await
-                .expect("fallback observation should publish stats")
-                .expect("collector should keep model stats channel open");
-        assert_eq!(model_id, "model-a");
-        snapshots.push(stats);
+        let stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "fallback observation should publish stats",
+            |stats| stats.output_generation_queries == 1,
+        )
+        .await;
+        assert_eq!(stats.num_running_queries, 1);
+        assert_eq!(stats.total_query_input_size, 32);
+        assert_eq!(stats.input_processing_queries, 0);
+        assert_eq!(stats.output_generation_queries, 1);
 
-        for _ in 0..20 {
-            while let Ok((model_id, stats)) = model_stats_rx.try_recv() {
-                if model_id == "model-a" {
-                    snapshots.push(stats);
-                }
-            }
-            tokio::task::yield_now().await;
-        }
-
-        for stats in snapshots {
-            assert_eq!(stats.num_running_queries, 1);
-            assert_eq!(stats.total_query_input_size, 32);
-            assert_eq!(stats.input_processing_queries, 0);
-            assert_eq!(stats.output_generation_queries, 1);
-        }
-
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
 
@@ -1906,54 +1760,41 @@ mod tests {
             observation_channel_capacity: 16,
             ..Default::default()
         };
-        let (observation_tx, observation_rx) = request_observation_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let (runtime_state, observation_rx) = observed_runtime(&config);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             None,
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
-        observation_tx
-            .send_async(RequestObservation {
-                request_id: "req-terminal-only-fallback".to_string(),
-                output_tokens_explicit: true,
-                output_tokens_from_chunk_usage: true,
-                ..completed_observation(20, 1, 10, Duration::from_secs(1), Duration::from_secs(3))
-            })
-            .await
-            .expect("collector should receive terminal-only fallback observation");
+        runtime_state.observe_request(RequestObservation {
+            request_id: "req-terminal-only-fallback".to_string(),
+            output_tokens_explicit: true,
+            output_tokens_from_chunk_usage: true,
+            ..completed_observation(20, 1, 10, Duration::from_secs(1), Duration::from_secs(3))
+        });
 
-        let mut output_tps_values = Vec::new();
-        let (model_id, stats) =
-            tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                .await
-                .expect("terminal observation should publish stats")
-                .expect("collector should keep model stats channel open");
-        assert_eq!(model_id, "model-a");
-        output_tps_values.push(stats.output_tps);
+        wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "terminal observation should publish stats",
+            |stats| stats.output_tps == 5.0,
+        )
+        .await;
 
         for _ in 0..20 {
-            while let Ok((model_id, stats)) = model_stats_rx.try_recv() {
-                if model_id == "model-a" {
-                    output_tps_values.push(stats.output_tps);
-                }
-            }
             tokio::task::yield_now().await;
         }
 
-        assert!(!output_tps_values.is_empty());
-        assert!(
-            output_tps_values
-                .iter()
-                .all(|output_tps| *output_tps == 5.0),
-            "terminal-only fallback stats must not publish a later zero output TPS snapshot: {output_tps_values:?}"
-        );
+        let stats = runtime_state
+            .model_stats("model-a")
+            .expect("terminal observation should leave model stats");
+        assert_eq!(stats.output_tps, 5.0);
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
 
@@ -1964,16 +1805,15 @@ mod tests {
             openai_fallback_stats_enabled: false,
             ..Default::default()
         };
-        let (observation_tx, observation_rx) = request_observation_channel(&config);
+        let (runtime_state, observation_rx) = observed_runtime(&config);
         let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(32);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             Some(stats_update_rx),
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
         let start = TokioInstant::now();
@@ -1992,63 +1832,47 @@ mod tests {
             .await
             .expect("collector should receive stream finish");
 
-        let mut saw_stream_output = false;
-        for _ in 0..10 {
-            let (_model_id, stats) =
-                tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                    .await
-                    .expect("collector should publish stream stats")
-                    .expect("collector should keep model stats channel open");
-            if stats.output_tps == 10.0 && stats.max_output_tps == 10.0 {
-                saw_stream_output = true;
-                break;
-            }
-        }
-        assert!(saw_stream_output);
+        wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "collector should publish stream stats",
+            |stats| stats.output_tps == 10.0 && stats.max_output_tps == 10.0,
+        )
+        .await;
 
         for index in 0..5 {
-            observation_tx
-                .send_async(RequestObservation {
-                    request_id: format!("req-embedding-{index}"),
-                    ..completed_embeddings_observation(
-                        20,
-                        2,
-                        Duration::from_secs(1),
-                        Duration::from_secs(2),
-                    )
-                })
-                .await
-                .expect("collector should receive embeddings observation");
+            runtime_state.observe_request(RequestObservation {
+                request_id: format!("req-embedding-{index}"),
+                ..completed_embeddings_observation(
+                    20,
+                    2,
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                )
+            });
         }
 
-        let mut latest = None;
-        for _ in 0..20 {
-            let (_model_id, stats) =
-                tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                    .await
-                    .expect("collector should publish embeddings stats")
-                    .expect("collector should keep model stats channel open");
-            if stats.embedding_item_tps > 0.0 {
-                latest = Some(stats);
-                break;
-            }
-        }
-
-        let stats = latest.expect("embeddings observations should publish stream-mode stats");
+        let stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "embeddings observations should publish stream-mode stats",
+            |stats| stats.embedding_item_tps > 0.0,
+        )
+        .await;
         assert_eq!(stats.output_tps, 10.0);
         assert_eq!(stats.max_output_tps, 10.0);
         assert_eq!(stats.last_mean_input_tps, 0.0);
         assert_eq!(stats.embedding_item_tps, 2.0);
         assert_eq!(stats.stats_sources, vec!["engine_stats_stream".to_string()]);
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
 
     #[test]
-    fn shared_aggregator_ignores_regressions_and_post_finalize_events() {
+    fn stats_aggregator_ignores_regressions_and_post_finalize_events() {
         let config = StatsCollectorConfig::default();
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         aggregator.apply_update(stream_counter_update("req-final", 10, 2, false, start));
@@ -2082,6 +1906,33 @@ mod tests {
     }
 
     #[test]
+    fn stats_aggregator_rejects_unconfigured_counter_models() {
+        let config = StatsCollectorConfig {
+            configured_model_ids: vec!["model-a".to_string()],
+            ..Default::default()
+        };
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+        let start = TokioInstant::now();
+
+        let updates = aggregator.apply_update(counter_update_for_model(
+            StatsUpdateSource::EngineStatsStream,
+            "req-unconfigured",
+            "model-b",
+            10,
+            4,
+            false,
+            start,
+        ));
+
+        assert!(updates.is_empty());
+        assert_eq!(aggregator.live_request_count(), 0);
+        assert_eq!(
+            aggregator.snapshot("model-b").stats_sources,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn fallback_terminal_observation_without_trusted_counters_finalizes_stream_request() {
         let mut observation = completed_observation(
             11,
@@ -2093,15 +1944,15 @@ mod tests {
         observation.request_id = "req-stream-race".to_string();
 
         let config = StatsCollectorConfig::default();
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
         aggregator.apply_update(stream_counter_update("req-stream-race", 5, 3, false, start));
         assert_eq!(aggregator.live_request_count(), 1);
 
-        let fallback_updates = fallback_updates_from_observation(&observation);
-        assert_eq!(fallback_updates.len(), 1);
+        let fallback_update =
+            fallback_update_from_observation(&observation).expect("terminal update should exist");
         let stats = aggregator
-            .apply_update(fallback_updates.into_iter().next().unwrap())
+            .apply_update(fallback_update)
             .pop()
             .expect("terminal request observation should publish the finalized stream snapshot")
             .1;
@@ -2123,13 +1974,13 @@ mod tests {
     }
 
     #[test]
-    fn shared_aggregator_sweeps_stale_request_and_model_state() {
+    fn stats_aggregator_sweeps_stale_request_and_model_state() {
         let config = StatsCollectorConfig {
             engine_stats_request_ttl: Duration::from_secs(1),
             engine_stats_model_ttl: Duration::from_secs(1),
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         for tick in 0..=5 {
@@ -2162,13 +2013,13 @@ mod tests {
     }
 
     #[test]
-    fn shared_aggregator_tombstones_stale_request_before_late_finish() {
+    fn stats_aggregator_tombstones_stale_request_before_late_finish() {
         let config = StatsCollectorConfig {
             engine_stats_request_ttl: Duration::from_secs(1),
             engine_stats_model_ttl: Duration::from_secs(60),
             ..Default::default()
         };
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
 
         aggregator.apply_update(stream_counter_update("req-stale-late", 0, 0, false, start));
@@ -2204,12 +2055,85 @@ mod tests {
     }
 
     #[test]
-    fn shared_aggregator_keeps_bounded_request_state_for_many_cumulative_updates() {
+    fn stats_aggregator_request_counter_identity_has_one_lifecycle_entry() {
+        let config = StatsCollectorConfig {
+            engine_stats_request_ttl: Duration::from_secs(1),
+            ..Default::default()
+        };
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+        let start = TokioInstant::now();
+
+        aggregator.apply_update(stream_counter_update("req-lifecycle", 0, 0, false, start));
+        assert_eq!(aggregator.live_request_count(), 1);
+        assert_eq!(aggregator.request_counter_identity_count(), 1);
+
+        aggregator.apply_update(stream_counter_update(
+            "req-lifecycle",
+            10,
+            2,
+            true,
+            start + Duration::from_millis(100),
+        ));
+        assert_eq!(aggregator.live_request_count(), 0);
+        assert_eq!(aggregator.request_counter_identity_count(), 1);
+
+        let late_updates = aggregator.apply_update(stream_counter_update(
+            "req-lifecycle",
+            20,
+            4,
+            true,
+            start + Duration::from_millis(200),
+        ));
+        assert!(late_updates.is_empty());
+        assert_eq!(aggregator.request_counter_identity_count(), 1);
+
+        aggregator.sweep_stale(start + Duration::from_secs(2));
+        assert_eq!(aggregator.request_counter_identity_count(), 0);
+    }
+
+    #[test]
+    fn repeated_request_finalization_refreshes_tombstone_expiry() {
+        let config = StatsCollectorConfig {
+            engine_stats_request_ttl: Duration::from_secs(1),
+            ..Default::default()
+        };
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+        let start = TokioInstant::now();
+
+        aggregator.finalize_request(FinalizeRequestUpdate::new(
+            StatsUpdateSource::OpenAiFallback,
+            "req-finalized-twice",
+            start,
+        ));
+        aggregator.finalize_request(FinalizeRequestUpdate::new(
+            StatsUpdateSource::OpenAiFallback,
+            "req-finalized-twice",
+            start + Duration::from_millis(800),
+        ));
+
+        aggregator.sweep_stale(start + Duration::from_millis(1_500));
+        let late_updates = aggregator.apply_update(stream_counter_update(
+            "req-finalized-twice",
+            10,
+            2,
+            true,
+            start + Duration::from_millis(1_600),
+        ));
+
+        assert!(late_updates.is_empty());
+        assert_eq!(aggregator.request_counter_identity_count(), 1);
+
+        aggregator.sweep_stale(start + Duration::from_secs(2));
+        assert_eq!(aggregator.request_counter_identity_count(), 0);
+    }
+
+    #[test]
+    fn stats_aggregator_keeps_bounded_request_state_for_many_cumulative_updates() {
         const REQUESTS: usize = 256;
         const EVENTS: usize = 10_000;
 
         let config = StatsCollectorConfig::default();
-        let mut aggregator = SharedStatsAggregator::new(config);
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let start = TokioInstant::now();
         let mut latest = vec![(0u64, 0u64); REQUESTS];
 
@@ -2247,95 +2171,39 @@ mod tests {
     #[test]
     fn last_mean_input_tps_stays_sticky_without_new_samples() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        per_model
-            .entry("model-a".to_string())
-            .or_insert_with(ModelMetricsState::default)
-            .last_mean_input_tps = 10.0;
-        let in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
-        let stats = snapshot_model_stats(&config, &mut per_model, &in_flight, "model-a");
-        assert_eq!(stats.last_mean_input_tps, 10.0);
+        for request_index in 0..5 {
+            apply_fallback_observation(
+                &mut aggregator,
+                &RequestObservation {
+                    request_id: format!("req-sticky-{request_index}"),
+                    ..completed_observation(
+                        20,
+                        1,
+                        1,
+                        Duration::from_secs(2),
+                        Duration::from_secs(2),
+                    )
+                },
+            );
+        }
 
-        let stats = snapshot_model_stats(&config, &mut per_model, &in_flight, "model-a");
+        let stats = aggregator.snapshot("model-a");
         assert_eq!(stats.last_mean_input_tps, 10.0);
     }
 
     #[test]
-    fn mean_input_tps_aggregator_samples_completed_openai_observations() {
+    fn fallback_input_throughput_is_owned_by_stats_aggregator() {
         let config = StatsCollectorConfig::default();
-        let mut aggregator =
-            MeanInputTpsAggregator::new(MeanInputTpsAggregatorConfig::from(&config));
-        let mut update = None;
+        let runtime_state = PylonRuntimeState::default();
+        let mut aggregator = StatsAggregator::new(config, runtime_state.clone());
 
         for request_index in 0..5 {
-            let updates = aggregator.record_request_observation(&RequestObservation {
-                request_id: format!("req-openai-stream-{request_index}"),
-                ..completed_observation(
-                    50,
-                    1,
-                    8,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1),
-                )
-            });
-            if request_index < 4 {
-                assert!(updates.is_empty());
-            } else {
-                update = updates.into_iter().next();
-            }
-        }
-
-        let update = update.expect("fifth completed request should publish mean input TPS");
-        assert_eq!(update.model_id, "model-a");
-        assert_eq!(update.last_mean_input_tps, 100.0);
-        let distribution = &aggregator.per_model["model-a"].distribution;
-        assert_eq!(distribution.count, 5);
-        assert_eq!(distribution.mean, 100.0);
-    }
-
-    #[test]
-    fn mean_input_tps_aggregator_ignores_non_terminal_observations() {
-        let config = StatsCollectorConfig::default();
-        let mut aggregator =
-            MeanInputTpsAggregator::new(MeanInputTpsAggregatorConfig::from(&config));
-
-        for state in [
-            RequestObservationState::InputProcessing,
-            RequestObservationState::OutputGeneration,
-        ] {
-            let updates = aggregator.record_request_observation(&RequestObservation {
-                request_id: format!("req-live-{state:?}"),
-                state,
-                ..completed_observation(
-                    50,
-                    1,
-                    8,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1),
-                )
-            });
-            assert!(updates.is_empty());
-        }
-
-        assert!(aggregator.per_model.is_empty());
-    }
-
-    #[tokio::test]
-    async fn mean_input_tps_aggregator_publishes_completed_openai_samples() {
-        let config = StatsCollectorConfig::default();
-        let (observation_tx, observation_rx) = flume::unbounded();
-        let (update_tx, update_rx) = flume::unbounded();
-        let task = tokio::spawn(run_mean_input_tps_aggregator(
-            MeanInputTpsAggregatorConfig::from(&config),
-            observation_rx,
-            update_tx,
-        ));
-
-        for request_index in 0..5 {
-            observation_tx
-                .send(mean_input_observation(&RequestObservation {
-                    request_id: format!("req-async-openai-stream-{request_index}"),
+            let updates = apply_fallback_observation(
+                &mut aggregator,
+                &RequestObservation {
+                    request_id: format!("req-openai-stream-{request_index}"),
                     ..completed_observation(
                         50,
                         1,
@@ -2343,39 +2211,100 @@ mod tests {
                         Duration::from_millis(500),
                         Duration::from_secs(1),
                     )
-                }))
-                .expect("aggregator should receive completed observation");
+                },
+            );
+            assert_eq!(updates.len(), 1, "each observation should publish once");
+            let stats = updates
+                .into_iter()
+                .find(|(model_id, _)| model_id == "model-a")
+                .map(|(_, stats)| stats)
+                .expect("lifecycle update should publish");
+
+            assert_eq!(
+                stats.last_mean_input_tps,
+                if request_index < 4 { 0.0 } else { 100.0 }
+            );
         }
 
-        let update = receive_mean_input_update(&update_rx).await;
-        assert_eq!(update.model_id, "model-a");
-        assert_eq!(update.last_mean_input_tps, 100.0);
+        let distribution = &aggregator.per_model["model-a"].input_tps_distribution;
+        assert_eq!(distribution.count, 5);
+        assert_eq!(distribution.mean, 100.0);
 
-        task.abort();
-        let _ = task.await;
+        let _queued =
+            runtime_state.track_request(&crate::request_observer::RequiredTunnelHeaders {
+                request_id: "req-queued-after-fallback-samples".to_string(),
+                routing_key: None,
+                model_id: "model-a".to_string(),
+                priority: 0,
+                input_tokens: 50,
+                accepted_at: std::time::Instant::now(),
+            });
+        runtime_state.transition_request_observation(active_chat_observation(
+            "req-queued-after-fallback-samples",
+            RequestObservationState::Queued,
+        ));
+        assert_eq!(
+            runtime_state
+                .snapshot_live_model("model-a")
+                .queue_time_estimate_ms_by_priority,
+            Some(HashMap::from([(0, 320)]))
+        );
     }
+
+    #[test]
+    fn fallback_input_throughput_ignores_non_terminal_observations() {
+        let config = StatsCollectorConfig::default();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+
+        for state in [
+            RequestObservationState::InputProcessing,
+            RequestObservationState::OutputGeneration,
+        ] {
+            let updates = apply_fallback_observation(
+                &mut aggregator,
+                &RequestObservation {
+                    request_id: format!("req-live-{state:?}"),
+                    state,
+                    ..completed_observation(
+                        50,
+                        1,
+                        8,
+                        Duration::from_millis(500),
+                        Duration::from_secs(1),
+                    )
+                },
+            );
+            assert_eq!(updates[0].1.last_mean_input_tps, 0.0);
+        }
+
+        assert_eq!(
+            aggregator.per_model["model-a"].input_tps_distribution.count,
+            0
+        );
+    }
+
     #[test]
     fn terminal_only_samples_use_request_duration_instead_of_tick_window() {
         let config = StatsCollectorConfig::default();
-        let mut aggregator =
-            MeanInputTpsAggregator::new(MeanInputTpsAggregatorConfig::from(&config));
-        let mut update = None;
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
         for request_index in 0..5 {
-            let updates = aggregator.record_request_observation(&RequestObservation {
-                request_id: format!("req-final-only-{request_index}"),
-                ..completed_observation(100, 1, 1, Duration::from_secs(2), Duration::from_secs(2))
-            });
-            if request_index < 4 {
-                assert!(updates.is_empty());
-            } else {
-                update = updates.into_iter().next();
-            }
+            apply_fallback_observation(
+                &mut aggregator,
+                &RequestObservation {
+                    request_id: format!("req-final-only-{request_index}"),
+                    ..completed_observation(
+                        100,
+                        1,
+                        1,
+                        Duration::from_secs(2),
+                        Duration::from_secs(2),
+                    )
+                },
+            );
         }
-        let update = update.expect("fifth direct sample should publish the sticky mean");
-        assert_eq!(update.model_id, "model-a");
-        assert_eq!(update.last_mean_input_tps, 50.0);
-        let distribution = &aggregator.per_model["model-a"].distribution;
+        assert_eq!(aggregator.snapshot("model-a").last_mean_input_tps, 50.0);
+        let distribution = &aggregator.per_model["model-a"].input_tps_distribution;
         assert_eq!(distribution.count, 5);
         assert_eq!(distribution.mean, 50.0);
     }
@@ -2383,30 +2312,25 @@ mod tests {
     #[test]
     fn terminal_only_samples_do_not_sum_same_tick_request_rates() {
         let config = StatsCollectorConfig::default();
-        let mut aggregator =
-            MeanInputTpsAggregator::new(MeanInputTpsAggregatorConfig::from(&config));
-        let mut update = None;
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
         for request_index in 0..5 {
-            let updates = aggregator.record_request_observation(&RequestObservation {
-                request_id: format!("req-final-only-sequential-{request_index}"),
-                ..completed_observation(
-                    100,
-                    1,
-                    1,
-                    Duration::from_millis(10),
-                    Duration::from_millis(10),
-                )
-            });
-            if request_index < 4 {
-                assert!(updates.is_empty());
-            } else {
-                update = updates.into_iter().next();
-            }
+            apply_fallback_observation(
+                &mut aggregator,
+                &RequestObservation {
+                    request_id: format!("req-final-only-sequential-{request_index}"),
+                    ..completed_observation(
+                        100,
+                        1,
+                        1,
+                        Duration::from_millis(10),
+                        Duration::from_millis(10),
+                    )
+                },
+            );
         }
-        let update = update.expect("fifth direct sample should publish the sticky mean");
-        assert_eq!(update.last_mean_input_tps, 10_000.0);
-        let distribution = &aggregator.per_model["model-a"].distribution;
+        assert_eq!(aggregator.snapshot("model-a").last_mean_input_tps, 10_000.0);
+        let distribution = &aggregator.per_model["model-a"].input_tps_distribution;
         assert_eq!(distribution.count, 5);
         assert_eq!(distribution.mean, 10_000.0);
     }
@@ -2414,12 +2338,11 @@ mod tests {
     #[test]
     fn completed_request_stats_keep_exact_output_rate_formula() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let observation =
             completed_observation(120, 6, 30, Duration::from_secs(3), Duration::from_secs(9));
 
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation)
+        let stats = apply_fallback_observation(&mut aggregator, &observation)
             .into_iter()
             .find(|(model_id, _)| model_id == "model-a")
             .unwrap()
@@ -2436,8 +2359,7 @@ mod tests {
             duration_floor: Duration::from_millis(50),
             ..Default::default()
         };
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let observation = completed_observation(
             20,
             4,
@@ -2446,7 +2368,7 @@ mod tests {
             Duration::from_millis(20),
         );
 
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation);
+        let stats = apply_fallback_observation(&mut aggregator, &observation);
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].1.last_mean_input_tps, 0.0);
         assert_eq!(stats[0].1.output_tps, 0.0);
@@ -2455,14 +2377,13 @@ mod tests {
     #[test]
     fn terminal_usage_chunks_use_first_output_for_output_tps() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let observation = RequestObservation {
             time_to_first_token: Some(Duration::from_millis(5_995)),
             ..completed_observation(20, 4, 8, Duration::from_secs(2), Duration::from_secs(6))
         };
 
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation);
+        let stats = apply_fallback_observation(&mut aggregator, &observation);
 
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].1.output_tps, 2.0);
@@ -2472,28 +2393,30 @@ mod tests {
     #[test]
     fn embeddings_stats_update_last_mean_input_tps_without_claiming_output_tps() {
         let config = StatsCollectorConfig::default();
-        let mut aggregator =
-            MeanInputTpsAggregator::new(MeanInputTpsAggregatorConfig::from(&config));
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let observation =
             completed_embeddings_observation(20, 4, Duration::from_secs(2), Duration::from_secs(4));
 
-        for _ in 0..4 {
-            assert!(
-                aggregator
-                    .record_request_observation(&observation)
-                    .is_empty()
+        for request_index in 0..4 {
+            let stats = apply_fallback_observation(
+                &mut aggregator,
+                &RequestObservation {
+                    request_id: format!("req-embedding-{request_index}"),
+                    ..observation.clone()
+                },
             );
-            let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation);
             assert_eq!(stats[0].1.last_mean_input_tps, 0.0);
         }
-        let updates = aggregator.record_request_observation(&observation);
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation);
+        let stats = apply_fallback_observation(
+            &mut aggregator,
+            &RequestObservation {
+                request_id: "req-embedding-4".to_string(),
+                ..observation
+            },
+        );
 
-        assert_eq!(updates[0].last_mean_input_tps, 10.0);
         assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].1.last_mean_input_tps, 0.0);
+        assert_eq!(stats[0].1.last_mean_input_tps, 10.0);
         assert_eq!(stats[0].1.output_tps, 0.0);
         assert_eq!(stats[0].1.max_output_tps, 0.0);
         assert_eq!(stats[0].1.embedding_item_tps, 2.0);
@@ -2510,7 +2433,7 @@ mod tests {
             total_duration: Duration::from_secs(3),
             ..completed_observation(10, 1, 20, Duration::from_secs(1), Duration::from_secs(3))
         };
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &live_chat);
+        let stats = apply_fallback_observation(&mut aggregator, &live_chat);
 
         assert_eq!(stats[0].1.output_tps, 10.0);
     }
@@ -2518,31 +2441,26 @@ mod tests {
     #[test]
     fn fast_embeddings_input_samples_clamp_to_duration_floor() {
         let config = StatsCollectorConfig::default();
-        let mut aggregator =
-            MeanInputTpsAggregator::new(MeanInputTpsAggregatorConfig::from(&config));
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let observation = completed_embeddings_observation(
             20,
             4,
             Duration::from_millis(1),
             Duration::from_millis(4),
         );
-        let mut update = None;
 
         for sample_index in 0..5 {
-            let updates = aggregator.record_request_observation(&RequestObservation {
-                request_id: format!("req-fast-embedding-{sample_index}"),
-                ..observation.clone()
-            });
-            if sample_index < 4 {
-                assert!(updates.is_empty());
-            } else {
-                update = updates.into_iter().next();
-            }
+            apply_fallback_observation(
+                &mut aggregator,
+                &RequestObservation {
+                    request_id: format!("req-fast-embedding-{sample_index}"),
+                    ..observation.clone()
+                },
+            );
         }
 
-        let update = update.expect("fifth embeddings input sample should publish mean input TPS");
-        assert_eq!(update.last_mean_input_tps, 2000.0);
-        let distribution = &aggregator.per_model["model-a"].distribution;
+        assert_eq!(aggregator.snapshot("model-a").last_mean_input_tps, 2000.0);
+        let distribution = &aggregator.per_model["model-a"].input_tps_distribution;
         assert_eq!(distribution.count, 5);
         assert_eq!(distribution.mean, 2000.0);
     }
@@ -2550,8 +2468,7 @@ mod tests {
     #[test]
     fn embeddings_item_tps_clamps_fast_response_relay_duration() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let observation = completed_embeddings_observation(
             20,
             2,
@@ -2559,7 +2476,7 @@ mod tests {
             Duration::from_millis(5),
         );
 
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation);
+        let stats = apply_fallback_observation(&mut aggregator, &observation);
 
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].1.output_tps, 0.0);
@@ -2571,16 +2488,15 @@ mod tests {
     #[test]
     fn embeddings_stats_do_not_replace_chat_output_tps() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
         let chat = completed_observation(20, 1, 10, Duration::from_secs(1), Duration::from_secs(3));
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &chat);
+        let stats = apply_fallback_observation(&mut aggregator, &chat);
         assert_eq!(stats[0].1.output_tps, 5.0);
 
         let embeddings =
             completed_embeddings_observation(20, 2, Duration::from_secs(1), Duration::from_secs(2));
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &embeddings);
+        let stats = apply_fallback_observation(&mut aggregator, &embeddings);
 
         assert_eq!(stats[0].1.output_tps, 5.0);
         assert_eq!(stats[0].1.max_output_tps, 5.0);
@@ -2593,11 +2509,10 @@ mod tests {
     #[test]
     fn embeddings_observations_do_not_add_output_throughput_labels() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
         let chat = completed_observation(20, 1, 10, Duration::from_secs(1), Duration::from_secs(3));
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &chat);
+        let stats = apply_fallback_observation(&mut aggregator, &chat);
         assert_eq!(stats[0].1.output_tps, 5.0);
 
         let failed_embeddings = RequestObservation {
@@ -2609,7 +2524,7 @@ mod tests {
                 Duration::from_secs(2),
             )
         };
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &failed_embeddings);
+        let stats = apply_fallback_observation(&mut aggregator, &failed_embeddings);
 
         assert_eq!(
             stats[0].1.output_tps, 5.0,
@@ -2630,7 +2545,7 @@ mod tests {
                 Duration::from_secs(2),
             )
         };
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &live_embeddings);
+        let stats = apply_fallback_observation(&mut aggregator, &live_embeddings);
 
         assert_eq!(stats[0].1.output_tps, 5.0);
         assert_eq!(stats[0].1.embedding_item_tps, 0.0);
@@ -2641,14 +2556,13 @@ mod tests {
     #[test]
     fn ignores_non_complete_observations() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
         let observation = RequestObservation {
             state: RequestObservationState::Failed,
             ..completed_observation(20, 4, 8, Duration::from_secs(2), Duration::from_secs(6))
         };
 
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation);
+        let stats = apply_fallback_observation(&mut aggregator, &observation);
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].1.last_mean_input_tps, 0.0);
         assert_eq!(stats[0].1.output_tps, 0.0);
@@ -2657,11 +2571,9 @@ mod tests {
     #[test]
     fn publishes_live_queue_and_active_stats() {
         let config = StatsCollectorConfig::default();
-        config
-            .queue_tracker
-            .update_model_throughput("model-a", 100.0);
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let runtime_state = PylonRuntimeState::default();
+        runtime_state.update_model_throughput("model-a", 100.0);
+        let mut aggregator = StatsAggregator::new(config, runtime_state);
 
         let queued = RequestObservation {
             endpoint: RequestObservationEndpoint::ChatCompletions,
@@ -2683,7 +2595,7 @@ mod tests {
             time_to_first_token: None,
             total_duration: Duration::from_millis(5),
         };
-        let queued_stats = record_observation(&config, &mut per_model, &mut in_flight, &queued);
+        let queued_stats = apply_fallback_observation(&mut aggregator, &queued);
         assert_eq!(queued_stats[0].1.queue_size, 1);
         assert_eq!(queued_stats[0].1.queued_input_size, 24);
         assert_eq!(
@@ -2705,7 +2617,7 @@ mod tests {
             total_duration: Duration::from_secs(3),
             ..queued
         };
-        let active_stats = record_observation(&config, &mut per_model, &mut in_flight, &generating);
+        let active_stats = apply_fallback_observation(&mut aggregator, &generating);
         assert_eq!(active_stats[0].1.queue_size, 0);
         assert_eq!(active_stats[0].1.queued_input_size, 0);
         assert_eq!(active_stats[0].1.num_running_queries, 1);
@@ -2719,8 +2631,7 @@ mod tests {
     #[test]
     fn live_stats_math_is_exact_for_simultaneous_queued_and_generating_requests() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
         let queued = RequestObservation {
             endpoint: RequestObservationEndpoint::ChatCompletions,
@@ -2763,8 +2674,8 @@ mod tests {
             total_duration: Duration::from_secs(5),
         };
 
-        record_observation(&config, &mut per_model, &mut in_flight, &queued);
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &generating)
+        apply_fallback_observation(&mut aggregator, &queued);
+        let stats = apply_fallback_observation(&mut aggregator, &generating)
             .into_iter()
             .find(|(model_id, _)| model_id == "model-a")
             .unwrap()
@@ -2781,8 +2692,7 @@ mod tests {
     #[test]
     fn live_input_processing_keeps_full_requested_input_without_retired_progress() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
         let observation = RequestObservation {
             endpoint: RequestObservationEndpoint::ChatCompletions,
@@ -2805,7 +2715,7 @@ mod tests {
             total_duration: Duration::from_secs(30),
         };
 
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation);
+        let stats = apply_fallback_observation(&mut aggregator, &observation);
 
         assert_eq!(stats[0].1.last_mean_input_tps, 0.0);
         assert_eq!(stats[0].1.queued_input_size, 100);
@@ -2817,8 +2727,7 @@ mod tests {
     #[test]
     fn chunk_usage_observations_claim_only_chunk_usage_stats() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
 
         let observation = RequestObservation {
             output_tokens_explicit: true,
@@ -2832,7 +2741,7 @@ mod tests {
             )
         };
 
-        let stats = record_observation(&config, &mut per_model, &mut in_flight, &observation);
+        let stats = apply_fallback_observation(&mut aggregator, &observation);
 
         assert_eq!(
             stats[0].1.stats_capabilities,
@@ -2843,15 +2752,16 @@ mod tests {
     #[test]
     fn snapshot_includes_polled_kv_cache_stats() {
         let config = StatsCollectorConfig::default();
-        let mut per_model = HashMap::<String, ModelMetricsState>::new();
-        per_model.entry("model-a".to_string()).or_default().kv_cache = KvCacheStatsSnapshot {
-            model: "model-a".to_string(),
-            kv_cache_capacity_tokens: 1_000,
-            kv_cache_used_tokens: 400,
-            kv_cache_free_tokens: 600,
-        };
-
-        let stats = snapshot_model_stats(&config, &mut per_model, &HashMap::new(), "model-a");
+        let mut aggregator = StatsAggregator::new(config, PylonRuntimeState::default());
+        let stats = aggregator
+            .apply_kv_cache_stats(KvCacheStatsSnapshot {
+                model: "model-a".to_string(),
+                kv_cache_capacity_tokens: 1_000,
+                kv_cache_used_tokens: 400,
+                kv_cache_free_tokens: 600,
+            })
+            .expect("KV-cache stats should publish")
+            .1;
 
         assert_eq!(stats.kv_cache_capacity_tokens, 1_000);
         assert_eq!(stats.kv_cache_used_tokens, 400);
@@ -2885,26 +2795,26 @@ mod tests {
             kv_cache_stats_url: Some(format!("http://{addr}/kv-cache")),
             kv_cache_poll_interval: Duration::from_millis(10),
             kv_cache_request_timeout: Duration::from_secs(1),
-            metrics: Some(metrics.clone()),
             ..Default::default()
         };
-        let (_observation_tx, observation_rx) = request_observation_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(4);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let (runtime_state, observation_rx) =
+            observed_runtime_with_metrics(&config, metrics.clone());
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             None,
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
-        let (model_id, stats) =
-            tokio::time::timeout(Duration::from_secs(2), model_stats_rx.recv_async())
-                .await
-                .expect("KV-cache stats should be published")
-                .expect("collector should publish stats");
-        assert_eq!(model_id, "model-a");
+        let stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "KV-cache stats should be published",
+            |stats| stats.kv_cache_capacity_tokens == 1000,
+        )
+        .await;
         assert_eq!(stats.kv_cache_capacity_tokens, 1000);
         assert_eq!(stats.kv_cache_used_tokens, 400);
         assert_eq!(stats.kv_cache_free_tokens, 600);
@@ -2914,7 +2824,7 @@ mod tests {
         assert!(body.contains(r#"pylon_model_kv_cache_used_tokens{model="model-a"} 400"#));
         assert!(body.contains(r#"pylon_model_kv_cache_free_tokens{model="model-a"} 600"#));
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         tokio::time::timeout(Duration::from_secs(2), collector)
             .await
             .expect("collector should stop")
@@ -2923,81 +2833,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_collector_shutdown_interrupts_blocked_kv_cache_poll() {
+        let poll_entered = Arc::new(tokio::sync::Barrier::new(2));
+        let server_poll_entered = poll_entered.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/kv-cache",
+                get(move || {
+                    let poll_entered = server_poll_entered.clone();
+                    async move {
+                        poll_entered.wait().await;
+                        std::future::pending::<Json<serde_json::Value>>().await
+                    }
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("KV-cache test server should run");
+        });
+        let config = StatsCollectorConfig {
+            kv_cache_stats_url: Some(format!("http://{addr}/kv-cache")),
+            kv_cache_poll_interval: Duration::from_millis(1),
+            kv_cache_request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let (runtime_state, observation_rx) = observed_runtime(&config);
+        let collector =
+            start_stats_collector_with_engine_stats(config, observation_rx, None, runtime_state);
+        poll_entered.wait().await;
+
+        let stopped = tokio::time::timeout(Duration::from_secs(1), collector.shutdown()).await;
+        server.abort();
+
+        stopped.expect("collector shutdown should interrupt blocked KV-cache poll");
+    }
+
+    #[tokio::test]
     async fn stats_collector_publishes_mean_input_tps_from_completed_observations() {
         let config = StatsCollectorConfig {
             observation_channel_capacity: 16,
             ..Default::default()
         };
-        let (observation_tx, observation_rx) = request_observation_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let (runtime_state, observation_rx) = observed_runtime(&config);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             None,
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
         for request_index in 0..5 {
-            observation_tx
-                .send_async(RequestObservation {
-                    request_id: format!("req-stats-openai-{request_index}"),
-                    output_messages: 1,
-                    output_tokens: 2,
-                    time_to_first_output: Some(Duration::from_millis(500)),
-                    time_to_first_token: Some(Duration::from_millis(600)),
-                    total_duration: Duration::from_secs(1),
-                    ..completed_observation(
-                        50,
-                        1,
-                        2,
-                        Duration::from_millis(500),
-                        Duration::from_secs(1),
-                    )
-                })
-                .await
-                .expect("collector should receive completed observations");
+            runtime_state.observe_request(RequestObservation {
+                request_id: format!("req-stats-openai-{request_index}"),
+                output_messages: 1,
+                output_tokens: 2,
+                time_to_first_output: Some(Duration::from_millis(500)),
+                time_to_first_token: Some(Duration::from_millis(600)),
+                total_duration: Duration::from_secs(1),
+                ..completed_observation(
+                    50,
+                    1,
+                    2,
+                    Duration::from_millis(500),
+                    Duration::from_secs(1),
+                )
+            });
         }
         tokio::task::yield_now().await;
 
-        let stats = receive_model_stats_with_last_mean_input_tps(&model_stats_rx, 100.0).await;
+        let stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "mean input TPS should be published",
+            |stats| stats.last_mean_input_tps == 100.0,
+        )
+        .await;
         assert_eq!(stats.last_mean_input_tps, 100.0);
         assert_eq!(stats.output_tps, 5.0);
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
     #[tokio::test]
     async fn stats_collector_seeds_fixed_input_tps_for_queue_admission() {
-        let queue_tracker = QueueAdmissionTracker::default();
         let config = StatsCollectorConfig {
             configured_model_ids: vec!["model-a".to_string()],
             fixed_last_mean_input_tps: Some(2_200.0),
-            queue_tracker: queue_tracker.clone(),
             ..Default::default()
         };
-        let (_observation_tx, observation_rx) = request_observation_channel(&config);
-        let (model_stats_tx, model_stats_rx) = flume::bounded(4);
-        let (stop_tx, stop_rx) = watch::channel(false);
+        let (runtime_state, observation_rx) = observed_runtime(&config);
+        let stop = CancellationToken::new();
         let collector = tokio::spawn(run_stats_collector(
             config,
             observation_rx,
             None,
-            model_stats_tx,
-            stop_rx,
+            runtime_state.clone(),
+            stop.clone(),
         ));
 
-        let (model_id, stats) =
-            tokio::time::timeout(Duration::from_secs(1), model_stats_rx.recv_async())
-                .await
-                .expect("fixed TPS stats should be published")
-                .expect("collector should stay connected");
-        assert_eq!(model_id, "model-a");
+        let stats = wait_for_model_stats(
+            &runtime_state,
+            "model-a",
+            "fixed TPS stats should be published",
+            |stats| stats.last_mean_input_tps == 2_200.0,
+        )
+        .await;
         assert_eq!(stats.last_mean_input_tps, 2_200.0);
 
         let _queued =
-            queue_tracker.track_request(&crate::request_observer::RequiredTunnelHeaders {
+            runtime_state.track_request(&crate::request_observer::RequiredTunnelHeaders {
                 request_id: "req-queued".to_string(),
                 routing_key: None,
                 model_id: "model-a".to_string(),
@@ -3005,46 +2955,41 @@ mod tests {
                 input_tokens: 32,
                 accepted_at: std::time::Instant::now(),
             });
-        queue_tracker.record_observation(&active_chat_observation(
+        runtime_state.transition_request_observation(active_chat_observation(
             "req-queued",
             RequestObservationState::Queued,
         ));
         assert_eq!(
-            queue_tracker
-                .snapshot_model("model-a")
+            runtime_state
+                .snapshot_live_model("model-a")
                 .queue_time_estimate_ms_by_priority,
             Some(HashMap::from([(0, 15)]))
         );
 
-        stop_tx.send(true).expect("collector should receive stop");
+        stop.cancel();
         collector.await.expect("collector task should join");
     }
 
     #[test]
     fn records_metrics_when_configured() {
         let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let config = StatsCollectorConfig {
-            metrics: Some(metrics.clone()),
-            ..Default::default()
-        };
-        let mut per_model = HashMap::new();
-        let mut in_flight = HashMap::new();
+        let config = StatsCollectorConfig::default();
+        let (runtime_state, _observation_rx) = PylonRuntimeState::observed(
+            stargate_proto::pb::InferenceServerStatus::Unknown,
+            &[],
+            config.observation_channel_capacity,
+            Some(metrics.clone()),
+        );
+        let mut aggregator = StatsAggregator::new(config, runtime_state.clone());
         let observation =
             completed_observation(20, 2, 10, Duration::from_secs(2), Duration::from_secs(4));
 
         for _ in 0..5 {
-            let updated_stats =
-                record_observation(&config, &mut per_model, &mut in_flight, &observation);
-            observe_request_metric(&config, &observation);
+            let updated_stats = apply_fallback_observation(&mut aggregator, &observation);
             for (model_id, stats) in updated_stats {
-                observe_model_metric(&config, &model_id, &stats);
+                observe_model_metric(&runtime_state, &model_id, &stats);
             }
         }
-        let mut mean_input_stats =
-            snapshot_model_stats(&config, &mut per_model, &in_flight, "model-a");
-        mean_input_stats.last_mean_input_tps = 10.0;
-        observe_model_metric(&config, "model-a", &mean_input_stats);
-
         let body = metrics.gather_text().expect("metrics should encode");
         assert!(body.contains(
             r#"pylon_requests_total{model="model-a",routing_key="rk-1",status="complete"} 5"#
@@ -3066,6 +3011,10 @@ mod tests {
             kv_cache_free_tokens: 600,
         };
 
-        assert!(!kv_cache_stats_model_allowed(&config, &kv_cache));
+        assert!(
+            StatsAggregator::new(config, PylonRuntimeState::default())
+                .apply_kv_cache_stats(kv_cache)
+                .is_none()
+        );
     }
 }

@@ -14,16 +14,17 @@
 // limitations under the License.
 
 use super::core::{
-    MAX_SPECULATIVE_REQUEST_BODY_PREALLOC_BYTES, ObserverGuard, TunnelServerApp,
-    extend_body_from_buf, is_health_request_path, otel_parent_from_headers,
-    pylon_upstream_parent_context, request_body_buffer, request_body_capacity,
-    should_forward_header, should_forward_response_header,
+    MAX_SPECULATIVE_REQUEST_BODY_PREALLOC_BYTES, TunnelServerApp, extend_body_from_buf,
+    is_health_request_path, otel_parent_from_headers, pylon_upstream_parent_context,
+    request_body_buffer, request_body_capacity, should_forward_header,
+    should_forward_response_header,
 };
 use super::endpoint::{
     build_trusted_client_config, derive_sni, make_server_config, target_authority,
 };
 use super::reverse::{
-    connect_reverse_quic_endpoint, reverse_quic_connect_debug_target, reverse_quic_resolved_target,
+    connect_first_reverse_quic_candidate, connect_reverse_quic_endpoint,
+    reverse_quic_connect_debug_target, reverse_quic_resolved_target,
 };
 use super::*;
 use std::collections::BTreeMap;
@@ -46,15 +47,16 @@ use opentelemetry::trace::TraceContextExt;
 use prometheus::{Encoder, TextEncoder};
 use quinn::{ClientConfig, Endpoint};
 use reqwest::header::HeaderMap;
+use stargate_proto::pb::InferenceServerStatus;
 use stargate_protocol::TunnelTransportProtocol;
 use stargate_protocol::tunnel_contract::WEBTRANSPORT_TUNNEL_PATH;
 use stargate_tls::ServerTlsIdentity;
 use tokio::net::TcpListener;
 
-use crate::queue_admission::{QueueAdmissionTracker, QueueTrackedRequestGuard};
+use crate::queue_admission::QueueTrackedRequestGuard;
 use crate::request_observer::RequiredTunnelHeaders;
 use crate::stats::PylonMetrics;
-use crate::{StatsCollectorConfig, request_observation_channel, start_stats_collector};
+use crate::{PylonRuntimeState, StatsCollectorConfig, start_stats_collector};
 
 #[derive(Clone, Default)]
 struct RecordingDebugSubscriber {
@@ -136,6 +138,86 @@ type TestWebTransportConnectStream = h3::client::RequestStream<
     Bytes,
 >;
 
+#[derive(Debug)]
+struct TestSseEvent {
+    event_name: Option<String>,
+    data: String,
+}
+
+fn parse_test_sse_events(body: &str) -> Vec<TestSseEvent> {
+    let normalized = body.replace("\r\n", "\n");
+    assert!(
+        normalized.is_empty() || normalized.ends_with("\n\n"),
+        "SSE body ended with an incomplete event: {normalized:?}"
+    );
+
+    normalized
+        .split("\n\n")
+        .filter(|event| !event.is_empty())
+        .filter_map(|raw_event| {
+            let mut event_name = None;
+            let mut data_lines = Vec::new();
+            let mut saw_field = false;
+
+            for line in raw_event.lines() {
+                if line.starts_with(':') {
+                    continue;
+                }
+                let (field, value) = line.split_once(':').unwrap_or((line, ""));
+                let value = value.strip_prefix(' ').unwrap_or(value);
+                match field {
+                    "event" => {
+                        event_name = Some(value.to_string());
+                        saw_field = true;
+                    }
+                    "data" => {
+                        data_lines.push(value);
+                        saw_field = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            saw_field.then(|| TestSseEvent {
+                event_name,
+                data: data_lines.join("\n"),
+            })
+        })
+        .collect()
+}
+
+fn test_sse_json_payloads(events: &[TestSseEvent]) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter(|event| event.data.trim() != "[DONE]")
+        .map(|event| serde_json::from_str(&event.data).unwrap())
+        .collect()
+}
+
+fn observed_runtime(
+    capacity: usize,
+) -> (
+    PylonRuntimeState,
+    flume::Receiver<crate::RequestObservationEvent>,
+) {
+    PylonRuntimeState::observed(InferenceServerStatus::Unknown, &[], capacity, None)
+}
+
+async fn recv_terminal_observation(
+    rx: &flume::Receiver<crate::RequestObservationEvent>,
+) -> crate::RequestObservation {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let observation = rx.recv_async().await.unwrap().into_observation();
+            if observation.is_terminal() {
+                break observation;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
 struct DirectWebTransportSession {
     _endpoint: Endpoint,
     connection: quinn::Connection,
@@ -216,17 +298,16 @@ fn direct_and_reverse_configs_share_forwarding_defaults() {
         direct.max_request_body_bytes,
         reverse.max_request_body_bytes
     );
+    assert_eq!(direct.max_sse_buffer_bytes, reverse.max_sse_buffer_bytes);
     assert_eq!(direct.first_output_timeout, reverse.first_output_timeout);
     assert_eq!(direct.output_chunk_timeout, reverse.output_chunk_timeout);
-    assert!(direct.request_observation_tx.is_none());
-    assert!(reverse.request_observation_tx.is_none());
     assert!(direct.metrics.is_none());
     assert!(reverse.metrics.is_none());
 }
 
 #[test]
 fn reverse_tunnel_app_from_config_preserves_forwarding_settings() {
-    let (observation_tx, _observation_rx) = flume::unbounded();
+    let (runtime_state, _observation_rx) = observed_runtime(16);
     let metrics = PylonMetrics::new().expect("metrics should initialize");
     let mut config = ReverseQuicTunnelConfig::new(
         "router.local:443".to_string(),
@@ -234,9 +315,10 @@ fn reverse_tunnel_app_from_config_preserves_forwarding_settings() {
         "http://upstream.local".to_string(),
     );
     config.max_request_body_bytes = 1234;
+    config.max_sse_buffer_bytes = 321;
     config.first_output_timeout = Duration::from_millis(55);
     config.output_chunk_timeout = Duration::from_millis(77);
-    config.request_observation_tx = Some(observation_tx);
+    config.runtime_state = runtime_state.clone();
     config.retry.local_connect_failures_retryable = true;
     config.queue_mismatch_retry.enabled = false;
     config.metrics = Some(metrics.clone());
@@ -246,9 +328,9 @@ fn reverse_tunnel_app_from_config_preserves_forwarding_settings() {
     assert_eq!(app.inference_server_id, "backend-1");
     assert_eq!(app.upstream_http_base_url, "http://upstream.local");
     assert_eq!(app.max_request_body_bytes, 1234);
+    assert_eq!(app.max_sse_buffer_bytes, 321);
     assert_eq!(app.first_output_timeout, Duration::from_millis(55));
     assert_eq!(app.output_chunk_timeout, Duration::from_millis(77));
-    assert!(app.request_observation_tx.is_some());
     assert!(app.retry.local_connect_failures_retryable);
     assert!(!app.queue_mismatch_retry.enabled);
     assert!(Arc::ptr_eq(
@@ -433,7 +515,7 @@ async fn start_queue_mismatch_test_tunnel(
 ) -> (
     QuicHttpTunnelHandle,
     Arc<AtomicUsize>,
-    QueueAdmissionTracker,
+    PylonRuntimeState,
     QueueTrackedRequestGuard,
     Arc<PylonMetrics>,
 ) {
@@ -467,10 +549,10 @@ async fn start_queue_mismatch_test_tunnel(
     config.queue_mismatch_retry.enabled = enabled;
     config.queue_mismatch_retry.retry_after_ms = Some(125);
     config
-        .queue_tracker
+        .runtime_state
         .update_model_throughput("model-a", 100.0);
-    let queue_tracker = config.queue_tracker.clone();
-    let queued_request = config.queue_tracker.track_request(&RequiredTunnelHeaders {
+    let runtime_state = config.runtime_state.clone();
+    let queued_request = config.runtime_state.track_request(&RequiredTunnelHeaders {
         request_id: "req-already-queued".to_string(),
         routing_key: Some("rk-1".to_string()),
         model_id: "model-a".to_string(),
@@ -483,7 +565,7 @@ async fn start_queue_mismatch_test_tunnel(
     (
         tunnel,
         upstream_hits,
-        queue_tracker,
+        runtime_state,
         queued_request,
         metrics,
     )
@@ -823,13 +905,7 @@ async fn send_direct_webtransport_request_with_headers(
     )
     .await
     .unwrap();
-    stargate_protocol::write_webtransport_http_body(
-        &mut quinn_send,
-        bytes::Bytes::from_static(body),
-    )
-    .await
-    .unwrap();
-    stargate_protocol::finish_webtransport_http_stream(&mut quinn_send).unwrap();
+    write_direct_webtransport_request_body(&mut quinn_send, bytes::Bytes::from_static(body)).await;
 
     let mut quinn_recv = quinn_recv;
     let response_head = stargate_protocol::read_webtransport_http_response_head(&mut quinn_recv)
@@ -843,6 +919,45 @@ async fn send_direct_webtransport_request_with_headers(
         response_body.extend_from_slice(&chunk);
     }
     (response_head.status, response_head.headers, response_body)
+}
+
+async fn write_direct_webtransport_request_body(
+    quinn_send: &mut quinn::SendStream,
+    body: bytes::Bytes,
+) {
+    match stargate_protocol::write_webtransport_http_body(quinn_send, body).await {
+        Ok(()) => stargate_protocol::finish_webtransport_http_stream(quinn_send).unwrap(),
+        // Head-only local rejections may stop the unread body with QUIC NO_ERROR.
+        Err(error) if webtransport_request_body_stopped_normally(&error) => {}
+        Err(error) => panic!("write WebTransport request body: {error}"),
+    }
+}
+
+fn webtransport_request_body_stopped_normally(error: &stargate_protocol::ProtocolError) -> bool {
+    let stargate_protocol::ProtocolError::Io(error) = error else {
+        return false;
+    };
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<quinn::WriteError>())
+        .is_some_and(
+            |error| matches!(error, quinn::WriteError::Stopped(code) if *code == 0u32.into()),
+        )
+}
+
+#[test]
+fn direct_webtransport_test_client_accepts_only_no_error_request_body_stop() {
+    let no_error = stargate_protocol::ProtocolError::Io(std::io::Error::other(
+        quinn::WriteError::Stopped(0u32.into()),
+    ));
+    let application_error = stargate_protocol::ProtocolError::Io(std::io::Error::other(
+        quinn::WriteError::Stopped(1u32.into()),
+    ));
+
+    assert!(webtransport_request_body_stopped_normally(&no_error));
+    assert!(!webtransport_request_body_stopped_normally(
+        &application_error
+    ));
 }
 
 async fn send_direct_http3_json_request(
@@ -1130,7 +1245,12 @@ async fn quic_tunnel_forwards_to_http_backend() {
         response_body.extend_from_slice(&chunk);
     }
     let response_text = String::from_utf8(response_body).unwrap();
-    assert!(response_text.contains("chat.completion.chunk"));
+    let events = parse_test_sse_events(&response_text);
+    assert_eq!(events.last().map(|event| event.data.trim()), Some("[DONE]"));
+    let payloads = test_sse_json_payloads(&events);
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0]["object"], "chat.completion.chunk");
+    assert_eq!(payloads[0]["choices"][0]["delta"]["content"], "ok");
 
     tunnel.shutdown().await;
 }
@@ -1267,10 +1387,10 @@ async fn quic_tunnel_rejects_queue_estimate_mismatch_before_upstream() {
     config.metrics = Some(metrics.clone());
     config.queue_mismatch_retry.retry_after_ms = Some(125);
     config
-        .queue_tracker
+        .runtime_state
         .update_model_throughput("model-a", 100.0);
-    let queue_tracker = config.queue_tracker.clone();
-    let _queued_request = config.queue_tracker.track_request(&RequiredTunnelHeaders {
+    let runtime_state = config.runtime_state.clone();
+    let _queued_request = config.runtime_state.track_request(&RequiredTunnelHeaders {
         request_id: "req-already-queued".to_string(),
         routing_key: Some("rk-1".to_string()),
         model_id: "model-a".to_string(),
@@ -1347,7 +1467,7 @@ async fn quic_tunnel_rejects_queue_estimate_mismatch_before_upstream() {
     assert!(response_text.contains("queue_estimate_mismatch"));
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
     assert_eq!(
-        queue_tracker.tracked_request_count(),
+        runtime_state.tracked_request_count(),
         1,
         "queue mismatch rejection should not leak the rejected request"
     );
@@ -1371,7 +1491,7 @@ async fn quic_tunnel_rejects_queue_estimate_mismatch_before_upstream() {
 
 #[tokio::test]
 async fn quic_tunnel_queue_mismatch_retry_disabled_forwards_to_upstream() {
-    let (tunnel, upstream_hits, queue_tracker, _queued_request, metrics) =
+    let (tunnel, upstream_hits, runtime_state, _queued_request, metrics) =
         start_queue_mismatch_test_tunnel(TunnelTransportProtocol::Custom, false).await;
 
     let mut headers = queue_mismatch_request_headers("req-queue-mismatch-disabled");
@@ -1392,7 +1512,7 @@ async fn quic_tunnel_queue_mismatch_retry_disabled_forwards_to_upstream() {
     assert_eq!(String::from_utf8(response_body).unwrap(), "forwarded");
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
     assert_eq!(
-        queue_tracker.tracked_request_count(),
+        runtime_state.tracked_request_count(),
         1,
         "disabled queue mismatch admission should still finish the proxied request"
     );
@@ -1416,7 +1536,7 @@ async fn quic_tunnel_queue_mismatch_retry_disabled_forwards_to_upstream() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http3_tunnel_rejects_queue_estimate_mismatch_before_upstream() {
-    let (tunnel, upstream_hits, queue_tracker, _queued_request, metrics) =
+    let (tunnel, upstream_hits, runtime_state, _queued_request, metrics) =
         start_queue_mismatch_test_tunnel(TunnelTransportProtocol::Http3, true).await;
 
     let (status, response_headers, response_body) = send_direct_http3_json_request(
@@ -1460,7 +1580,7 @@ async fn http3_tunnel_rejects_queue_estimate_mismatch_before_upstream() {
     );
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
     assert_eq!(
-        queue_tracker.tracked_request_count(),
+        runtime_state.tracked_request_count(),
         1,
         "HTTP/3 queue mismatch rejection should not leak the rejected request"
     );
@@ -1478,7 +1598,7 @@ async fn http3_tunnel_rejects_queue_estimate_mismatch_before_upstream() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webtransport_tunnel_rejects_queue_estimate_mismatch_before_upstream() {
-    let (tunnel, upstream_hits, queue_tracker, _queued_request, metrics) =
+    let (tunnel, upstream_hits, runtime_state, _queued_request, metrics) =
         start_queue_mismatch_test_tunnel(TunnelTransportProtocol::WebTransport, true).await;
     let session = open_direct_webtransport_session(tunnel.listen_addr()).await;
 
@@ -1523,7 +1643,7 @@ async fn webtransport_tunnel_rejects_queue_estimate_mismatch_before_upstream() {
     );
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
     assert_eq!(
-        queue_tracker.tracked_request_count(),
+        runtime_state.tracked_request_count(),
         1,
         "WebTransport queue mismatch rejection should not leak the rejected request"
     );
@@ -1813,12 +1933,12 @@ async fn quic_tunnel_emits_request_observation_for_streaming_response() {
         let _ = axum::serve(http_listener, app).await;
     });
 
-    let (tx, rx) = flume::bounded(16);
+    let (runtime_state, rx) = observed_runtime(16);
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
-    config.request_observation_tx = Some(tx);
+    config.runtime_state = runtime_state.clone();
 
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
     let tunnel_addr = tunnel.listen_addr();
@@ -1856,16 +1976,7 @@ async fn quic_tunnel_emits_request_observation_for_streaming_response() {
     );
     while recv.recv_body().await.unwrap().into_body().is_some() {}
 
-    let observation = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observation = rx.recv_async().await.unwrap();
-            if observation.is_terminal() {
-                break observation;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let observation = recv_terminal_observation(&rx).await;
     assert_eq!(observation.request_id, "req-stream-1");
     assert_eq!(observation.model_id, "model-stream");
     assert_eq!(observation.input_tokens, 17);
@@ -1912,12 +2023,12 @@ async fn quic_tunnel_emits_request_observation_for_streaming_responses() {
         let _ = axum::serve(http_listener, app).await;
     });
 
-    let (tx, rx) = flume::bounded(16);
+    let (runtime_state, rx) = observed_runtime(16);
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
-    config.request_observation_tx = Some(tx);
+    config.runtime_state = runtime_state;
 
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
     let tunnel_addr = tunnel.listen_addr();
@@ -1942,20 +2053,30 @@ async fn quic_tunnel_emits_request_observation_for_streaming_responses() {
         response_body.extend_from_slice(&chunk);
     }
     let response_text = String::from_utf8(response_body).unwrap();
-    assert!(response_text.contains("event: response.created"));
-    assert!(response_text.contains("event: response.output_text.delta"));
-    assert!(response_text.contains("event: response.completed"));
+    let events = parse_test_sse_events(&response_text);
+    let event_names: Vec<_> = events
+        .iter()
+        .map(|event| event.event_name.as_deref())
+        .collect();
+    assert_eq!(
+        event_names,
+        vec![
+            Some("response.created"),
+            Some("response.output_text.delta"),
+            Some("response.completed"),
+        ]
+    );
+    let payloads = test_sse_json_payloads(&events);
+    assert_eq!(payloads[0]["type"], "response.created");
+    assert_eq!(payloads[1]["type"], "response.output_text.delta");
+    assert_eq!(payloads[1]["delta"], "Hello");
+    assert_eq!(payloads[2]["type"], "response.completed");
+    assert_eq!(
+        payloads[2]["response"]["usage"]["total_tokens"],
+        serde_json::json!(13)
+    );
 
-    let observation = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observation = rx.recv_async().await.unwrap();
-            if observation.is_terminal() {
-                break observation;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let observation = recv_terminal_observation(&rx).await;
     assert_eq!(
         observation.endpoint,
         crate::request_observer::RequestObservationEndpoint::Responses
@@ -2069,16 +2190,19 @@ async fn quic_tunnel_feeds_chunk_usage_stats_into_stats_collector() {
         observation_channel_capacity: 16,
         ..Default::default()
     };
-    let (observation_tx, observation_rx) = request_observation_channel(&stats_config);
-    let (model_stats_tx, model_stats_rx) = flume::bounded(16);
-    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let stats_handle = start_stats_collector(stats_config, observation_rx, model_stats_tx, stop_rx);
+    let (runtime_state, observation_rx) = PylonRuntimeState::observed(
+        InferenceServerStatus::Unknown,
+        &[],
+        stats_config.observation_channel_capacity,
+        None,
+    );
+    let stats_handle = start_stats_collector(stats_config, observation_rx, runtime_state.clone());
 
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
-    config.request_observation_tx = Some(observation_tx);
+    config.runtime_state = runtime_state.clone();
 
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
     let tunnel_addr = tunnel.listen_addr();
@@ -2117,9 +2241,10 @@ async fn quic_tunnel_feeds_chunk_usage_stats_into_stats_collector() {
     while recv.recv_body().await.unwrap().into_body().is_some() {}
 
     let stats = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut poll = tokio::time::interval(Duration::from_millis(1));
         loop {
-            let (model_id, stats) = model_stats_rx.recv_async().await.unwrap();
-            if model_id == "model-stream"
+            poll.tick().await;
+            if let Some(stats) = runtime_state.model_stats("model-stream")
                 && stats
                     .stats_capabilities
                     .contains(&"request.output.chunk_usage".to_string())
@@ -2133,7 +2258,6 @@ async fn quic_tunnel_feeds_chunk_usage_stats_into_stats_collector() {
     assert!(stats.stats_observed_at_unix_ms > 0);
     assert_eq!(stats.stats_sources, vec!["chunk_usage".to_string()]);
 
-    let _ = stop_tx.send(true);
     stats_handle.shutdown().await;
     tunnel.shutdown().await;
 }
@@ -2164,12 +2288,12 @@ async fn quic_tunnel_counts_terminal_only_usage_tokens() {
         let _ = axum::serve(http_listener, app).await;
     });
 
-    let (tx, rx) = flume::bounded(16);
+    let (runtime_state, rx) = observed_runtime(16);
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
-    config.request_observation_tx = Some(tx);
+    config.runtime_state = runtime_state;
 
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
     let tunnel_addr = tunnel.listen_addr();
@@ -2207,16 +2331,7 @@ async fn quic_tunnel_counts_terminal_only_usage_tokens() {
     );
     while recv.recv_body().await.unwrap().into_body().is_some() {}
 
-    let observation = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observation = rx.recv_async().await.unwrap();
-            if observation.is_terminal() {
-                break observation;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let observation = recv_terminal_observation(&rx).await;
     assert_eq!(observation.request_id, "req-terminal-usage");
     assert_eq!(observation.model_id, "model-terminal-usage");
     assert_eq!(observation.input_tokens, 13);
@@ -2252,12 +2367,12 @@ async fn quic_tunnel_uses_chunk_stats_fallback_when_progress_contract_is_absent(
         let _ = axum::serve(http_listener, app).await;
     });
 
-    let (tx, rx) = flume::bounded(16);
+    let (runtime_state, rx) = observed_runtime(16);
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
-    config.request_observation_tx = Some(tx);
+    config.runtime_state = runtime_state;
 
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
     let tunnel_addr = tunnel.listen_addr();
@@ -2279,16 +2394,7 @@ async fn quic_tunnel_uses_chunk_stats_fallback_when_progress_contract_is_absent(
     );
     while recv.recv_body().await.unwrap().into_body().is_some() {}
 
-    let observation = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observation = rx.recv_async().await.unwrap();
-            if observation.is_terminal() {
-                break observation;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let observation = recv_terminal_observation(&rx).await;
     assert_eq!(observation.output_messages, 1);
     assert_eq!(observation.output_tokens, 9);
     assert!(observation.output_tokens_explicit);
@@ -2986,12 +3092,12 @@ async fn embeddings_tunnel_forwards_json_without_stream() {
         let _ = axum::serve(http_listener, app).await;
     });
 
-    let (tx, rx) = flume::bounded(16);
+    let (runtime_state, rx) = observed_runtime(16);
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
-    config.request_observation_tx = Some(tx);
+    config.runtime_state = runtime_state;
 
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
     let tunnel_addr = tunnel.listen_addr();
@@ -3019,16 +3125,7 @@ async fn embeddings_tunnel_forwards_json_without_stream() {
     assert_eq!(payload["object"], "list");
     assert_eq!(payload["data"].as_array().unwrap().len(), 2);
 
-    let observation = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observation = rx.recv_async().await.unwrap();
-            if observation.is_terminal() {
-                break observation;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let observation = recv_terminal_observation(&rx).await;
     assert_eq!(
         observation.endpoint,
         crate::request_observer::RequestObservationEndpoint::Embeddings
@@ -3133,12 +3230,12 @@ async fn embeddings_tunnel_rejects_malformed_json_before_upstream() {
         let _ = axum::serve(http_listener, app).await;
     });
 
-    let (tx, rx) = flume::bounded(16);
+    let (runtime_state, rx) = observed_runtime(16);
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
-    config.request_observation_tx = Some(tx);
+    config.runtime_state = runtime_state;
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
     let tunnel_addr = tunnel.listen_addr();
     let (_endpoint, mut send, mut recv) = open_test_tunnel_stream(tunnel_addr).await;
@@ -3166,16 +3263,7 @@ async fn embeddings_tunnel_rejects_malformed_json_before_upstream() {
     );
     assert_eq!(hits.load(Ordering::Relaxed), 0);
 
-    let observation = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observation = rx.recv_async().await.unwrap();
-            if observation.is_terminal() {
-                break observation;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let observation = recv_terminal_observation(&rx).await;
     assert_eq!(
         observation.endpoint,
         crate::request_observer::RequestObservationEndpoint::Embeddings
@@ -3233,13 +3321,13 @@ async fn http3_embeddings_tunnel_forwards_json_and_validates_required_headers() 
         let _ = axum::serve(http_listener, app).await;
     });
 
-    let (tx, rx) = flume::bounded(16);
+    let (runtime_state, rx) = observed_runtime(16);
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
     config.tunnel_protocol = TunnelTransportProtocol::Http3;
-    config.request_observation_tx = Some(tx);
+    config.runtime_state = runtime_state;
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
 
     let mut headers = HeaderMap::new();
@@ -3266,16 +3354,7 @@ async fn http3_embeddings_tunnel_forwards_json_and_validates_required_headers() 
     assert_eq!(payload["data"][0]["embedding"], "AAAA");
     assert_eq!(hits.load(Ordering::Relaxed), 1);
 
-    let observation = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observation = rx.recv_async().await.unwrap();
-            if observation.is_terminal() {
-                break observation;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let observation = recv_terminal_observation(&rx).await;
     assert_eq!(
         observation.endpoint,
         crate::request_observer::RequestObservationEndpoint::Embeddings
@@ -3355,13 +3434,13 @@ async fn webtransport_embeddings_tunnel_forwards_json_and_validates_required_hea
         let _ = axum::serve(http_listener, app).await;
     });
 
-    let (tx, rx) = flume::bounded(16);
+    let (runtime_state, rx) = observed_runtime(16);
     let mut config = QuicHttpTunnelConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{http_addr}"),
     );
     config.tunnel_protocol = TunnelTransportProtocol::WebTransport;
-    config.request_observation_tx = Some(tx);
+    config.runtime_state = runtime_state;
     let tunnel = start_quic_http_tunnel(config).await.unwrap();
     let session = open_direct_webtransport_session(tunnel.listen_addr()).await;
 
@@ -3385,16 +3464,7 @@ async fn webtransport_embeddings_tunnel_forwards_json_and_validates_required_hea
     assert_eq!(payload["data"].as_array().unwrap().len(), 2);
     assert_eq!(hits.load(Ordering::Relaxed), 1);
 
-    let observation = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observation = rx.recv_async().await.unwrap();
-            if observation.is_terminal() {
-                break observation;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let observation = recv_terminal_observation(&rx).await;
     assert_eq!(
         observation.endpoint,
         crate::request_observer::RequestObservationEndpoint::Embeddings
@@ -3994,6 +4064,70 @@ async fn quic_tunnel_times_out_when_no_output_event_arrives() {
 }
 
 #[tokio::test]
+async fn quic_tunnel_rejects_unterminated_sse_event_above_buffer_limit() {
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_addr = http_listener.local_addr().unwrap();
+    let (send_oversized_event, recv_oversized_event) = flume::bounded(1);
+
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_req: Request| {
+            let recv_oversized_event = recv_oversized_event.clone();
+            async move {
+                let body = Body::from_stream(async_stream::stream! {
+                    recv_oversized_event
+                        .recv_async()
+                        .await
+                        .expect("test should release the oversized SSE event");
+                    yield Ok::<_, std::convert::Infallible>(Bytes::from_static(b"data: 12345678"));
+                });
+                let mut response = Response::new(body);
+                response.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                response
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(http_listener, app).await;
+    });
+
+    let mut config = QuicHttpTunnelConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        format!("http://{http_addr}"),
+    );
+    config.max_sse_buffer_bytes = 11;
+    let tunnel = start_quic_http_tunnel(config).await.unwrap();
+    let tunnel_addr = tunnel.listen_addr();
+    let (_endpoint, mut send, mut recv) = open_test_tunnel_stream(tunnel_addr).await;
+
+    send_json_proxy_request(
+        &mut send,
+        "/v1/chat/completions",
+        "model-buffer-limit",
+        "req-buffer-limit-1",
+        br#"{"messages":[],"stream":true}"#,
+    )
+    .await;
+
+    let response_headers = recv.recv_header().await.unwrap();
+    assert_eq!(
+        response_headers.get("x-status").unwrap().to_str().unwrap(),
+        "200"
+    );
+
+    send_oversized_event.send(()).unwrap();
+    assert!(
+        recv.recv_body().await.is_err(),
+        "an oversized unterminated SSE event must reset the tunnel stream while reading its body"
+    );
+
+    tunnel.shutdown().await;
+}
+
+#[tokio::test]
 async fn quic_tunnel_times_out_when_subsequent_output_event_arrives_too_late() {
     let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_addr = http_listener.local_addr().unwrap();
@@ -4104,6 +4238,11 @@ fn derive_sni_falls_back_for_ipv6() {
 }
 
 #[test]
+fn derive_sni_falls_back_for_bracketed_ipv6() {
+    assert_eq!(derive_sni("[::1]:50072"), "stargate");
+}
+
+#[test]
 fn derive_sni_handles_bare_hostname() {
     assert_eq!(
         derive_sni("pod-a.stargate.external"),
@@ -4149,24 +4288,68 @@ fn reverse_quic_connect_debug_target_records_sni_alpn_and_tls_mode() {
 }
 
 #[test]
-fn reverse_quic_resolved_target_prefers_ipv4_addr() {
+fn reverse_quic_resolved_target_preserves_all_dial_candidates() {
     let ipv6_addr: SocketAddr = "[fd00::1]:50072".parse().unwrap();
     let ipv4_addr: SocketAddr = "10.0.0.4:50072".parse().unwrap();
 
     let target = reverse_quic_resolved_target(vec![ipv6_addr, ipv4_addr]).unwrap();
 
     assert_eq!(target.resolved_addrs, vec![ipv6_addr, ipv4_addr]);
-    assert_eq!(target.resolved_target, ipv4_addr);
+    assert_eq!(target.dial_candidates, vec![ipv4_addr, ipv6_addr]);
 }
 
 #[test]
-fn reverse_quic_resolved_target_falls_back_to_first_resolved_addr() {
+fn reverse_quic_resolved_target_keeps_ipv6_when_it_is_the_only_candidate() {
     let ipv6_addr: SocketAddr = "[fd00::1]:50072".parse().unwrap();
 
     let target = reverse_quic_resolved_target(vec![ipv6_addr]).unwrap();
 
     assert_eq!(target.resolved_addrs, vec![ipv6_addr]);
-    assert_eq!(target.resolved_target, ipv6_addr);
+    assert_eq!(target.dial_candidates, vec![ipv6_addr]);
+}
+
+#[test]
+fn reverse_quic_resolved_target_rejects_empty_resolution() {
+    assert!(matches!(
+        reverse_quic_resolved_target(Vec::new()),
+        Err(TunnelError::NoResolvedAddress)
+    ));
+}
+
+#[tokio::test]
+async fn reverse_quic_connection_retries_later_resolved_candidates() {
+    let first: SocketAddr = "127.0.0.1:50072".parse().unwrap();
+    let second: SocketAddr = "127.0.0.1:50073".parse().unwrap();
+    let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let attempts_for_connect = attempts.clone();
+
+    let (connected_to, value) =
+        connect_first_reverse_quic_candidate(&[first, second], move |candidate| {
+            let attempts = attempts_for_connect.clone();
+            async move {
+                attempts
+                    .lock()
+                    .expect("attempts lock should not be poisoned")
+                    .push(candidate);
+                if candidate == first {
+                    Err(anyhow::anyhow!("first candidate rejected"))
+                } else {
+                    Ok("connected")
+                }
+            }
+        })
+        .await
+        .expect("later candidate should be attempted after the first failure");
+
+    assert_eq!(connected_to, second);
+    assert_eq!(value, "connected");
+    assert_eq!(
+        attempts
+            .lock()
+            .expect("attempts lock should not be poisoned")
+            .as_slice(),
+        &[first, second]
+    );
 }
 
 #[tokio::test]
@@ -4222,9 +4405,10 @@ async fn reverse_quic_endpoint_connect_logs_attempt_resolution_and_connection_me
                 == Some("resolved Stargate reverse QUIC target")
         })
         .expect("resolved target event should be recorded");
+    let expected_candidates = format!("[{server_addr}]");
     assert_eq!(
-        resolved_event.get("resolved_target").map(String::as_str),
-        Some(server_addr.as_str())
+        resolved_event.get("dial_candidates").map(String::as_str),
+        Some(expected_candidates.as_str())
     );
     let connected_event = events
         .iter()
@@ -4242,7 +4426,7 @@ async fn reverse_quic_endpoint_connect_logs_attempt_resolution_and_connection_me
         Some(server_addr.as_str())
     );
     assert_eq!(
-        connected_event.get("resolved_target").map(String::as_str),
+        connected_event.get("dial_target").map(String::as_str),
         Some(server_addr.as_str())
     );
     assert_eq!(
@@ -4264,58 +4448,6 @@ async fn reverse_quic_endpoint_connect_logs_attempt_resolution_and_connection_me
     server_task
         .await
         .expect("server task should observe client close");
-}
-
-#[test]
-fn observer_guard_calls_fail_on_drop() {
-    use crate::request_observer::{RequestObservation, RequestObserver};
-
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("x-request-id", "req-guard".parse().unwrap());
-    headers.insert("x-routing-key", "rk-1".parse().unwrap());
-    headers.insert("x-model", "model-a".parse().unwrap());
-    headers.insert("x-input-tokens", "10".parse().unwrap());
-    let (tx, rx) = flume::bounded::<RequestObservation>(8);
-    let observer = RequestObserver::new(&headers, Some(tx)).unwrap();
-    {
-        let _guard = ObserverGuard(observer);
-    }
-    let mut last = None;
-    while let Ok(obs) = rx.try_recv() {
-        last = Some(obs);
-    }
-    let last = last.expect("expected at least one observation from guard drop");
-    assert_eq!(
-        last.state,
-        crate::request_observer::RequestObservationState::Failed
-    );
-}
-
-#[test]
-fn observer_guard_noop_when_already_terminal() {
-    use crate::request_observer::{RequestObservation, RequestObserver};
-
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("x-request-id", "req-noop".parse().unwrap());
-    headers.insert("x-routing-key", "rk-1".parse().unwrap());
-    headers.insert("x-model", "model-a".parse().unwrap());
-    headers.insert("x-input-tokens", "10".parse().unwrap());
-    let (tx, rx) = flume::bounded::<RequestObservation>(16);
-    let mut observer = RequestObserver::new(&headers, Some(tx)).unwrap();
-    observer.on_upstream_response_headers(&reqwest::header::HeaderMap::new(), 200);
-    observer.observe_output_message();
-    observer.finish();
-    assert!(observer.is_terminal());
-
-    let pre_drop_count = rx.len();
-    {
-        let _guard = ObserverGuard(observer);
-    }
-    assert_eq!(
-        rx.len(),
-        pre_drop_count,
-        "guard should not emit extra observations when already terminal"
-    );
 }
 
 #[test]

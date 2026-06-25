@@ -13,25 +13,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::common::sse::{assert_sse_done, parse_sse_events};
 use crate::common::{
-    LifecycleDummyBackend, SelfDiscovery, SharedDiscovery, TokenMapAuthenticator, base_config,
-    bind_ephemeral, bind_ephemeral_udp, init_crypto, start_lifecycle_dummy_backend,
-    wait_for_routing, wait_for_routing_with_rk, wait_for_unroutable, with_proxy_headers,
+    LifecycleDummyBackend, SelfDiscovery, SharedDiscovery, TokenMapAuthenticator, TunnelTestCase,
+    base_config, bind_ephemeral, bind_ephemeral_udp, init_crypto, localhost_reverse_tunnel_config,
+    start_lifecycle_dummy_backend, wait_for_inference_server_ids, wait_for_routing,
+    wait_for_routing_with_rk, wait_for_unroutable, wait_until, with_proxy_headers,
 };
 use prometheus::{Encoder, TextEncoder};
 use pylon_lib::{
-    AuthTokenProvider, BringupConfig, InferenceServerRegistrationClient,
-    InferenceServerRegistrationConfig, InferenceServerUpdateChannels, OutputTokenParserFactory,
+    AuthTokenProvider, BringupConfig, CurrentModelStats, InferenceServerRegistrationClient,
+    InferenceServerRegistrationConfig, OutputTokenParserFactory, PylonRuntimeState,
     QuicHttpTunnelConfig, QuicHttpTunnelHandle, ReverseQuicTunnelConfig, ReverseQuicTunnelHandle,
-    start_quic_http_tunnel, start_reverse_quic_tunnel,
+    TunnelTransportProtocol, start_quic_http_tunnel, start_reverse_quic_tunnel,
 };
 use reqwest::StatusCode;
 use stargate::auth::WorkerAuthenticator;
+use stargate::routing::RoutingTargetKey;
 use stargate::runtime::{StargateHandle, StargateRuntime};
 use stargate_proto::pb::stargate_control_plane_client::StargateControlPlaneClient;
 use stargate_proto::pb::stargate_model_discovery_client::StargateModelDiscoveryClient;
@@ -86,6 +89,7 @@ struct LifecycleTopology {
     http_addrs: Vec<SocketAddr>,
     model_discovery_addrs: Vec<SocketAddr>,
     reverse_tunnel_targets: Vec<String>,
+    tunnel_protocol: TunnelTransportProtocol,
     handles: Vec<StargateHandle>,
 }
 
@@ -106,7 +110,7 @@ impl LifecycleTopology {
 struct LifecycleRegistration {
     backend: LifecycleDummyBackend,
     reg_client: InferenceServerRegistrationClient,
-    channels: InferenceServerUpdateChannels,
+    runtime_state: PylonRuntimeState,
     tunnel: Option<QuicHttpTunnelHandle>,
 }
 
@@ -138,12 +142,13 @@ struct LifecycleRuntimeParts<'a> {
     discovery: Box<dyn stargate::discovery::Discovery>,
     reverse: Option<(SocketAddr, std::net::UdpSocket)>,
     authenticator: Option<Arc<dyn WorkerAuthenticator>>,
+    tunnel_protocol: TunnelTransportProtocol,
 }
 
 struct LifecycleBackendOptions<'a> {
     backend_id: &'a str,
     cluster_id: &'a str,
-    model: &'a str,
+    models: &'a [&'a str],
     backend: LifecycleDummyBackend,
     bringup: BringupConfig,
     auth_token: Option<String>,
@@ -394,11 +399,8 @@ async fn exercise_lifecycle_metrics(transport: TransportMode, stargates: Stargat
     wait_for_active_inference_server_count(&topology, &model, 1, Duration::from_secs(5)).await;
 
     registration
-        .channels
-        .status
-        .send_async(InferenceServerStatus::Inactive)
-        .await
-        .expect("send inactive status");
+        .runtime_state
+        .set_status(InferenceServerStatus::Inactive);
     wait_for_unroutable_on_all(&topology, &model, STATUS_TIMEOUT).await;
     wait_for_active_inference_server_count(&topology, &model, 0, Duration::from_secs(5)).await;
 
@@ -416,6 +418,22 @@ async fn routing_key_lifecycle_demotes_only_matching_tenant() {
 async fn multi_model_registration_demotes_only_matching_model() {
     exercise_multi_model_raw_lifecycle(TransportMode::Direct).await;
     exercise_multi_model_raw_lifecycle(TransportMode::Reverse).await;
+}
+
+#[tokio::test]
+async fn direct_shared_cluster_asymmetric_models_preserve_sibling_routes() {
+    exercise_shared_cluster_asymmetric_models(TransportMode::Direct).await;
+}
+
+#[tokio::test]
+async fn reverse_shared_cluster_asymmetric_models_preserve_sibling_routes() {
+    exercise_shared_cluster_asymmetric_models(TransportMode::Reverse).await;
+}
+
+#[tokio::test]
+async fn raw_shared_cluster_asymmetric_model_updates_preserve_sibling_routes() {
+    exercise_raw_shared_cluster_asymmetric_models(TransportMode::Direct).await;
+    exercise_raw_shared_cluster_asymmetric_models(TransportMode::Reverse).await;
 }
 
 #[tokio::test]
@@ -445,6 +463,16 @@ async fn direct_lost_quic_connection_stays_unroutable_without_recovery() {
 }
 
 #[tokio::test]
+async fn direct_http3_and_webtransport_connection_loss_retires_old_generation() {
+    for protocol in [
+        TunnelTransportProtocol::Http3,
+        TunnelTransportProtocol::WebTransport,
+    ] {
+        exercise_direct_protocol_connection_lifecycle(protocol).await;
+    }
+}
+
+#[tokio::test]
 async fn coordinated_calibration_reassigns_after_owner_stops_mid_calibration() {
     init_crypto();
 
@@ -459,7 +487,7 @@ async fn coordinated_calibration_reassigns_after_owner_stops_mid_calibration() {
         LifecycleBackendOptions {
             backend_id: "lifecycle-coordinated-owner",
             cluster_id: "lifecycle-coordinated-cluster",
-            model,
+            models: &[model],
             backend: backend_a,
             bringup: coordinated_calibration_bringup(),
             auth_token: None,
@@ -472,7 +500,7 @@ async fn coordinated_calibration_reassigns_after_owner_stops_mid_calibration() {
         LifecycleBackendOptions {
             backend_id: "lifecycle-coordinated-waiting",
             cluster_id: "lifecycle-coordinated-cluster",
-            model,
+            models: &[model],
             backend: backend_b,
             bringup: coordinated_calibration_bringup(),
             auth_token: None,
@@ -868,7 +896,7 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
         LifecycleBackendOptions {
             backend_id: &format!("lifecycle-list-one-cluster-{}-a", transport.label()),
             cluster_id: "lifecycle-list-one-cluster",
-            model: &one_cluster_model,
+            models: &[&one_cluster_model],
             backend: start_lifecycle_dummy_backend(&one_cluster_model).await,
             bringup: disabled_bringup(),
             auth_token: None,
@@ -881,7 +909,7 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
         LifecycleBackendOptions {
             backend_id: &format!("lifecycle-list-one-cluster-{}-b", transport.label()),
             cluster_id: "lifecycle-list-one-cluster",
-            model: &one_cluster_model,
+            models: &[&one_cluster_model],
             backend: start_lifecycle_dummy_backend(&one_cluster_model).await,
             bringup: disabled_bringup(),
             auth_token: None,
@@ -906,11 +934,8 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
     .await;
 
     backend_a
-        .channels
-        .status
-        .send_async(InferenceServerStatus::Inactive)
-        .await
-        .expect("send inactive status");
+        .runtime_state
+        .set_status(InferenceServerStatus::Inactive);
     wait_for_active_inference_server_count(
         &topology,
         &one_cluster_model,
@@ -935,11 +960,8 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
     .await;
 
     backend_b
-        .channels
-        .status
-        .send_async(InferenceServerStatus::Inactive)
-        .await
-        .expect("send inactive status");
+        .runtime_state
+        .set_status(InferenceServerStatus::Inactive);
     wait_for_unroutable_on_all(&topology, &one_cluster_model, STATUS_TIMEOUT).await;
     wait_for_active_inference_server_count(
         &topology,
@@ -963,7 +985,7 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
         LifecycleBackendOptions {
             backend_id: &format!("lifecycle-list-two-cluster-{}-a", transport.label()),
             cluster_id: "lifecycle-list-two-cluster-a",
-            model: &two_cluster_model,
+            models: &[&two_cluster_model],
             backend: start_lifecycle_dummy_backend(&two_cluster_model).await,
             bringup: disabled_bringup(),
             auth_token: None,
@@ -976,7 +998,7 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
         LifecycleBackendOptions {
             backend_id: &format!("lifecycle-list-two-cluster-{}-b", transport.label()),
             cluster_id: "lifecycle-list-two-cluster-b",
-            model: &two_cluster_model,
+            models: &[&two_cluster_model],
             backend: start_lifecycle_dummy_backend(&two_cluster_model).await,
             bringup: disabled_bringup(),
             auth_token: None,
@@ -1001,11 +1023,8 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
     .await;
 
     cluster_a
-        .channels
-        .status
-        .send_async(InferenceServerStatus::Inactive)
-        .await
-        .expect("send inactive status");
+        .runtime_state
+        .set_status(InferenceServerStatus::Inactive);
     wait_for_active_inference_server_count(
         &topology,
         &two_cluster_model,
@@ -1030,11 +1049,8 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
     .await;
 
     cluster_b
-        .channels
-        .status
-        .send_async(InferenceServerStatus::Inactive)
-        .await
-        .expect("send inactive status");
+        .runtime_state
+        .set_status(InferenceServerStatus::Inactive);
     wait_for_unroutable_on_all(&topology, &two_cluster_model, STATUS_TIMEOUT).await;
     wait_for_active_inference_server_count(
         &topology,
@@ -1058,6 +1074,390 @@ async fn exercise_model_discovery_cluster_lifecycle(transport: TransportMode) {
     topology.shutdown().await;
 }
 
+async fn exercise_shared_cluster_asymmetric_models(transport: TransportMode) {
+    init_crypto();
+
+    let topology = start_lifecycle_topology(transport, StargateTopology::Single).await;
+    let alpha = format!("lifecycle-asymmetric-{}-alpha", transport.label());
+    let shared = format!("lifecycle-asymmetric-{}-shared", transport.label());
+    let beta = format!("lifecycle-asymmetric-{}-beta", transport.label());
+    let backend_a_id = format!("lifecycle-asymmetric-{}-backend-a", transport.label());
+    let backend_b_id = format!("lifecycle-asymmetric-{}-backend-b", transport.label());
+    let mut backend_a = register_lifecycle_backend_with_options(
+        &topology,
+        transport,
+        LifecycleBackendOptions {
+            backend_id: &backend_a_id,
+            cluster_id: "lifecycle-asymmetric-cluster",
+            models: &[alpha.as_str(), shared.as_str()],
+            backend: start_lifecycle_dummy_backend(&alpha).await,
+            bringup: disabled_bringup(),
+            auth_token: None,
+        },
+    )
+    .await;
+    let mut backend_b = register_lifecycle_backend_with_options(
+        &topology,
+        transport,
+        LifecycleBackendOptions {
+            backend_id: &backend_b_id,
+            cluster_id: "lifecycle-asymmetric-cluster",
+            models: &[shared.as_str(), beta.as_str()],
+            backend: start_lifecycle_dummy_backend(&beta).await,
+            bringup: disabled_bringup(),
+            auth_token: None,
+        },
+    )
+    .await;
+
+    backend_a.runtime_state.set_model_stats(
+        alpha.clone(),
+        CurrentModelStats {
+            last_mean_input_tps: 11.0,
+            queued_input_size: 3,
+            ..CurrentModelStats::default()
+        },
+    );
+    backend_a.runtime_state.set_model_stats(
+        shared.clone(),
+        CurrentModelStats {
+            last_mean_input_tps: 17.0,
+            queued_input_size: 5,
+            ..CurrentModelStats::default()
+        },
+    );
+    backend_b.runtime_state.set_model_stats(
+        shared.clone(),
+        CurrentModelStats {
+            last_mean_input_tps: 23.0,
+            queued_input_size: 7,
+            ..CurrentModelStats::default()
+        },
+    );
+    backend_b.runtime_state.set_model_stats(
+        beta.clone(),
+        CurrentModelStats {
+            last_mean_input_tps: 31.0,
+            queued_input_size: 11,
+            ..CurrentModelStats::default()
+        },
+    );
+
+    for model in [&alpha, &shared, &beta] {
+        wait_for_routing_on_all(&topology, model, STATUS_TIMEOUT).await;
+    }
+    wait_for_list_models_on_all(
+        &topology,
+        &[],
+        &[alpha.as_str(), beta.as_str(), shared.as_str()],
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_cluster_stats_on_all(&topology, &alpha, 1, 11.0, 3, STATUS_TIMEOUT).await;
+    wait_for_cluster_stats_on_all(&topology, &shared, 2, 40.0, 12, STATUS_TIMEOUT).await;
+    wait_for_cluster_stats_on_all(&topology, &beta, 1, 31.0, 11, STATUS_TIMEOUT).await;
+
+    assert_backend_serves_all(&topology, &alpha, &backend_a_id, "asymmetric-alpha").await;
+    assert_backend_serves_all(&topology, &beta, &backend_b_id, "asymmetric-beta").await;
+    let shared_backends = wait_for_inference_server_ids(
+        topology.http_addrs[0],
+        &shared,
+        "asymmetric-shared",
+        2,
+        STATUS_TIMEOUT,
+        Duration::from_millis(50),
+    )
+    .await;
+    assert_eq!(
+        shared_backends,
+        HashSet::from([backend_a_id.clone(), backend_b_id.clone()])
+    );
+
+    backend_a.stop();
+    wait_for_unroutable_on_all(&topology, &alpha, STATUS_TIMEOUT).await;
+    wait_for_backend_serves_all(
+        &topology,
+        &shared,
+        &backend_b_id,
+        "asymmetric-shared-after-a-stop",
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_backend_serves_all(
+        &topology,
+        &beta,
+        &backend_b_id,
+        "asymmetric-beta-after-a-stop",
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_list_models_on_all(
+        &topology,
+        &[],
+        &[beta.as_str(), shared.as_str()],
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_cluster_stats_on_all(&topology, &shared, 1, 23.0, 7, STATUS_TIMEOUT).await;
+    wait_for_cluster_stats_on_all(&topology, &beta, 1, 31.0, 11, STATUS_TIMEOUT).await;
+
+    backend_b.stop();
+    topology.shutdown().await;
+}
+
+async fn exercise_direct_protocol_connection_lifecycle(protocol: TunnelTransportProtocol) {
+    init_crypto();
+
+    let case = TunnelTestCase::direct(protocol);
+    let topology = start_lifecycle_topology_for_case(case, StargateTopology::Single, None).await;
+    let model = format!("lifecycle-direct-{}-generation", case.protocol_label());
+    let old_backend_id = format!("lifecycle-direct-{}-old", case.protocol_label());
+    let new_backend_id = format!("lifecycle-direct-{}-new", case.protocol_label());
+    let mut old_registration = register_lifecycle_backend_with_options(
+        &topology,
+        TransportMode::Direct,
+        LifecycleBackendOptions {
+            backend_id: &old_backend_id,
+            cluster_id: "",
+            models: &[&model],
+            backend: start_lifecycle_dummy_backend(&model).await,
+            bringup: disabled_bringup(),
+            auth_token: None,
+        },
+    )
+    .await;
+
+    wait_for_routing_on_all(&topology, &model, STATUS_TIMEOUT).await;
+    wait_for_list_models_on_all(&topology, &[], &[&model], STATUS_TIMEOUT).await;
+    old_registration.shutdown_tunnel().await;
+    wait_for_unroutable_on_all(&topology, &model, STATUS_TIMEOUT).await;
+    wait_for_list_models_on_all(&topology, &[], &[], STATUS_TIMEOUT).await;
+    old_registration.stop();
+
+    let mut new_registration = register_lifecycle_backend_with_options(
+        &topology,
+        TransportMode::Direct,
+        LifecycleBackendOptions {
+            backend_id: &new_backend_id,
+            cluster_id: "",
+            models: &[&model],
+            backend: start_lifecycle_dummy_backend(&model).await,
+            bringup: disabled_bringup(),
+            auth_token: None,
+        },
+    )
+    .await;
+    wait_for_routing_on_all(&topology, &model, STATUS_TIMEOUT).await;
+    wait_for_list_models_on_all(&topology, &[], &[&model], STATUS_TIMEOUT).await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &model,
+        HashSet::from([new_backend_id]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+
+    new_registration.stop();
+    topology.shutdown().await;
+}
+
+async fn exercise_raw_shared_cluster_asymmetric_models(transport: TransportMode) {
+    init_crypto();
+
+    let topology = start_lifecycle_topology(transport, StargateTopology::Single).await;
+    let alpha = format!("lifecycle-raw-asymmetric-{}-alpha", transport.label());
+    let shared = format!("lifecycle-raw-asymmetric-{}-shared", transport.label());
+    let beta = format!("lifecycle-raw-asymmetric-{}-beta", transport.label());
+    let backend_a_id = format!("lifecycle-raw-asymmetric-{}-backend-a", transport.label());
+    let backend_b_id = format!("lifecycle-raw-asymmetric-{}-backend-b", transport.label());
+    let backend_a = start_lifecycle_dummy_backend(&alpha).await;
+    let backend_b = start_lifecycle_dummy_backend(&beta).await;
+    let upstream_a = format!("http://{}", backend_a.addr);
+    let upstream_b = format!("http://{}", backend_b.addr);
+    let (url_a, direct_tunnel_a) = match transport {
+        TransportMode::Direct => {
+            let tunnel = start_quic_http_tunnel(QuicHttpTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                upstream_a.clone(),
+            ))
+            .await
+            .expect("direct QUIC tunnel A failed to start");
+            (format!("quic://{}", tunnel.listen_addr()), Some(tunnel))
+        }
+        TransportMode::Reverse => (upstream_a.clone(), None),
+    };
+    let (url_b, direct_tunnel_b) = match transport {
+        TransportMode::Direct => {
+            let tunnel = start_quic_http_tunnel(QuicHttpTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                upstream_b.clone(),
+            ))
+            .await
+            .expect("direct QUIC tunnel B failed to start");
+            (format!("quic://{}", tunnel.listen_addr()), Some(tunnel))
+        }
+        TransportMode::Reverse => (upstream_b.clone(), None),
+    };
+    let update_a = raw_registration(
+        &backend_a_id,
+        "lifecycle-raw-asymmetric-cluster",
+        &url_a,
+        &[
+            (alpha.as_str(), InferenceServerStatus::Active),
+            (shared.as_str(), InferenceServerStatus::Active),
+        ],
+        transport.reverse_tunnel(),
+        false,
+    );
+    let update_b = raw_registration(
+        &backend_b_id,
+        "lifecycle-raw-asymmetric-cluster",
+        &url_b,
+        &[
+            (shared.as_str(), InferenceServerStatus::Active),
+            (beta.as_str(), InferenceServerStatus::Active),
+        ],
+        transport.reverse_tunnel(),
+        false,
+    );
+    let registrations_a = start_raw_registrations(&topology, update_a.clone()).await;
+    let registrations_b = start_raw_registrations(&topology, update_b.clone()).await;
+    let reverse_tunnels_a = if transport.reverse_tunnel() {
+        start_reverse_tunnels(&topology, &backend_a_id, &upstream_a).await
+    } else {
+        Vec::new()
+    };
+    let reverse_tunnels_b = if transport.reverse_tunnel() {
+        start_reverse_tunnels(&topology, &backend_b_id, &upstream_b).await
+    } else {
+        Vec::new()
+    };
+    send_raw_update_to_all(&registrations_a, update_a).await;
+    send_raw_update_to_all(&registrations_b, update_b).await;
+
+    for model in [&alpha, &shared, &beta] {
+        wait_for_routing_on_all(&topology, model, STATUS_TIMEOUT).await;
+    }
+    wait_for_backend_ids_on_all(
+        &topology,
+        &alpha,
+        HashSet::from([backend_a_id.clone()]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &shared,
+        HashSet::from([backend_a_id.clone(), backend_b_id.clone()]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &beta,
+        HashSet::from([backend_b_id.clone()]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+
+    send_raw_update_to_all(
+        &registrations_a,
+        raw_registration(
+            &backend_a_id,
+            "lifecycle-raw-asymmetric-cluster",
+            &url_a,
+            &[
+                (alpha.as_str(), InferenceServerStatus::Inactive),
+                (shared.as_str(), InferenceServerStatus::Active),
+            ],
+            transport.reverse_tunnel(),
+            false,
+        ),
+    )
+    .await;
+    wait_for_unroutable_on_all(&topology, &alpha, STATUS_TIMEOUT).await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &shared,
+        HashSet::from([backend_a_id.clone(), backend_b_id.clone()]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &beta,
+        HashSet::from([backend_b_id.clone()]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_list_models_on_all(
+        &topology,
+        &[],
+        &[beta.as_str(), shared.as_str()],
+        STATUS_TIMEOUT,
+    )
+    .await;
+
+    send_raw_update_to_all(
+        &registrations_a,
+        raw_registration(
+            &backend_a_id,
+            "lifecycle-raw-asymmetric-cluster",
+            &url_a,
+            &[(shared.as_str(), InferenceServerStatus::Active)],
+            transport.reverse_tunnel(),
+            false,
+        ),
+    )
+    .await;
+    wait_for_unroutable_on_all(&topology, &alpha, STATUS_TIMEOUT).await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &shared,
+        HashSet::from([backend_a_id.clone(), backend_b_id.clone()]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &beta,
+        HashSet::from([backend_b_id.clone()]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+
+    close_raw_registrations(registrations_a).await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &shared,
+        HashSet::from([backend_b_id.clone()]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+    wait_for_backend_ids_on_all(
+        &topology,
+        &beta,
+        HashSet::from([backend_b_id]),
+        STATUS_TIMEOUT,
+    )
+    .await;
+
+    close_raw_registrations(registrations_b).await;
+    if let Some(tunnel) = direct_tunnel_a {
+        tunnel.shutdown().await;
+    }
+    if let Some(tunnel) = direct_tunnel_b {
+        tunnel.shutdown().await;
+    }
+    for tunnel in reverse_tunnels_a {
+        tunnel.shutdown().await;
+    }
+    for tunnel in reverse_tunnels_b {
+        tunnel.shutdown().await;
+    }
+    topology.shutdown().await;
+}
+
 async fn exercise_routing_key_lifecycle(transport: TransportMode) {
     init_crypto();
 
@@ -1074,7 +1474,7 @@ async fn exercise_routing_key_lifecycle(transport: TransportMode) {
         LifecycleBackendOptions {
             backend_id: &format!("lifecycle-rk-{}-backend-a", transport.label()),
             cluster_id: "",
-            model: &model,
+            models: &[&model],
             backend: start_lifecycle_dummy_backend(&model).await,
             bringup: disabled_bringup(),
             auth_token: Some("lifecycle-rk-token-a".to_string()),
@@ -1087,7 +1487,7 @@ async fn exercise_routing_key_lifecycle(transport: TransportMode) {
         LifecycleBackendOptions {
             backend_id: &format!("lifecycle-rk-{}-backend-b", transport.label()),
             cluster_id: "",
-            model: &model,
+            models: &[&model],
             backend: start_lifecycle_dummy_backend(&model).await,
             bringup: disabled_bringup(),
             auth_token: Some("lifecycle-rk-token-b".to_string()),
@@ -1111,11 +1511,8 @@ async fn exercise_routing_key_lifecycle(transport: TransportMode) {
     .await;
 
     tenant_a
-        .channels
-        .status
-        .send_async(InferenceServerStatus::Inactive)
-        .await
-        .expect("send inactive status");
+        .runtime_state
+        .set_status(InferenceServerStatus::Inactive);
     wait_for_unroutable_with_rk(
         topology.http_addrs[0],
         "lifecycle-rk-a",
@@ -1235,19 +1632,13 @@ async fn exercise_status_lifecycle(transport: TransportMode, stargates: Stargate
     assert_backend_serves_all(&topology, &model, &backend_id, "status-initial").await;
 
     registration
-        .channels
-        .status
-        .send_async(InferenceServerStatus::Inactive)
-        .await
-        .expect("send inactive status");
+        .runtime_state
+        .set_status(InferenceServerStatus::Inactive);
     wait_for_unroutable_on_all(&topology, &model, STATUS_TIMEOUT).await;
 
     registration
-        .channels
-        .status
-        .send_async(InferenceServerStatus::Active)
-        .await
-        .expect("send active status");
+        .runtime_state
+        .set_status(InferenceServerStatus::Active);
     wait_for_routing_on_all(&topology, &model, STATUS_TIMEOUT).await;
     assert_backend_serves_all(&topology, &model, &backend_id, "status-recovered").await;
 
@@ -1269,10 +1660,32 @@ async fn start_lifecycle_topology_with_auth(
     stargates: StargateTopology,
     authenticator: Option<Arc<dyn WorkerAuthenticator>>,
 ) -> LifecycleTopology {
+    let case = match transport {
+        TransportMode::Direct => TunnelTestCase::direct(TunnelTransportProtocol::Custom),
+        TransportMode::Reverse => TunnelTestCase::reverse(TunnelTransportProtocol::Custom),
+    };
+    start_lifecycle_topology_for_case(case, stargates, authenticator).await
+}
+
+async fn start_lifecycle_topology_for_case(
+    case: TunnelTestCase,
+    stargates: StargateTopology,
+    authenticator: Option<Arc<dyn WorkerAuthenticator>>,
+) -> LifecycleTopology {
+    let transport = if case.reverse_tunnel() {
+        TransportMode::Reverse
+    } else {
+        TransportMode::Direct
+    };
     match (transport, stargates) {
         (TransportMode::Direct, StargateTopology::Single) => {
             let (grpc_addr, model_discovery_addr, http_addr, _reverse_target, runtime) =
-                make_lifecycle_single_runtime("lifecycle-direct-single", None, authenticator);
+                make_lifecycle_single_runtime(
+                    "lifecycle-direct-single",
+                    None,
+                    authenticator,
+                    case.protocol,
+                );
             let handle = runtime.start().await.expect("stargate failed to start");
             LifecycleTopology {
                 grpc_seed: grpc_addr,
@@ -1280,6 +1693,7 @@ async fn start_lifecycle_topology_with_auth(
                 http_addrs: vec![http_addr],
                 model_discovery_addrs: vec![model_discovery_addr],
                 reverse_tunnel_targets: Vec::new(),
+                tunnel_protocol: case.protocol,
                 handles: vec![handle],
             }
         }
@@ -1291,6 +1705,7 @@ async fn start_lifecycle_topology_with_auth(
                     peers.clone(),
                     None,
                     authenticator.clone(),
+                    case.protocol,
                 );
             let (grpc_addr_2, model_discovery_addr_2, http_addr_2, _reverse_target_2, runtime_2) =
                 make_lifecycle_shared_runtime(
@@ -1298,6 +1713,7 @@ async fn start_lifecycle_topology_with_auth(
                     peers,
                     None,
                     authenticator,
+                    case.protocol,
                 );
             let handle_1 = runtime_1.start().await.expect("stargate 1 failed");
             let handle_2 = runtime_2.start().await.expect("stargate 2 failed");
@@ -1307,6 +1723,7 @@ async fn start_lifecycle_topology_with_auth(
                 http_addrs: vec![http_addr_1, http_addr_2],
                 model_discovery_addrs: vec![model_discovery_addr_1, model_discovery_addr_2],
                 reverse_tunnel_targets: Vec::new(),
+                tunnel_protocol: case.protocol,
                 handles: vec![handle_1, handle_2],
             }
         }
@@ -1317,6 +1734,7 @@ async fn start_lifecycle_topology_with_auth(
                     "lifecycle-reverse-single",
                     Some((reverse_addr, reverse_socket)),
                     authenticator,
+                    case.protocol,
                 );
             let handle = runtime.start().await.expect("stargate failed to start");
             LifecycleTopology {
@@ -1325,6 +1743,7 @@ async fn start_lifecycle_topology_with_auth(
                 http_addrs: vec![http_addr],
                 model_discovery_addrs: vec![model_discovery_addr],
                 reverse_tunnel_targets: vec![reverse_target.expect("reverse target")],
+                tunnel_protocol: case.protocol,
                 handles: vec![handle],
             }
         }
@@ -1338,6 +1757,7 @@ async fn start_lifecycle_topology_with_auth(
                     peers.clone(),
                     Some((reverse_addr_1, reverse_socket_1)),
                     authenticator.clone(),
+                    case.protocol,
                 );
             let (grpc_addr_2, model_discovery_addr_2, http_addr_2, reverse_target_2, runtime_2) =
                 make_lifecycle_shared_runtime(
@@ -1345,6 +1765,7 @@ async fn start_lifecycle_topology_with_auth(
                     peers,
                     Some((reverse_addr_2, reverse_socket_2)),
                     authenticator,
+                    case.protocol,
                 );
             let handle_1 = runtime_1.start().await.expect("stargate 1 failed");
             let handle_2 = runtime_2.start().await.expect("stargate 2 failed");
@@ -1357,6 +1778,7 @@ async fn start_lifecycle_topology_with_auth(
                     reverse_target_1.expect("reverse target 1"),
                     reverse_target_2.expect("reverse target 2"),
                 ],
+                tunnel_protocol: case.protocol,
                 handles: vec![handle_1, handle_2],
             }
         }
@@ -1367,6 +1789,7 @@ fn make_lifecycle_single_runtime(
     id: &str,
     reverse: Option<(SocketAddr, std::net::UdpSocket)>,
     authenticator: Option<Arc<dyn WorkerAuthenticator>>,
+    tunnel_protocol: TunnelTransportProtocol,
 ) -> (
     SocketAddr,
     SocketAddr,
@@ -1389,6 +1812,7 @@ fn make_lifecycle_single_runtime(
         discovery: Box::new(discovery),
         reverse,
         authenticator,
+        tunnel_protocol,
     })
 }
 
@@ -1397,6 +1821,7 @@ fn make_lifecycle_shared_runtime(
     peers: Arc<Mutex<Vec<StargateInfo>>>,
     reverse: Option<(SocketAddr, std::net::UdpSocket)>,
     authenticator: Option<Arc<dyn WorkerAuthenticator>>,
+    tunnel_protocol: TunnelTransportProtocol,
 ) -> (
     SocketAddr,
     SocketAddr,
@@ -1419,6 +1844,7 @@ fn make_lifecycle_shared_runtime(
         discovery: Box::new(discovery),
         reverse,
         authenticator,
+        tunnel_protocol,
     })
 }
 
@@ -1442,17 +1868,19 @@ fn make_lifecycle_runtime(
         discovery,
         reverse,
         authenticator,
+        tunnel_protocol,
     } = parts;
 
     let mut config = base_config(id, grpc_addr, http_addr);
     config.model_discovery_listen_addr = model_discovery_addr;
     config.dns_poll_interval = Duration::from_secs(1);
+    config.proxy_transport.tunnel_protocol = tunnel_protocol;
 
     let mut reverse_target = None;
     let reverse_socket = reverse.map(|(reverse_addr, reverse_socket)| {
-        config.advertised_hostname_template = Some("localhost".to_string());
-        config.reverse_tunnel_listen_addr = Some(reverse_addr);
-        config.reverse_tunnel_connect_timeout = Duration::from_millis(250);
+        let mut reverse_tunnel = localhost_reverse_tunnel_config(reverse_addr);
+        reverse_tunnel.connect_timeout = Duration::from_millis(250);
+        config.reverse_tunnel = Some(reverse_tunnel);
         reverse_target = Some(format!("localhost:{}", reverse_addr.port()));
         reverse_socket
     });
@@ -1491,7 +1919,7 @@ async fn register_lifecycle_backend(
         LifecycleBackendOptions {
             backend_id,
             cluster_id: "",
-            model,
+            models: &[model],
             backend,
             bringup,
             auth_token: None,
@@ -1508,7 +1936,7 @@ async fn register_lifecycle_backend_with_options(
     let LifecycleBackendOptions {
         backend_id,
         cluster_id,
-        model,
+        models,
         backend,
         bringup,
         auth_token,
@@ -1518,49 +1946,52 @@ async fn register_lifecycle_backend_with_options(
     let (inference_server_url, tunnel) = if transport.reverse_tunnel() {
         (upstream_http_base_url.clone(), None)
     } else {
-        let tunnel = start_quic_http_tunnel(QuicHttpTunnelConfig::new(
+        let mut tunnel_config = QuicHttpTunnelConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             upstream_http_base_url.clone(),
-        ))
-        .await
-        .expect("direct QUIC tunnel failed to start");
+        );
+        tunnel_config.tunnel_protocol = topology.tunnel_protocol;
+        let tunnel = start_quic_http_tunnel(tunnel_config)
+            .await
+            .expect("direct QUIC tunnel failed to start");
         (format!("quic://{}", tunnel.listen_addr()), Some(tunnel))
     };
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![topology.grpc_seed.to_string()],
-                inference_server_id: backend_id.to_string(),
-                cluster_id: cluster_id.to_string(),
-                inference_server_url,
-                upstream_http_base_url: Some(upstream_http_base_url),
-                // Short heartbeats keep lifecycle transition tests fast while
-                // still exercising the registration update path.
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: transport.reverse_tunnel(),
-                bringup,
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: auth_token.map(AuthTokenProvider::Static).map(Arc::new),
-                quic_insecure: true,
-                tunnel_protocol: pylon_lib::TunnelTransportProtocol::Custom,
-            },
-            vec![model.to_string()],
-        )
+    let model_ids = models
+        .iter()
+        .map(|model| (*model).to_string())
+        .collect::<Vec<_>>();
+    let runtime_state = PylonRuntimeState::new(InferenceServerStatus::Active, &model_ids);
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![topology.grpc_seed.to_string()],
+            inference_server_id: backend_id.to_string(),
+            cluster_id: cluster_id.to_string(),
+            inference_server_url,
+            upstream_http_base_url: Some(upstream_http_base_url),
+            // Short heartbeats keep lifecycle transition tests fast while
+            // still exercising the registration update path.
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: transport.reverse_tunnel(),
+            bringup,
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: runtime_state.clone(),
+            auth_token_provider: auth_token.map(AuthTokenProvider::Static).map(Arc::new),
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: topology.tunnel_protocol,
+        })
         .expect("registration failed");
 
     LifecycleRegistration {
         backend,
         reg_client,
-        channels,
+        runtime_state,
         tunnel,
     }
 }
@@ -1743,6 +2174,7 @@ async fn start_reverse_tunnels(
         );
         config.quic_insecure = true;
         config.output_token_parser_factory = OutputTokenParserFactory::vllm();
+        config.tunnel_protocol = topology.tunnel_protocol;
         tunnels.push(
             start_reverse_quic_tunnel(config)
                 .await
@@ -1922,7 +2354,13 @@ async fn backend_serves_all(
         if backend != Some(expected_backend) {
             return false;
         }
-        if !resp.text().await.is_ok_and(|text| text.contains("[DONE]")) {
+        if !resp.text().await.is_ok_and(|text| {
+            parse_sse_events(&text).is_ok_and(|events| {
+                events
+                    .last()
+                    .is_some_and(|event| event.data.trim() == "[DONE]")
+            })
+        }) {
             return false;
         }
     }
@@ -1974,6 +2412,88 @@ async fn wait_for_active_inference_server_count(
     .await;
 }
 
+async fn wait_for_cluster_stats_on_all(
+    topology: &LifecycleTopology,
+    model: &str,
+    active_backend_count: usize,
+    last_mean_input_tps: f64,
+    queued_input_size: u64,
+    timeout: Duration,
+) {
+    for handle in &topology.handles {
+        let state = handle.state();
+        let target = RoutingTargetKey {
+            routing_key: None,
+            model_id: model.to_string(),
+        };
+        wait_until(
+            &format!("cluster stats for model '{model}'"),
+            timeout,
+            Duration::from_millis(50),
+            || {
+                let state = state.clone();
+                let target = target.clone();
+                async move {
+                    let candidates = state.cluster_candidates_for_target(&target).await;
+                    let Some(candidate) = candidates.first() else {
+                        return Err("no cluster candidate".to_string());
+                    };
+                    if candidates.len() != 1
+                        || candidate.active_backend_count != active_backend_count
+                        || candidate.stats.last_mean_input_tps != last_mean_input_tps
+                        || candidate.stats.queued_input_size != queued_input_size
+                    {
+                        return Err(format!("unexpected cluster candidates: {candidates:?}"));
+                    }
+                    Ok(())
+                }
+            },
+        )
+        .await;
+    }
+}
+
+async fn wait_for_backend_ids_on_all(
+    topology: &LifecycleTopology,
+    model: &str,
+    expected_backend_ids: HashSet<String>,
+    timeout: Duration,
+) {
+    for handle in &topology.handles {
+        let state = handle.state();
+        let target = RoutingTargetKey {
+            routing_key: None,
+            model_id: model.to_string(),
+        };
+        wait_until(
+            &format!("backend ids for model '{model}'"),
+            timeout,
+            Duration::from_millis(50),
+            || {
+                let state = state.clone();
+                let target = target.clone();
+                let expected_backend_ids = expected_backend_ids.clone();
+                async move {
+                    let actual = state
+                        .candidates_for_target(&target)
+                        .await
+                        .into_iter()
+                        .map(|candidate| candidate.inference_server_id)
+                        .collect::<HashSet<_>>();
+                    if actual == expected_backend_ids {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "backend ids {actual:?}; expected {expected_backend_ids:?}"
+                        ))
+                    }
+                }
+            },
+        )
+        .await;
+    }
+}
+
 fn metrics_text(registry: Arc<prometheus::Registry>) -> String {
     let encoder = TextEncoder::new();
     let families = registry.gather();
@@ -2016,7 +2536,7 @@ async fn assert_backend_serves_all(
         let text = resp.text().await.expect("read proxy body");
         assert_eq!(status, StatusCode::OK, "body={text}");
         assert_eq!(backend.as_deref(), Some(expected_backend));
-        assert!(text.contains("[DONE]"), "stream should complete: {text}");
+        assert_sse_done(&parse_sse_events(&text).expect("stream should be valid SSE"));
     }
 }
 

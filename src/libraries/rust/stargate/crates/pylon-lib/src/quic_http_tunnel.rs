@@ -23,7 +23,7 @@ mod server;
 mod tests;
 mod webtransport;
 
-pub use core::{PylonRetryConfig, TunnelForwardingConfig};
+pub use core::{DEFAULT_MAX_SSE_BUFFER_BYTES, PylonRetryConfig, TunnelForwardingConfig};
 pub use endpoint::TunnelError;
 pub use reverse::{ReverseQuicTunnelConfig, ReverseQuicTunnelHandle, start_reverse_quic_tunnel};
 pub use server::{QuicHttpTunnelConfig, QuicHttpTunnelHandle, start_quic_http_tunnel};

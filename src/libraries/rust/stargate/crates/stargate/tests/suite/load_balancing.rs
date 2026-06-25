@@ -24,7 +24,7 @@ use crate::common::{
 };
 use pylon_lib::{
     BringupConfig, CurrentModelStats, InferenceServerRegistrationClient,
-    InferenceServerRegistrationConfig, OutputTokenParserFactory,
+    InferenceServerRegistrationConfig, OutputTokenParserFactory, PylonRuntimeState,
 };
 use stargate::routing::{RoutedClusterSnapshot, RoutedInferenceServerSnapshot, RoutingTargetKey};
 use stargate::test_support::StargateState;
@@ -240,112 +240,100 @@ async fn power_of_two_prefers_less_input_work() {
     let (inst_addr_high, quic_url_high, _tunnel_high) = start_dummy_inst("p2c-model").await;
 
     let mut reg_low = InferenceServerRegistrationClient::default();
-    let channels_low = reg_low
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "inst-low-headroom".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url_low,
-                upstream_http_base_url: Some(format!("http://{inst_addr_low}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                // Skip calibration so both backends advertise Active immediately;
-                // this test only exercises LB selection, not bringup.
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let runtime_low =
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["p2c-model".to_string()]);
+    reg_low
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "inst-low-headroom".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url_low,
+            upstream_http_base_url: Some(format!("http://{inst_addr_low}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            // Skip calibration so both backends advertise Active immediately;
+            // this test only exercises LB selection, not bringup.
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["p2c-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: runtime_low.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     let mut reg_high = InferenceServerRegistrationClient::default();
-    let channels_high = reg_high
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "inst-high-headroom".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url_high,
-                upstream_http_base_url: Some(format!("http://{inst_addr_high}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                // Skip calibration so both backends advertise Active immediately;
-                // this test only exercises LB selection, not bringup.
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let runtime_high =
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["p2c-model".to_string()]);
+    reg_high
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "inst-high-headroom".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url_high,
+            upstream_http_base_url: Some(format!("http://{inst_addr_high}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            // Skip calibration so both backends advertise Active immediately;
+            // this test only exercises LB selection, not bringup.
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["p2c-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: runtime_high.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "p2c-model", Duration::from_secs(5)).await;
 
     // More pending prompt work should lose when both clusters report the same service rate.
-    channels_low
-        .model_stats
-        .send_async((
-            "p2c-model".to_string(),
-            CurrentModelStats {
-                output_tps: 50.0,
-                last_mean_input_tps: 1000.0,
-                max_output_tps: 100.0,
-                queue_size: 0,
-                queued_input_size: 1_000,
-                kv_cache_capacity_tokens: 0,
-                kv_cache_used_tokens: 0,
-                kv_cache_free_tokens: 0,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send stats failed");
+    runtime_low.set_model_stats(
+        "p2c-model".to_string(),
+        CurrentModelStats {
+            output_tps: 50.0,
+            last_mean_input_tps: 1000.0,
+            max_output_tps: 100.0,
+            queue_size: 0,
+            queued_input_size: 1_000,
+            kv_cache_capacity_tokens: 0,
+            kv_cache_used_tokens: 0,
+            kv_cache_free_tokens: 0,
+            ..CurrentModelStats::default()
+        },
+    );
 
     // Less pending prompt work should win.
-    channels_high
-        .model_stats
-        .send_async((
-            "p2c-model".to_string(),
-            CurrentModelStats {
-                output_tps: 50.0,
-                last_mean_input_tps: 1000.0,
-                max_output_tps: 100.0,
-                queue_size: 0,
-                queued_input_size: 0,
-                kv_cache_capacity_tokens: 0,
-                kv_cache_used_tokens: 0,
-                kv_cache_free_tokens: 0,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send stats failed");
+    runtime_high.set_model_stats(
+        "p2c-model".to_string(),
+        CurrentModelStats {
+            output_tps: 50.0,
+            last_mean_input_tps: 1000.0,
+            max_output_tps: 100.0,
+            queue_size: 0,
+            queued_input_size: 0,
+            kv_cache_capacity_tokens: 0,
+            kv_cache_used_tokens: 0,
+            kv_cache_free_tokens: 0,
+            ..CurrentModelStats::default()
+        },
+    );
 
     let state = handle.state();
     wait_for_candidate_stats(
@@ -392,60 +380,51 @@ async fn input_work_admission_rejects_overloaded_pool_and_registered_unavailable
     let (inst_addr, quic_url, _tunnel) = start_dummy_inst("admission-model").await;
 
     let mut reg = InferenceServerRegistrationClient::default();
-    let channels = reg
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "admission-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url,
-                upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["admission-model".to_string()],
-        )
-        .expect("registration failed");
-    channels
-        .model_stats
-        .send_async((
-            "admission-model".to_string(),
-            CurrentModelStats {
-                last_mean_input_tps: 100.0,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send stats failed");
+    let runtime_state = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["admission-model".to_string()],
+    );
+    reg.start(InferenceServerRegistrationConfig {
+        seeds: vec![grpc_addr.to_string()],
+        inference_server_id: "admission-inst".to_string(),
+        cluster_id: String::new(),
+        inference_server_url: quic_url,
+        upstream_http_base_url: Some(format!("http://{inst_addr}")),
+        min_update_interval: Duration::from_millis(100),
+        reverse_tunnel: false,
+        bringup: BringupConfig {
+            enabled: false,
+            ..BringupConfig::default()
+        },
+        output_token_parser_factory: OutputTokenParserFactory::vllm(),
+        request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+        metrics: None,
+        retry: pylon_lib::PylonRetryConfig::default(),
+        queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+        runtime_state: runtime_state.clone(),
+        auth_token_provider: None,
+        tls_cert_pem: None,
+        quic_insecure: true,
+        tunnel_protocol: Default::default(),
+    })
+    .expect("registration failed");
+    runtime_state.set_model_stats(
+        "admission-model".to_string(),
+        CurrentModelStats {
+            last_mean_input_tps: 100.0,
+            ..CurrentModelStats::default()
+        },
+    );
 
     wait_for_routing(http_addr, "admission-model", Duration::from_secs(5)).await;
-    channels
-        .model_stats
-        .send_async((
-            "admission-model".to_string(),
-            CurrentModelStats {
-                last_mean_input_tps: 100.0,
-                queued_input_size: 100,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send overloaded stats failed");
+    runtime_state.set_model_stats(
+        "admission-model".to_string(),
+        CurrentModelStats {
+            last_mean_input_tps: 100.0,
+            queued_input_size: 100,
+            ..CurrentModelStats::default()
+        },
+    );
 
     let client = reqwest::Client::new();
     let stargate_url = format!("http://{http_addr}/v1/chat/completions");
@@ -504,11 +483,7 @@ async fn input_work_admission_rejects_overloaded_pool_and_registered_unavailable
         Some("no_eligible_candidates")
     );
 
-    channels
-        .status
-        .send_async(InferenceServerStatus::Inactive)
-        .await
-        .expect("send inactive status failed");
+    runtime_state.set_status(InferenceServerStatus::Inactive);
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -599,31 +574,30 @@ async fn random_load_balancing_uses_all_instances() {
         let (inst_addr, quic_url, tunnel) = start_dummy_inst("rand-model").await;
         _tunnels.push(tunnel);
         let mut reg_client = InferenceServerRegistrationClient::default();
-        let _channels = reg_client
-            .start(
-                InferenceServerRegistrationConfig {
-                    seeds: vec![grpc_addr.to_string()],
-                    inference_server_id: inst_id.to_string(),
-                    cluster_id: String::new(),
-                    inference_server_url: quic_url,
-                    upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                    min_update_interval: Duration::from_millis(100),
-                    status: InferenceServerStatus::Active,
-                    reverse_tunnel: false,
-                    bringup: BringupConfig::default(),
-                    output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                    request_observation_tx: None,
-                    request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                    metrics: None,
-                    retry: pylon_lib::PylonRetryConfig::default(),
-                    queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                    queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                    auth_token_provider: None,
-                    quic_insecure: true,
-                    tunnel_protocol: Default::default(),
-                },
-                vec!["rand-model".to_string()],
-            )
+        reg_client
+            .start(InferenceServerRegistrationConfig {
+                seeds: vec![grpc_addr.to_string()],
+                inference_server_id: inst_id.to_string(),
+                cluster_id: String::new(),
+                inference_server_url: quic_url,
+                upstream_http_base_url: Some(format!("http://{inst_addr}")),
+                min_update_interval: Duration::from_millis(100),
+                reverse_tunnel: false,
+                bringup: BringupConfig::default(),
+                output_token_parser_factory: OutputTokenParserFactory::vllm(),
+                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+                metrics: None,
+                retry: pylon_lib::PylonRetryConfig::default(),
+                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+                runtime_state: pylon_lib::PylonRuntimeState::new(
+                    InferenceServerStatus::Active,
+                    &["rand-model".to_string()],
+                ),
+                auth_token_provider: None,
+                tls_cert_pem: None,
+                quic_insecure: true,
+                tunnel_protocol: Default::default(),
+            })
             .expect("registration failed");
         reg_clients.push(reg_client);
     }
@@ -703,7 +677,8 @@ async fn power_of_two_uses_cluster_aggregated_metrics_and_backend_round_robin() 
         |inference_server_id: &str,
          cluster_id: &str,
          inference_server_url: String,
-         upstream_http_base_url: String| {
+         upstream_http_base_url: String,
+         runtime_state: PylonRuntimeState| {
             InferenceServerRegistrationConfig {
                 seeds: vec![grpc_addr.to_string()],
                 inference_server_id: inference_server_id.to_string(),
@@ -711,62 +686,67 @@ async fn power_of_two_uses_cluster_aggregated_metrics_and_backend_round_robin() 
                 inference_server_url,
                 upstream_http_base_url: Some(upstream_http_base_url),
                 min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
                 reverse_tunnel: false,
                 bringup: BringupConfig {
                     enabled: false,
                     ..BringupConfig::default()
                 },
                 output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
                 request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
                 metrics: None,
                 retry: pylon_lib::PylonRetryConfig::default(),
                 queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
+                runtime_state,
                 auth_token_provider: None,
+                tls_cert_pem: None,
                 quic_insecure: true,
                 tunnel_protocol: Default::default(),
             }
         };
 
     let mut reg_shared_a = InferenceServerRegistrationClient::default();
-    let shared_a_channels = reg_shared_a
-        .start(
-            make_registration_config(
-                "shared-backend-a",
-                "shared-cluster",
-                shared_a_quic_url,
-                format!("http://{shared_a_addr}"),
-            ),
-            vec!["p2c-cluster-model".to_string()],
-        )
+    let shared_a_runtime = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["p2c-cluster-model".to_string()],
+    );
+    reg_shared_a
+        .start(make_registration_config(
+            "shared-backend-a",
+            "shared-cluster",
+            shared_a_quic_url,
+            format!("http://{shared_a_addr}"),
+            shared_a_runtime.clone(),
+        ))
         .expect("shared backend a registration failed");
 
     let mut reg_shared_b = InferenceServerRegistrationClient::default();
-    let shared_b_channels = reg_shared_b
-        .start(
-            make_registration_config(
-                "shared-backend-b",
-                "shared-cluster",
-                shared_b_quic_url,
-                format!("http://{shared_b_addr}"),
-            ),
-            vec!["p2c-cluster-model".to_string()],
-        )
+    let shared_b_runtime = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["p2c-cluster-model".to_string()],
+    );
+    reg_shared_b
+        .start(make_registration_config(
+            "shared-backend-b",
+            "shared-cluster",
+            shared_b_quic_url,
+            format!("http://{shared_b_addr}"),
+            shared_b_runtime.clone(),
+        ))
         .expect("shared backend b registration failed");
 
     let mut reg_single = InferenceServerRegistrationClient::default();
-    let single_channels = reg_single
-        .start(
-            make_registration_config(
-                "single-backend",
-                "single-cluster",
-                single_quic_url,
-                format!("http://{single_addr}"),
-            ),
-            vec!["p2c-cluster-model".to_string()],
-        )
+    let single_runtime = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["p2c-cluster-model".to_string()],
+    );
+    reg_single
+        .start(make_registration_config(
+            "single-backend",
+            "single-cluster",
+            single_quic_url,
+            format!("http://{single_addr}"),
+            single_runtime.clone(),
+        ))
         .expect("single backend registration failed");
 
     wait_for_routing(http_addr, "p2c-cluster-model", Duration::from_secs(5)).await;
@@ -786,21 +766,9 @@ async fn power_of_two_uses_cluster_aggregated_metrics_and_backend_round_robin() 
     // Phase 1: shared-cluster backend capacity and pending prompt work both add up.
     // - shared cluster: 260 queued tokens / 200 last_mean_input_tps => 1.3s
     // - single cluster: 120 queued tokens / 100 last_mean_input_tps => 1.2s
-    shared_a_channels
-        .model_stats
-        .send_async(("p2c-cluster-model".to_string(), stats(100.0, 130)))
-        .await
-        .expect("send shared-a stats failed");
-    shared_b_channels
-        .model_stats
-        .send_async(("p2c-cluster-model".to_string(), stats(100.0, 130)))
-        .await
-        .expect("send shared-b stats failed");
-    single_channels
-        .model_stats
-        .send_async(("p2c-cluster-model".to_string(), stats(100.0, 120)))
-        .await
-        .expect("send single stats failed");
+    shared_a_runtime.set_model_stats("p2c-cluster-model".to_string(), stats(100.0, 130));
+    shared_b_runtime.set_model_stats("p2c-cluster-model".to_string(), stats(100.0, 130));
+    single_runtime.set_model_stats("p2c-cluster-model".to_string(), stats(100.0, 120));
 
     wait_for_cluster_stats(
         &state,
@@ -870,21 +838,9 @@ async fn power_of_two_uses_cluster_aggregated_metrics_and_backend_round_robin() 
     }
 
     // Phase 2: move load to single backend so cluster selection flips to shared-cluster.
-    shared_a_channels
-        .model_stats
-        .send_async(("p2c-cluster-model".to_string(), stats(100.0, 0)))
-        .await
-        .expect("send shared-a phase2 stats failed");
-    shared_b_channels
-        .model_stats
-        .send_async(("p2c-cluster-model".to_string(), stats(100.0, 0)))
-        .await
-        .expect("send shared-b phase2 stats failed");
-    single_channels
-        .model_stats
-        .send_async(("p2c-cluster-model".to_string(), stats(100.0, 120)))
-        .await
-        .expect("send single phase2 stats failed");
+    shared_a_runtime.set_model_stats("p2c-cluster-model".to_string(), stats(100.0, 0));
+    shared_b_runtime.set_model_stats("p2c-cluster-model".to_string(), stats(100.0, 0));
+    single_runtime.set_model_stats("p2c-cluster-model".to_string(), stats(100.0, 120));
 
     wait_for_cluster_stats(
         &state,
@@ -1005,57 +961,53 @@ async fn groq_multiregion_load_balancing_prefers_lower_estimated_ttft() {
         let (inst_addr, quic_url, tunnel) = start_dummy_inst("multiregion-model").await;
         _tunnels.push(tunnel);
         let mut reg_client = InferenceServerRegistrationClient::default();
-        let update_channels = reg_client
-            .start(
-                InferenceServerRegistrationConfig {
-                    seeds: vec![grpc_addr.to_string()],
-                    inference_server_id: inst_id.to_string(),
-                    cluster_id: String::new(),
-                    inference_server_url: quic_url,
-                    upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                    min_update_interval: Duration::from_millis(100),
-                    status: InferenceServerStatus::Active,
-                    reverse_tunnel: false,
-                    // Skip calibration so the test controls the registered
-                    // stats directly instead of racing client-side calibration
-                    // updates.
-                    bringup: BringupConfig {
-                        enabled: false,
-                        ..BringupConfig::default()
-                    },
-                    output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                    request_observation_tx: None,
-                    request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                    metrics: None,
-                    retry: pylon_lib::PylonRetryConfig::default(),
-                    queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                    queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                    auth_token_provider: None,
-                    quic_insecure: true,
-                    tunnel_protocol: Default::default(),
+        let runtime_state = PylonRuntimeState::new(
+            InferenceServerStatus::Active,
+            &["multiregion-model".to_string()],
+        );
+        reg_client
+            .start(InferenceServerRegistrationConfig {
+                seeds: vec![grpc_addr.to_string()],
+                inference_server_id: inst_id.to_string(),
+                cluster_id: String::new(),
+                inference_server_url: quic_url,
+                upstream_http_base_url: Some(format!("http://{inst_addr}")),
+                min_update_interval: Duration::from_millis(100),
+                reverse_tunnel: false,
+                // Skip calibration so the test controls the registered
+                // stats directly instead of racing client-side calibration
+                // updates.
+                bringup: BringupConfig {
+                    enabled: false,
+                    ..BringupConfig::default()
                 },
-                vec!["multiregion-model".to_string()],
-            )
+                output_token_parser_factory: OutputTokenParserFactory::vllm(),
+                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+                metrics: None,
+                retry: pylon_lib::PylonRetryConfig::default(),
+                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+                runtime_state: runtime_state.clone(),
+                auth_token_provider: None,
+                tls_cert_pem: None,
+                quic_insecure: true,
+                tunnel_protocol: Default::default(),
+            })
             .expect("registration failed");
-        update_channels
-            .model_stats
-            .send_async((
-                "multiregion-model".to_string(),
-                CurrentModelStats {
-                    output_tps: 0.0,
-                    last_mean_input_tps,
-                    max_output_tps: 1000.0,
-                    queue_size: u64::from(queued_input_size > 0),
-                    queued_input_size,
-                    kv_cache_capacity_tokens: 0,
-                    kv_cache_used_tokens: 0,
-                    kv_cache_free_tokens: 0,
-                    total_query_input_size: queued_input_size,
-                    ..CurrentModelStats::default()
-                },
-            ))
-            .await
-            .expect("failed to send groq-multiregion stats");
+        runtime_state.set_model_stats(
+            "multiregion-model".to_string(),
+            CurrentModelStats {
+                output_tps: 0.0,
+                last_mean_input_tps,
+                max_output_tps: 1000.0,
+                queue_size: u64::from(queued_input_size > 0),
+                queued_input_size,
+                kv_cache_capacity_tokens: 0,
+                kv_cache_used_tokens: 0,
+                kv_cache_free_tokens: 0,
+                total_query_input_size: queued_input_size,
+                ..CurrentModelStats::default()
+            },
+        );
         reg_clients.push(reg_client);
     }
 
@@ -1135,69 +1087,65 @@ async fn groq_multiregion_waits_for_later_bucket_when_fastest_is_full() {
     ];
     let mut reg_clients = Vec::new();
     let mut _tunnels = Vec::new();
-    let mut update_channels = Vec::new();
+    let mut runtime_states = Vec::new();
     for (inst_id, _total_query_input_size, _num_running_queries, _max_engine_concurrency) in insts {
         let (inst_addr, quic_url, tunnel) = start_dummy_inst("multiregion-wait-model").await;
         _tunnels.push(tunnel);
         let mut reg_client = InferenceServerRegistrationClient::default();
-        let channels = reg_client
-            .start(
-                InferenceServerRegistrationConfig {
-                    seeds: vec![grpc_addr.to_string()],
-                    inference_server_id: inst_id.to_string(),
-                    cluster_id: String::new(),
-                    inference_server_url: quic_url,
-                    upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                    min_update_interval: Duration::from_millis(50),
-                    status: InferenceServerStatus::Active,
-                    reverse_tunnel: false,
-                    bringup: BringupConfig {
-                        enabled: false,
-                        ..BringupConfig::default()
-                    },
-                    output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                    request_observation_tx: None,
-                    request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                    metrics: None,
-                    auth_token_provider: None,
-                    quic_insecure: true,
-                    tunnel_protocol: Default::default(),
-                    retry: pylon_lib::PylonRetryConfig::default(),
-                    queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                    queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
+        let runtime_state = PylonRuntimeState::new(
+            InferenceServerStatus::Active,
+            &["multiregion-wait-model".to_string()],
+        );
+        reg_client
+            .start(InferenceServerRegistrationConfig {
+                seeds: vec![grpc_addr.to_string()],
+                inference_server_id: inst_id.to_string(),
+                cluster_id: String::new(),
+                inference_server_url: quic_url,
+                upstream_http_base_url: Some(format!("http://{inst_addr}")),
+                min_update_interval: Duration::from_millis(50),
+                reverse_tunnel: false,
+                bringup: BringupConfig {
+                    enabled: false,
+                    ..BringupConfig::default()
                 },
-                vec!["multiregion-wait-model".to_string()],
-            )
+                output_token_parser_factory: OutputTokenParserFactory::vllm(),
+                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+                metrics: None,
+                auth_token_provider: None,
+                tls_cert_pem: None,
+                quic_insecure: true,
+                tunnel_protocol: Default::default(),
+                retry: pylon_lib::PylonRetryConfig::default(),
+                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+                runtime_state: runtime_state.clone(),
+            })
             .expect("registration failed");
-        update_channels.push((inst_id, channels));
+        runtime_states.push((inst_id, runtime_state));
         reg_clients.push(reg_client);
     }
 
-    for (inst_id, channels) in update_channels {
+    for (inst_id, runtime_state) in runtime_states {
         let (total_query_input_size, num_running_queries, max_engine_concurrency) = insts
             .iter()
             .find_map(|(id, total, running, max_engine_concurrency)| {
                 (*id == inst_id).then_some((*total, *running, *max_engine_concurrency))
             })
             .unwrap();
-        channels
-            .model_stats
-            .send_async((
-                "multiregion-wait-model".to_string(),
-                CurrentModelStats {
-                    output_tps: 0.0,
-                    last_mean_input_tps: 100.0,
-                    max_output_tps: 1000.0,
-                    queue_size: u64::from(num_running_queries > 0),
-                    queued_input_size: total_query_input_size,
-                    num_running_queries,
-                    max_engine_concurrency: Some(max_engine_concurrency),
-                    total_query_input_size,
-                    ..CurrentModelStats::default()
-                },
-            ))
-            .await
-            .expect("failed to send groq-multiregion wait stats");
+        runtime_state.set_model_stats(
+            "multiregion-wait-model".to_string(),
+            CurrentModelStats {
+                output_tps: 0.0,
+                last_mean_input_tps: 100.0,
+                max_output_tps: 1000.0,
+                queue_size: u64::from(num_running_queries > 0),
+                queued_input_size: total_query_input_size,
+                num_running_queries,
+                max_engine_concurrency: Some(max_engine_concurrency),
+                total_query_input_size,
+                ..CurrentModelStats::default()
+            },
+        );
     }
 
     let http_client = reqwest::Client::new();
@@ -1285,59 +1233,55 @@ async fn groq_multiregion_cache_affinity_prefers_stable_subset_then_falls_back()
     ];
     let mut reg_clients = Vec::new();
     let mut _tunnels = Vec::new();
-    let mut update_channels = Vec::new();
+    let mut runtime_states = Vec::new();
     for inst_id in insts {
         let (inst_addr, quic_url, tunnel) = start_dummy_inst("multiregion-affinity-model").await;
         _tunnels.push(tunnel);
         let mut reg_client = InferenceServerRegistrationClient::default();
-        let channels = reg_client
-            .start(
-                InferenceServerRegistrationConfig {
-                    seeds: vec![grpc_addr.to_string()],
-                    inference_server_id: inst_id.to_string(),
-                    cluster_id: String::new(),
-                    inference_server_url: quic_url,
-                    upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                    min_update_interval: Duration::from_millis(50),
-                    status: InferenceServerStatus::Active,
-                    reverse_tunnel: false,
-                    bringup: BringupConfig {
-                        enabled: false,
-                        ..BringupConfig::default()
-                    },
-                    output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                    request_observation_tx: None,
-                    request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                    metrics: None,
-                    auth_token_provider: None,
-                    quic_insecure: true,
-                    tunnel_protocol: Default::default(),
-                    retry: pylon_lib::PylonRetryConfig::default(),
-                    queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                    queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
+        let runtime_state = PylonRuntimeState::new(
+            InferenceServerStatus::Active,
+            &["multiregion-affinity-model".to_string()],
+        );
+        reg_client
+            .start(InferenceServerRegistrationConfig {
+                seeds: vec![grpc_addr.to_string()],
+                inference_server_id: inst_id.to_string(),
+                cluster_id: String::new(),
+                inference_server_url: quic_url,
+                upstream_http_base_url: Some(format!("http://{inst_addr}")),
+                min_update_interval: Duration::from_millis(50),
+                reverse_tunnel: false,
+                bringup: BringupConfig {
+                    enabled: false,
+                    ..BringupConfig::default()
                 },
-                vec!["multiregion-affinity-model".to_string()],
-            )
+                output_token_parser_factory: OutputTokenParserFactory::vllm(),
+                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+                metrics: None,
+                auth_token_provider: None,
+                tls_cert_pem: None,
+                quic_insecure: true,
+                tunnel_protocol: Default::default(),
+                retry: pylon_lib::PylonRetryConfig::default(),
+                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+                runtime_state: runtime_state.clone(),
+            })
             .expect("registration failed");
-        channels
-            .model_stats
-            .send_async((
-                "multiregion-affinity-model".to_string(),
-                CurrentModelStats {
-                    output_tps: 0.0,
-                    last_mean_input_tps: 100.0,
-                    max_output_tps: 1000.0,
-                    queue_size: 0,
-                    queued_input_size: 0,
-                    num_running_queries: 0,
-                    max_engine_concurrency: Some(100),
-                    total_query_input_size: 0,
-                    ..CurrentModelStats::default()
-                },
-            ))
-            .await
-            .expect("failed to send multiregion affinity stats");
-        update_channels.push((inst_id.to_string(), channels));
+        runtime_state.set_model_stats(
+            "multiregion-affinity-model".to_string(),
+            CurrentModelStats {
+                output_tps: 0.0,
+                last_mean_input_tps: 100.0,
+                max_output_tps: 1000.0,
+                queue_size: 0,
+                queued_input_size: 0,
+                num_running_queries: 0,
+                max_engine_concurrency: Some(100),
+                total_query_input_size: 0,
+                ..CurrentModelStats::default()
+            },
+        );
+        runtime_states.push((inst_id.to_string(), runtime_state));
         reg_clients.push(reg_client);
     }
 
@@ -1388,28 +1332,24 @@ async fn groq_multiregion_cache_affinity_prefers_stable_subset_then_falls_back()
     }
 
     let primary = stable_choice.expect("stable primary should be observed");
-    let primary_channels = update_channels
+    let primary_runtime = runtime_states
         .iter()
-        .find_map(|(inst_id, channels)| (inst_id == &primary).then_some(channels))
-        .expect("primary backend should have update channel");
-    primary_channels
-        .model_stats
-        .send_async((
-            "multiregion-affinity-model".to_string(),
-            CurrentModelStats {
-                output_tps: 0.0,
-                last_mean_input_tps: 100.0,
-                max_output_tps: 1000.0,
-                queue_size: 1,
-                queued_input_size: 1,
-                num_running_queries: 1,
-                max_engine_concurrency: Some(1),
-                total_query_input_size: 1,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("failed to mark primary full");
+        .find_map(|(inst_id, runtime_state)| (inst_id == &primary).then_some(runtime_state))
+        .expect("primary backend should have runtime state");
+    primary_runtime.set_model_stats(
+        "multiregion-affinity-model".to_string(),
+        CurrentModelStats {
+            output_tps: 0.0,
+            last_mean_input_tps: 100.0,
+            max_output_tps: 1000.0,
+            queue_size: 1,
+            queued_input_size: 1,
+            num_running_queries: 1,
+            max_engine_concurrency: Some(1),
+            total_query_input_size: 1,
+            ..CurrentModelStats::default()
+        },
+    );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut fallback_attempt = 0usize;
@@ -1484,53 +1424,49 @@ async fn groq_multiregion_requires_cache_affinity_key_when_configured() {
     let (inst_addr, quic_url, _tunnel) =
         start_dummy_inst("multiregion-affinity-required-model").await;
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let update_channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "multiregion-affinity-required-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url,
-                upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                min_update_interval: Duration::from_millis(50),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let runtime_state = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["multiregion-affinity-required-model".to_string()],
+    );
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "multiregion-affinity-required-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url,
+            upstream_http_base_url: Some(format!("http://{inst_addr}")),
+            min_update_interval: Duration::from_millis(50),
+            reverse_tunnel: false,
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["multiregion-affinity-required-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: runtime_state.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
-    update_channels
-        .model_stats
-        .send_async((
-            "multiregion-affinity-required-model".to_string(),
-            CurrentModelStats {
-                output_tps: 0.0,
-                last_mean_input_tps: 100.0,
-                max_output_tps: 1000.0,
-                queue_size: 0,
-                queued_input_size: 0,
-                num_running_queries: 0,
-                max_engine_concurrency: Some(100),
-                total_query_input_size: 0,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("failed to send multiregion affinity-required stats");
+    runtime_state.set_model_stats(
+        "multiregion-affinity-required-model".to_string(),
+        CurrentModelStats {
+            output_tps: 0.0,
+            last_mean_input_tps: 100.0,
+            max_output_tps: 1000.0,
+            queue_size: 0,
+            queued_input_size: 0,
+            num_running_queries: 0,
+            max_engine_concurrency: Some(100),
+            total_query_input_size: 0,
+            ..CurrentModelStats::default()
+        },
+    );
 
     wait_for_routing_with_cache_affinity(
         http_addr,
@@ -1635,54 +1571,50 @@ async fn groq_multiregion_priority_header_uses_matching_queue_estimate() {
         let (inst_addr, quic_url, tunnel) = start_dummy_inst("multiregion-priority-model").await;
         _tunnels.push(tunnel);
         let mut reg_client = InferenceServerRegistrationClient::default();
-        let update_channels = reg_client
-            .start(
-                InferenceServerRegistrationConfig {
-                    seeds: vec![grpc_addr.to_string()],
-                    inference_server_id: inst_id.to_string(),
-                    cluster_id: String::new(),
-                    inference_server_url: quic_url,
-                    upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                    min_update_interval: Duration::from_millis(50),
-                    status: InferenceServerStatus::Active,
-                    reverse_tunnel: false,
-                    bringup: BringupConfig {
-                        enabled: false,
-                        ..BringupConfig::default()
-                    },
-                    output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                    request_observation_tx: None,
-                    request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                    metrics: None,
-                    retry: pylon_lib::PylonRetryConfig::default(),
-                    queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                    queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                    auth_token_provider: None,
-                    quic_insecure: true,
-                    tunnel_protocol: Default::default(),
+        let runtime_state = PylonRuntimeState::new(
+            InferenceServerStatus::Active,
+            &["multiregion-priority-model".to_string()],
+        );
+        reg_client
+            .start(InferenceServerRegistrationConfig {
+                seeds: vec![grpc_addr.to_string()],
+                inference_server_id: inst_id.to_string(),
+                cluster_id: String::new(),
+                inference_server_url: quic_url,
+                upstream_http_base_url: Some(format!("http://{inst_addr}")),
+                min_update_interval: Duration::from_millis(50),
+                reverse_tunnel: false,
+                bringup: BringupConfig {
+                    enabled: false,
+                    ..BringupConfig::default()
                 },
-                vec!["multiregion-priority-model".to_string()],
-            )
+                output_token_parser_factory: OutputTokenParserFactory::vllm(),
+                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+                metrics: None,
+                retry: pylon_lib::PylonRetryConfig::default(),
+                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+                runtime_state: runtime_state.clone(),
+                auth_token_provider: None,
+                tls_cert_pem: None,
+                quic_insecure: true,
+                tunnel_protocol: Default::default(),
+            })
             .expect("registration failed");
-        update_channels
-            .model_stats
-            .send_async((
-                "multiregion-priority-model".to_string(),
-                CurrentModelStats {
-                    output_tps: 0.0,
-                    last_mean_input_tps: 100.0,
-                    max_output_tps: 1000.0,
-                    queue_size: u64::from(total_query_input_size > 0),
-                    queued_input_size: total_query_input_size,
-                    num_running_queries: u64::from(total_query_input_size > 0),
-                    max_engine_concurrency: Some(100),
-                    total_query_input_size,
-                    queue_time_estimate_ms_by_priority: Some(priority_queue_estimates),
-                    ..CurrentModelStats::default()
-                },
-            ))
-            .await
-            .expect("failed to send multiregion priority stats");
+        runtime_state.set_model_stats(
+            "multiregion-priority-model".to_string(),
+            CurrentModelStats {
+                output_tps: 0.0,
+                last_mean_input_tps: 100.0,
+                max_output_tps: 1000.0,
+                queue_size: u64::from(total_query_input_size > 0),
+                queued_input_size: total_query_input_size,
+                num_running_queries: u64::from(total_query_input_size > 0),
+                max_engine_concurrency: Some(100),
+                total_query_input_size,
+                queue_time_estimate_ms_by_priority: Some(priority_queue_estimates),
+                ..CurrentModelStats::default()
+            },
+        );
         reg_clients.push(reg_client);
     }
 
@@ -1806,50 +1738,44 @@ async fn pulsar_routes_same_affinity_key_consistently() {
         let (inst_addr, quic_url, tunnel) = start_dummy_inst("pulsar-model").await;
         _tunnels.push(tunnel);
         let mut reg_client = InferenceServerRegistrationClient::default();
-        let update_channels = reg_client
-            .start(
-                InferenceServerRegistrationConfig {
-                    seeds: vec![grpc_addr.to_string()],
-                    inference_server_id: inst_id.to_string(),
-                    cluster_id: String::new(),
-                    inference_server_url: quic_url,
-                    upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                    min_update_interval: Duration::from_millis(100),
-                    status: InferenceServerStatus::Active,
-                    reverse_tunnel: false,
-                    bringup: BringupConfig::default(),
-                    output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                    request_observation_tx: None,
-                    request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                    metrics: None,
-                    retry: pylon_lib::PylonRetryConfig::default(),
-                    queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                    queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                    auth_token_provider: None,
-                    quic_insecure: true,
-                    tunnel_protocol: Default::default(),
-                },
-                vec!["pulsar-model".to_string()],
-            )
+        let runtime_state =
+            PylonRuntimeState::new(InferenceServerStatus::Active, &["pulsar-model".to_string()]);
+        reg_client
+            .start(InferenceServerRegistrationConfig {
+                seeds: vec![grpc_addr.to_string()],
+                inference_server_id: inst_id.to_string(),
+                cluster_id: String::new(),
+                inference_server_url: quic_url,
+                upstream_http_base_url: Some(format!("http://{inst_addr}")),
+                min_update_interval: Duration::from_millis(100),
+                reverse_tunnel: false,
+                bringup: BringupConfig::default(),
+                output_token_parser_factory: OutputTokenParserFactory::vllm(),
+                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+                metrics: None,
+                retry: pylon_lib::PylonRetryConfig::default(),
+                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+                runtime_state: runtime_state.clone(),
+                auth_token_provider: None,
+                tls_cert_pem: None,
+                quic_insecure: true,
+                tunnel_protocol: Default::default(),
+            })
             .expect("registration failed");
-        update_channels
-            .model_stats
-            .send_async((
-                "pulsar-model".to_string(),
-                CurrentModelStats {
-                    output_tps: 0.0,
-                    last_mean_input_tps: *last_mean_input_tps,
-                    max_output_tps: 1000.0,
-                    queue_size: 0,
-                    queued_input_size: 0,
-                    kv_cache_capacity_tokens: 4096,
-                    kv_cache_used_tokens: 0,
-                    kv_cache_free_tokens: 4096,
-                    ..CurrentModelStats::default()
-                },
-            ))
-            .await
-            .expect("failed to send pulsar stats");
+        runtime_state.set_model_stats(
+            "pulsar-model".to_string(),
+            CurrentModelStats {
+                output_tps: 0.0,
+                last_mean_input_tps: *last_mean_input_tps,
+                max_output_tps: 1000.0,
+                queue_size: 0,
+                queued_input_size: 0,
+                kv_cache_capacity_tokens: 4096,
+                kv_cache_used_tokens: 0,
+                kv_cache_free_tokens: 4096,
+                ..CurrentModelStats::default()
+            },
+        );
         reg_clients.push(reg_client);
     }
 

@@ -68,12 +68,14 @@ Request:
 
 Response:
 
-- `model_ids`: active model ids in the selected pod's local snapshot.
+- `model_ids`: model ids with a current routable target generation in the
+  selected pod's local state.
 
 `ListModels` is a hint, not a reservation. If a recent positive result is
 followed by proxy `404` with `x-stargate-error-code: no_eligible_candidates`,
-the gateway may retry after its convergence delay. A `503` for a registered
-model means no eligible active backend, not a discovery miss.
+the local route changed after discovery returned; the gateway may retry
+according to its normal policy. A `503` for a registered model means no
+eligible active backend, not a discovery miss.
 
 ## Proxy Endpoints
 
@@ -137,7 +139,7 @@ Common errors:
 | Status | Meaning | Gateway behavior |
 | --- | --- | --- |
 | `400` | Missing/invalid contract input. | Do not retry unchanged. |
-| `404` + `no_eligible_candidates` | Unknown or unregistered local target. | Retry only for recent discovery convergence. |
+| `404` + `no_eligible_candidates` | Unknown or unregistered local target. | Retry only when a recent discovery response may have raced a local route change. |
 | `413` | Replay body too large. | Do not retry unchanged. |
 | `502/503/504` | Transport, upstream, retry, or active-backend failure. | Treat as serving failure. |
 

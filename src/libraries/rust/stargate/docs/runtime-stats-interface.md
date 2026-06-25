@@ -97,6 +97,12 @@ Pylon publishes:
 - optional KV capacity/used/free tokens
 - source and capability labels
 
+Every publication is derived from one per-model aggregate, so throughput,
+request lifecycle load, KV state, and labels cannot diverge between publication
+paths. Once a valid cumulative-counter output sample exists, it is
+authoritative over live request-timing estimates until stale cleanup clears the
+counter-derived output window.
+
 If request stats go stale, volatile output TPS is cleared. Sticky input TPS
 stays until a later valid sample replaces it.
 
@@ -118,6 +124,10 @@ Labels:
 Runtime-stats metrics use the `pylon_engine_stats_*` prefix for stream events,
 invalid events, reconnects, connection state, live requests, model states,
 stale cleanup, dirty snapshots, and source transitions.
+
+`pylon_engine_stats_model_states` counts models admitted into aggregate
+counter or stream-observation state. Lifecycle-only and KV-only model state
+does not inflate that gauge.
 
 ## Mock Defaults
 

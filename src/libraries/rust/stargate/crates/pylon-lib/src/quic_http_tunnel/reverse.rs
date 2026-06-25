@@ -13,10 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use quinn::Endpoint;
 use reqwest::header::{HeaderName, HeaderValue};
 use tokio_util::sync::CancellationToken;
@@ -28,14 +30,14 @@ use stargate_protocol::tunnel_contract::{
 };
 
 use crate::output_token_parser::OutputTokenParserFactory;
-use crate::queue_admission::{PylonQueueMismatchRetryConfig, QueueAdmissionTracker};
-use crate::request_observer::RequestObservation;
+use crate::queue_admission::PylonQueueMismatchRetryConfig;
 use crate::request_quality_monitor::RequestQualityMonitorConfig;
+use crate::runtime_state::PylonRuntimeState;
 use crate::stats::PylonMetrics;
 
 use super::core::{
-    DEFAULT_FIRST_OUTPUT_TIMEOUT, DEFAULT_MAX_BODY_BYTES, DEFAULT_OUTPUT_CHUNK_TIMEOUT,
-    PylonRetryConfig, TunnelServerApp,
+    DEFAULT_FIRST_OUTPUT_TIMEOUT, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_SSE_BUFFER_BYTES,
+    DEFAULT_OUTPUT_CHUNK_TIMEOUT, PylonRetryConfig, TunnelServerApp,
 };
 use super::custom::handle_stream;
 use super::endpoint::{
@@ -50,19 +52,19 @@ pub struct ReverseQuicTunnelConfig {
     pub inference_server_id: String,
     pub upstream_http_base_url: String,
     pub max_request_body_bytes: usize,
+    pub max_sse_buffer_bytes: usize,
     pub first_output_timeout: Duration,
     pub output_chunk_timeout: Duration,
     pub output_token_parser_factory: OutputTokenParserFactory,
     pub tls_cert_pem: Option<Vec<u8>>,
     pub quic_insecure: bool,
     pub tunnel_protocol: TunnelTransportProtocol,
-    pub request_observation_tx: Option<flume::Sender<RequestObservation>>,
+    pub runtime_state: PylonRuntimeState,
     pub request_quality_monitor: RequestQualityMonitorConfig,
     pub sni_override: Option<String>,
     pub auth_token_provider: Option<std::sync::Arc<crate::AuthTokenProvider>>,
     pub retry: PylonRetryConfig,
     pub queue_mismatch_retry: PylonQueueMismatchRetryConfig,
-    pub queue_tracker: QueueAdmissionTracker,
     pub metrics: Option<Arc<PylonMetrics>>,
     #[cfg(test)]
     pub webtransport_stream_header_wait_tx: Option<flume::Sender<()>>,
@@ -79,19 +81,19 @@ impl ReverseQuicTunnelConfig {
             inference_server_id,
             upstream_http_base_url,
             max_request_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            max_sse_buffer_bytes: DEFAULT_MAX_SSE_BUFFER_BYTES,
             first_output_timeout: DEFAULT_FIRST_OUTPUT_TIMEOUT,
             output_chunk_timeout: DEFAULT_OUTPUT_CHUNK_TIMEOUT,
             output_token_parser_factory: OutputTokenParserFactory,
             tls_cert_pem: None,
             quic_insecure: false,
             tunnel_protocol: TunnelTransportProtocol::Custom,
-            request_observation_tx: None,
+            runtime_state: PylonRuntimeState::default(),
             request_quality_monitor: RequestQualityMonitorConfig::default(),
             sni_override: None,
             auth_token_provider: None,
             retry: PylonRetryConfig::default(),
             queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-            queue_tracker: QueueAdmissionTracker::default(),
             metrics: None,
             #[cfg(test)]
             webtransport_stream_header_wait_tx: None,
@@ -106,14 +108,14 @@ impl TunnelServerApp {
             inference_server_id: config.inference_server_id,
             upstream_http_base_url: config.upstream_http_base_url,
             max_request_body_bytes: config.max_request_body_bytes,
+            max_sse_buffer_bytes: config.max_sse_buffer_bytes,
             first_output_timeout: config.first_output_timeout,
             output_chunk_timeout: config.output_chunk_timeout,
             output_token_parser_factory: config.output_token_parser_factory,
-            request_observation_tx: config.request_observation_tx,
+            runtime_state: config.runtime_state,
             request_quality_monitor: config.request_quality_monitor,
             retry: config.retry,
             queue_mismatch_retry: config.queue_mismatch_retry,
-            queue_tracker: config.queue_tracker,
             metrics: config.metrics,
             #[cfg(test)]
             webtransport_stream_header_wait_tx: config.webtransport_stream_header_wait_tx,
@@ -161,7 +163,7 @@ pub(super) struct ReverseQuicConnectDebugTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReverseQuicResolvedTarget {
     pub(super) resolved_addrs: Vec<SocketAddr>,
-    pub(super) resolved_target: SocketAddr,
+    pub(super) dial_candidates: Vec<SocketAddr>,
 }
 
 pub(super) fn reverse_quic_connect_debug_target(
@@ -198,16 +200,14 @@ async fn resolve_reverse_quic_target_addr(
 pub(super) fn reverse_quic_resolved_target(
     resolved_addrs: Vec<SocketAddr>,
 ) -> Result<ReverseQuicResolvedTarget, TunnelError> {
-    let resolved_target = resolved_addrs
-        .iter()
-        .find(|addr| addr.is_ipv4())
-        .copied()
-        .or_else(|| resolved_addrs.first().copied())
-        .ok_or(TunnelError::NoResolvedAddress)?;
+    let dial_candidates = stargate_tls::ordered_dial_candidates(resolved_addrs.iter().copied());
+    if dial_candidates.is_empty() {
+        return Err(TunnelError::NoResolvedAddress);
+    }
 
     Ok(ReverseQuicResolvedTarget {
         resolved_addrs,
-        resolved_target,
+        dial_candidates,
     })
 }
 
@@ -221,11 +221,13 @@ fn alpn_protocols_for_debug(tunnel_protocol: TunnelTransportProtocol) -> Vec<Str
 
 fn log_reverse_quic_connect_attempt(
     target: &ReverseQuicConnectDebugTarget,
+    dial_target: SocketAddr,
     local_addr: Option<SocketAddr>,
 ) {
     tracing::debug!(
         transport = "quic",
         target_addr = %target.target_addr,
+        dial_target = %dial_target,
         sni = %target.sni,
         tunnel_protocol = %target.tunnel_protocol,
         alpn_protocols = ?target.alpn_protocols,
@@ -242,8 +244,8 @@ fn log_reverse_quic_resolved_target(
     tracing::debug!(
         transport = "quic",
         target_addr = %target.target_addr,
-        resolved_target = %resolved.resolved_target,
         resolved_addrs = ?resolved.resolved_addrs,
+        dial_candidates = ?resolved.dial_candidates,
         sni = %target.sni,
         tunnel_protocol = %target.tunnel_protocol,
         alpn_protocols = ?target.alpn_protocols,
@@ -254,7 +256,7 @@ fn log_reverse_quic_resolved_target(
 
 fn log_reverse_quic_connected(
     target: &ReverseQuicConnectDebugTarget,
-    resolved: &ReverseQuicResolvedTarget,
+    dial_target: SocketAddr,
     local_addr: Option<SocketAddr>,
     connection: &quinn::Connection,
 ) {
@@ -265,7 +267,7 @@ fn log_reverse_quic_connected(
     tracing::debug!(
         transport = "quic",
         target_addr = %target.target_addr,
-        resolved_target = %resolved.resolved_target,
+        dial_target = %dial_target,
         remote_addr = %remote_addr,
         stable_id,
         sni = %target.sni,
@@ -278,6 +280,28 @@ fn log_reverse_quic_connected(
     );
 }
 
+pub(super) async fn connect_first_reverse_quic_candidate<T, Connect, ConnectFuture>(
+    candidates: &[SocketAddr],
+    mut connect: Connect,
+) -> anyhow::Result<(SocketAddr, T)>
+where
+    Connect: FnMut(SocketAddr) -> ConnectFuture,
+    ConnectFuture: Future<Output = anyhow::Result<T>>,
+{
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        match connect(*candidate).await {
+            Ok(connection) => return Ok((*candidate, connection)),
+            Err(error) => failures.push(format!("{candidate}: {error:#}")),
+        }
+    }
+
+    anyhow::bail!(
+        "failed to connect to every resolved reverse QUIC address: {}",
+        failures.join("; ")
+    )
+}
+
 pub(super) async fn connect_reverse_quic_endpoint(
     config: &ReverseQuicTunnelConfig,
 ) -> Result<ReverseQuicClientConnection, TunnelError> {
@@ -287,31 +311,39 @@ pub(super) async fn connect_reverse_quic_endpoint(
         config.tunnel_protocol,
     )
     .map_err(|source| TunnelError::Tls { source })?;
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap()).map_err(TunnelError::Bind)?;
-    endpoint.set_default_client_config(client_config);
-    let local_addr = endpoint.local_addr().ok();
-
     let connect_target = reverse_quic_connect_debug_target(config);
-    log_reverse_quic_connect_attempt(&connect_target, local_addr);
-    let resolved_target = resolve_reverse_quic_target_addr(&config.target_addr).await?;
-    log_reverse_quic_resolved_target(&connect_target, &resolved_target);
-    let connection = endpoint
-        .connect(resolved_target.resolved_target, &connect_target.sni)
-        .map_err(|source| TunnelError::Connect {
-            context: "starting QUIC connection",
-            source: source.into(),
-        })?
+    let resolved = resolve_reverse_quic_target_addr(&config.target_addr).await?;
+    log_reverse_quic_resolved_target(&connect_target, &resolved);
+    let (_, connection) =
+        connect_first_reverse_quic_candidate(&resolved.dial_candidates, |dial_target| {
+            let client_config = client_config.clone();
+            let connect_target = connect_target.clone();
+            async move {
+                let mut endpoint =
+                    Endpoint::client(stargate_tls::quic_client_bind_addr(dial_target))
+                        .context("bind reverse QUIC client")?;
+                endpoint.set_default_client_config(client_config);
+                let local_addr = endpoint.local_addr().ok();
+                log_reverse_quic_connect_attempt(&connect_target, dial_target, local_addr);
+                let connection = endpoint
+                    .connect(dial_target, &connect_target.sni)
+                    .context("start reverse QUIC connection")?
+                    .await
+                    .context("establish reverse QUIC connection")?;
+                log_reverse_quic_connected(&connect_target, dial_target, local_addr, &connection);
+                Ok(ReverseQuicClientConnection {
+                    endpoint,
+                    connection,
+                })
+            }
+        })
         .await
         .map_err(|source| TunnelError::Connect {
-            context: "establishing QUIC connection",
-            source: source.into(),
+            context: "connecting to resolved reverse tunnel addresses",
+            source,
         })?;
-    log_reverse_quic_connected(&connect_target, &resolved_target, local_addr, &connection);
 
-    Ok(ReverseQuicClientConnection {
-        endpoint,
-        connection,
-    })
+    Ok(connection)
 }
 
 async fn resolve_reverse_auth_token(

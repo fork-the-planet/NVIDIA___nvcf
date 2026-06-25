@@ -161,17 +161,10 @@ fn sample_hotset(config: &HotsetTrafficConfig, rng: &mut StdRng) -> anyhow::Resu
         (0.0..=1.0).contains(&config.hotset_share),
         "hotset_share must be in [0, 1]"
     );
-    let hotset_size = ((config.cache_affinity_keys as f64) * config.hotset_fraction)
-        .round()
-        .max(1.0) as usize;
-    let use_hotset = rng.random::<f64>() < config.hotset_share;
-    let cache_affinity_key_index = if config.cache_affinity_keys == 0 {
-        None
-    } else if use_hotset {
-        Some(rng.random_range(0..hotset_size.min(config.cache_affinity_keys)))
-    } else {
-        Some(rng.random_range(0..config.cache_affinity_keys))
-    };
+    let hotset_size = derive_hotset_size(config.cache_affinity_keys, config.hotset_fraction);
+    let use_hotset = choose_hotset_request(hotset_size, config.hotset_share, rng);
+    let cache_affinity_key_index =
+        sample_hotset_cache_affinity_key(config.cache_affinity_keys, hotset_size, use_hotset, rng);
 
     Ok(RequestShape {
         routing_key_index: sample_optional_index(config.routing_keys, rng),
@@ -184,6 +177,36 @@ fn sample_hotset(config: &HotsetTrafficConfig, rng: &mut StdRng) -> anyhow::Resu
             "cold".to_string()
         },
     })
+}
+
+fn derive_hotset_size(cache_affinity_keys: usize, hotset_fraction: f64) -> usize {
+    if cache_affinity_keys == 0 || hotset_fraction == 0.0 {
+        return 0;
+    }
+    (((cache_affinity_keys as f64) * hotset_fraction).round() as usize)
+        .max(1)
+        .min(cache_affinity_keys)
+}
+
+fn choose_hotset_request(hotset_size: usize, hotset_share: f64, rng: &mut StdRng) -> bool {
+    hotset_size > 0 && rng.random::<f64>() < hotset_share
+}
+
+fn sample_hotset_cache_affinity_key(
+    cache_affinity_keys: usize,
+    hotset_size: usize,
+    use_hotset: bool,
+    rng: &mut StdRng,
+) -> Option<usize> {
+    if cache_affinity_keys == 0 {
+        return None;
+    }
+    let range_end = if use_hotset {
+        hotset_size
+    } else {
+        cache_affinity_keys
+    };
+    Some(rng.random_range(0..range_end))
 }
 
 fn sample_bursty(config: &BurstyTrafficConfig, rng: &mut StdRng) -> anyhow::Result<RequestShape> {
@@ -213,27 +236,45 @@ fn sample_mixed_size(
     config: &MixedSizeTrafficConfig,
     rng: &mut StdRng,
 ) -> anyhow::Result<RequestShape> {
-    ensure!(
-        (0.0..=1.0).contains(&config.small_share),
-        "small_share must be in [0, 1]"
-    );
-    let use_small = rng.random::<f64>() < config.small_share;
-    let class = if use_small {
-        &config.small
-    } else {
-        &config.large
-    };
+    let selection = MixedSizeSelection::choose(config.small_share, rng);
+    let class = selection.class(config);
     Ok(RequestShape {
         routing_key_index: sample_optional_index(config.routing_keys, rng),
         cache_affinity_key_index: sample_optional_index(config.cache_affinity_keys, rng),
         input_tokens: sample_class_tokens(class, true, rng)?,
         output_tokens: sample_class_tokens(class, false, rng)?,
-        backend_behavior_class: if use_small {
-            "small".to_string()
-        } else {
-            "large".to_string()
-        },
+        backend_behavior_class: selection.behavior_class().to_string(),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixedSizeSelection {
+    Small,
+    Large,
+}
+
+impl MixedSizeSelection {
+    fn choose(small_share: f64, rng: &mut StdRng) -> Self {
+        if rng.random::<f64>() < small_share {
+            Self::Small
+        } else {
+            Self::Large
+        }
+    }
+
+    fn class(self, config: &MixedSizeTrafficConfig) -> &MixedSizeClassConfig {
+        match self {
+            Self::Small => &config.small,
+            Self::Large => &config.large,
+        }
+    }
+
+    fn behavior_class(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Large => "large",
+        }
+    }
 }
 
 fn sample_prefix_reuse(
@@ -396,9 +437,9 @@ pub fn write_manifest_json(path: &std::path::Path, manifest: &Manifest) -> anyho
 mod tests {
     use super::*;
     use crate::config::{
-        AlgorithmConfig, ArrivalPatternConfig, BackendConfig, BackendProfile,
-        PrefixReuseTrafficConfig, RegistrationConfig, ServiceTimeConfig, StargateConfig,
-        TokenDistributionConfig, UniformTrafficConfig,
+        AlgorithmConfig, ArrivalPatternConfig, BackendConfig, BackendProfile, HotsetTrafficConfig,
+        MixedSizeClassConfig, MixedSizeTrafficConfig, PrefixReuseTrafficConfig, RegistrationConfig,
+        ServiceTimeConfig, StargateConfig, TokenDistributionConfig, UniformTrafficConfig,
     };
 
     fn base_config() -> BenchmarkConfig {
@@ -498,5 +539,143 @@ mod tests {
                 .iter()
                 .all(|request| request.cache_affinity_key.as_deref() == Some("cak-0000"))
         );
+    }
+
+    #[test]
+    fn zero_hotset_fraction_generates_only_cold_requests() {
+        let mut config = base_config();
+        config.request_count = 8;
+        config.traffic_pattern = TrafficPatternConfig::ZipfHotset(HotsetTrafficConfig {
+            routing_keys: 0,
+            cache_affinity_keys: 4,
+            hotset_fraction: 0.0,
+            hotset_share: 1.0,
+            input_tokens: TokenDistributionConfig::Constant { value: 128 },
+            output_tokens: TokenDistributionConfig::Constant { value: 32 },
+            arrival: ArrivalPatternConfig::Constant { interval_ms: 1 },
+        });
+
+        let manifest = generate_manifest(&config, None).expect("manifest should generate");
+
+        assert!(
+            manifest
+                .requests
+                .iter()
+                .all(|request| request.backend_behavior_class == "cold")
+        );
+    }
+
+    #[test]
+    fn zero_hotset_keys_generate_only_cold_requests_without_cache_keys() {
+        let mut config = base_config();
+        config.request_count = 8;
+        config.traffic_pattern = TrafficPatternConfig::ZipfHotset(HotsetTrafficConfig {
+            routing_keys: 0,
+            cache_affinity_keys: 0,
+            hotset_fraction: 1.0,
+            hotset_share: 1.0,
+            input_tokens: TokenDistributionConfig::Constant { value: 128 },
+            output_tokens: TokenDistributionConfig::Constant { value: 32 },
+            arrival: ArrivalPatternConfig::Constant { interval_ms: 1 },
+        });
+
+        let manifest = generate_manifest(&config, None).expect("manifest should generate");
+
+        assert!(
+            manifest
+                .requests
+                .iter()
+                .all(|request| request.backend_behavior_class == "cold")
+        );
+        assert!(
+            manifest
+                .requests
+                .iter()
+                .all(|request| request.cache_affinity_key.is_none())
+        );
+    }
+
+    #[test]
+    fn tiny_positive_hotset_fraction_keeps_one_hot_key() {
+        let mut config = base_config();
+        config.request_count = 8;
+        config.traffic_pattern = TrafficPatternConfig::ZipfHotset(HotsetTrafficConfig {
+            routing_keys: 0,
+            cache_affinity_keys: 8,
+            hotset_fraction: 0.01,
+            hotset_share: 1.0,
+            input_tokens: TokenDistributionConfig::Constant { value: 128 },
+            output_tokens: TokenDistributionConfig::Constant { value: 32 },
+            arrival: ArrivalPatternConfig::Constant { interval_ms: 1 },
+        });
+
+        let manifest = generate_manifest(&config, None).expect("manifest should generate");
+
+        assert!(
+            manifest
+                .requests
+                .iter()
+                .all(|request| request.backend_behavior_class == "hot")
+        );
+        assert!(
+            manifest
+                .requests
+                .iter()
+                .all(|request| request.cache_affinity_key.as_deref() == Some("cak-0000"))
+        );
+    }
+
+    #[test]
+    fn mixed_size_extreme_shares_choose_small_and_large_classes() {
+        let mut config = base_config();
+        config.request_count = 3;
+        config.traffic_pattern = mixed_size_pattern(1.0);
+
+        let small_manifest = generate_manifest(&config, None).expect("manifest should generate");
+
+        assert!(small_manifest.requests.iter().all(|request| {
+            request.backend_behavior_class == "small"
+                && request.input_tokens == 100
+                && request.output_tokens == 10
+        }));
+
+        config.traffic_pattern = mixed_size_pattern(0.0);
+
+        let large_manifest = generate_manifest(&config, None).expect("manifest should generate");
+
+        assert!(large_manifest.requests.iter().all(|request| {
+            request.backend_behavior_class == "large"
+                && request.input_tokens == 1_000
+                && request.output_tokens == 100
+        }));
+    }
+
+    #[test]
+    fn mixed_size_config_rejects_invalid_small_share_before_generation() {
+        let mut config = base_config();
+        config.traffic_pattern = mixed_size_pattern(1.5);
+
+        let error = config
+            .validate()
+            .expect_err("invalid small_share should fail config validation");
+
+        assert!(error.to_string().contains("small_share must be in [0, 1]"));
+    }
+
+    fn mixed_size_pattern(small_share: f64) -> TrafficPatternConfig {
+        TrafficPatternConfig::MixedSize(MixedSizeTrafficConfig {
+            routing_keys: 0,
+            cache_affinity_keys: 1,
+            arrival: ArrivalPatternConfig::Constant { interval_ms: 1 },
+            small: MixedSizeClassConfig {
+                input_tokens: TokenDistributionConfig::Constant { value: 100 },
+                output_tokens: TokenDistributionConfig::Constant { value: 10 },
+            },
+            large: MixedSizeClassConfig {
+                input_tokens: TokenDistributionConfig::Constant { value: 1_000 },
+                output_tokens: TokenDistributionConfig::Constant { value: 100 },
+            },
+            small_share,
+        })
     }
 }

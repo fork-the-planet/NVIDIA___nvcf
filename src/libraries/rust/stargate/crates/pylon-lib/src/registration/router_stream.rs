@@ -13,13 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
@@ -30,23 +28,23 @@ use stargate_proto::pb::{InferenceServerAck, InferenceServerRegistration, Infere
 use stargate_protocol::TunnelTransportProtocol;
 
 use crate::quic_http_tunnel::TunnelForwardingConfig;
+use crate::runtime_state::PylonRuntimeState;
 use crate::stats::PylonMetrics;
+use stargate_runtime::OwnedTask;
 
-use super::calibration::{ClusterCalibrationDirective, publish_cluster_calibration_directives};
+use super::calibration::{
+    ClusterCalibrationDirective, publish_cluster_calibration_directives,
+    publish_router_calibration_disconnect,
+};
 use super::grpc_endpoint::{StargateGrpcEndpoint, connect_stargate_grpc_channel};
 use super::reverse_tunnel::{
-    ReverseTunnelLoopConfig, reverse_tunnel_endpoint_from_ack, run_reverse_tunnel_loop,
-    stop_reverse_tunnel_task,
+    ReverseTunnelLoopConfig, ReverseTunnelState, reverse_tunnel_endpoint_from_ack,
+    run_reverse_tunnel_loop, stop_reverse_tunnel_task,
 };
 use super::state::{
-    AdvertisedModelStatus, SharedInstState, advertised_model_statuses,
-    build_inference_server_registration,
+    AdvertisedModelStatus, advertised_model_statuses, build_inference_server_registration,
 };
 use super::types::InferenceServerRegistrationConfig;
-use super::{
-    NamedJoinHandle, REGISTRATION_TASK_SHUTDOWN_TIMEOUT, await_named_join_handle,
-    registration_should_stop, sleep_until_registration_stop,
-};
 
 #[derive(Debug, Clone)]
 pub(super) struct RouterRegistrationTaskTemplate {
@@ -56,11 +54,11 @@ pub(super) struct RouterRegistrationTaskTemplate {
     min_update_interval: Duration,
     reverse_tunnel: bool,
     pub(super) coordinated_calibration: bool,
+    tls_cert_pem: Option<Vec<u8>>,
     quic_insecure: bool,
     tunnel_protocol: TunnelTransportProtocol,
     cluster_calibration_directive_tx: flume::Sender<ClusterCalibrationDirective>,
     forwarding: TunnelForwardingConfig,
-    cancel_token: CancellationToken,
     auth_token_provider: Option<Arc<AuthTokenProvider>>,
 }
 
@@ -70,7 +68,6 @@ impl RouterRegistrationTaskTemplate {
         cluster_id: &str,
         upstream_http_base_url: &str,
         cluster_calibration_directive_tx: flume::Sender<ClusterCalibrationDirective>,
-        cancel_token: &CancellationToken,
     ) -> Self {
         let inference_server_url = if register_config.reverse_tunnel {
             upstream_http_base_url.to_string()
@@ -85,6 +82,7 @@ impl RouterRegistrationTaskTemplate {
             reverse_tunnel: register_config.reverse_tunnel,
             coordinated_calibration: register_config.bringup.enabled
                 && register_config.bringup.calibration_requests > 0,
+            tls_cert_pem: register_config.tls_cert_pem.clone(),
             quic_insecure: register_config.quic_insecure,
             tunnel_protocol: register_config.tunnel_protocol,
             cluster_calibration_directive_tx,
@@ -92,7 +90,6 @@ impl RouterRegistrationTaskTemplate {
                 register_config,
                 upstream_http_base_url,
             ),
-            cancel_token: cancel_token.clone(),
             auth_token_provider: register_config.auth_token_provider.clone(),
         }
     }
@@ -109,11 +106,11 @@ impl RouterRegistrationTaskTemplate {
             min_update_interval: self.min_update_interval,
             reverse_tunnel: self.reverse_tunnel,
             coordinated_calibration: self.coordinated_calibration,
+            tls_cert_pem: self.tls_cert_pem.clone(),
             quic_insecure: self.quic_insecure,
             tunnel_protocol: self.tunnel_protocol,
             cluster_calibration_directive_tx: self.cluster_calibration_directive_tx.clone(),
             forwarding: self.forwarding.clone(),
-            cancel_token: self.cancel_token.clone(),
             auth_token_provider: self.auth_token_provider.clone(),
         }
     }
@@ -125,33 +122,12 @@ fn tunnel_forwarding_config_from_registration_config(
 ) -> TunnelForwardingConfig {
     let mut forwarding = TunnelForwardingConfig::new(upstream_http_base_url.to_string());
     forwarding.output_token_parser_factory = register_config.output_token_parser_factory.clone();
-    forwarding.request_observation_tx = register_config.request_observation_tx.clone();
+    forwarding.runtime_state = register_config.runtime_state.clone();
     forwarding.request_quality_monitor = register_config.request_quality_monitor.clone();
     forwarding.metrics = register_config.metrics.clone();
     forwarding.retry = register_config.retry.clone();
     forwarding.queue_mismatch_retry = register_config.queue_mismatch_retry.clone();
-    forwarding.queue_tracker = register_config.queue_tracker.clone();
     forwarding
-}
-
-pub(super) fn desired_registration_routers(
-    active_routers: &BTreeSet<StargateGrpcEndpoint>,
-) -> BTreeSet<StargateGrpcEndpoint> {
-    active_routers.clone()
-}
-
-pub(super) struct RouterRegistrationWorker {
-    pub(super) stop_tx: watch::Sender<bool>,
-    pub(super) task: JoinHandle<()>,
-}
-
-pub(super) async fn stop_router_registration_worker(worker: RouterRegistrationWorker) {
-    let _ = worker.stop_tx.send(true);
-    await_named_join_handle(
-        NamedJoinHandle::new("router registration stream", worker.task),
-        REGISTRATION_TASK_SHUTDOWN_TIMEOUT,
-    )
-    .await;
 }
 
 #[derive(Debug, Clone)]
@@ -163,11 +139,11 @@ pub(super) struct RouterRegistrationTaskConfig {
     pub(super) min_update_interval: Duration,
     pub(super) reverse_tunnel: bool,
     pub(super) coordinated_calibration: bool,
+    pub(super) tls_cert_pem: Option<Vec<u8>>,
     pub(super) quic_insecure: bool,
     pub(super) tunnel_protocol: TunnelTransportProtocol,
     pub(super) cluster_calibration_directive_tx: flume::Sender<ClusterCalibrationDirective>,
     pub(super) forwarding: TunnelForwardingConfig,
-    pub(super) cancel_token: CancellationToken,
     pub(super) auth_token_provider: Option<Arc<AuthTokenProvider>>,
 }
 
@@ -179,9 +155,8 @@ enum RegistrationStreamExit {
 
 pub(super) async fn run_router_registration_stream(
     task_config: RouterRegistrationTaskConfig,
-    shared_state: SharedInstState,
-    parent_stop_rx: watch::Receiver<bool>,
-    local_stop_rx: watch::Receiver<bool>,
+    runtime_state: PylonRuntimeState,
+    stop: CancellationToken,
 ) {
     let RouterRegistrationTaskConfig {
         router_endpoint,
@@ -191,40 +166,22 @@ pub(super) async fn run_router_registration_stream(
         min_update_interval,
         reverse_tunnel,
         coordinated_calibration,
+        tls_cert_pem,
         quic_insecure,
         tunnel_protocol,
         cluster_calibration_directive_tx,
         forwarding,
-        cancel_token,
         auth_token_provider,
     } = task_config;
     let router_addr = router_endpoint.authority_addr().to_string();
-    let mut parent_stop_rx = parent_stop_rx;
-    let mut local_stop_rx = local_stop_rx;
 
     loop {
-        if registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token) {
+        if stop.is_cancelled() {
             return;
         }
 
         let connection = tokio::select! {
-            _ = cancel_token.cancelled() => return,
-            changed = parent_stop_rx.changed() => {
-                if changed.is_err()
-                    || registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token)
-                {
-                    return;
-                }
-                continue;
-            }
-            changed = local_stop_rx.changed() => {
-                if changed.is_err()
-                    || registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token)
-                {
-                    return;
-                }
-                continue;
-            }
+            _ = stop.cancelled() => return,
             connection = open_registration_stream(
                 &router_endpoint,
                 auth_token_provider.as_deref(),
@@ -232,67 +189,62 @@ pub(super) async fn run_router_registration_stream(
             ) => connection,
         };
         let Ok((mut ack_stream, update_tx)) = connection else {
-            if sleep_until_registration_stop(
-                &mut parent_stop_rx,
-                &mut local_stop_rx,
-                &cancel_token,
-                Duration::from_secs(1),
-            )
-            .await
+            if stop
+                .run_until_cancelled(tokio::time::sleep(Duration::from_secs(1)))
+                .await
+                .is_none()
             {
                 return;
             }
             continue;
         };
 
-        let (endpoint_tx, endpoint_rx) = watch::channel(None);
-        let (connected_tx, mut connected_rx) = watch::channel(false);
-        let reverse_cancel_token = cancel_token.child_token();
+        let (reverse_state_tx, mut reverse_state_rx) =
+            watch::channel(ReverseTunnelState::default());
         let reverse_task = if reverse_tunnel {
-            Some(tokio::spawn(run_reverse_tunnel_loop(
-                ReverseTunnelLoopConfig {
-                    router_addr: router_addr.clone(),
-                    inference_server_id: inference_server_id.clone(),
-                    quic_insecure,
-                    tunnel_protocol,
-                    forwarding: forwarding.clone(),
-                    auth_token_provider: auth_token_provider.clone(),
+            let reverse_task_state_tx = reverse_state_tx.clone();
+            let reverse_config = ReverseTunnelLoopConfig {
+                router_addr: router_addr.clone(),
+                inference_server_id: inference_server_id.clone(),
+                tls_cert_pem: tls_cert_pem.clone(),
+                quic_insecure,
+                tunnel_protocol,
+                forwarding: forwarding.clone(),
+                auth_token_provider: auth_token_provider.clone(),
+            };
+            Some(OwnedTask::spawn_child(
+                "reverse tunnel registration worker",
+                &stop,
+                move |reverse_stop| {
+                    run_reverse_tunnel_loop(reverse_config, reverse_task_state_tx, reverse_stop)
                 },
-                endpoint_rx,
-                connected_tx,
-                parent_stop_rx.clone(),
-                local_stop_rx.clone(),
-                reverse_cancel_token.clone(),
-            )))
+            ))
         } else {
             None
         };
 
-        shared_state.drain_updates();
         let initial_registration = build_inference_server_registration(
             &inference_server_id,
             &cluster_id,
             &inference_server_url,
-            &shared_state.snapshot(),
+            &runtime_state.advertised_models(),
             reverse_tunnel,
             coordinated_calibration,
-            *connected_rx.borrow(),
+            reverse_state_rx.borrow().is_connected(),
         );
         let mut advertised_status =
             RouterAdvertisedStatusTracker::new(forwarding.metrics.as_deref(), &router_addr);
         advertised_status.record_reverse_tunnel_connected(false);
+        let mut advertised_reverse_connected = false;
         let advertised = advertised_model_statuses(&initial_registration);
-        if update_tx.send(initial_registration).await.is_err() {
+        if !send_registration_update(&update_tx, initial_registration, &stop).await {
             if let Some(task) = reverse_task {
-                stop_reverse_tunnel_task(reverse_cancel_token, task).await;
+                stop_reverse_tunnel_task(task).await;
             }
-            if sleep_until_registration_stop(
-                &mut parent_stop_rx,
-                &mut local_stop_rx,
-                &cancel_token,
-                Duration::from_millis(200),
-            )
-            .await
+            if stop
+                .run_until_cancelled(tokio::time::sleep(Duration::from_millis(200)))
+                .await
+                .is_none()
             {
                 return;
             }
@@ -306,63 +258,55 @@ pub(super) async fn run_router_registration_stream(
 
         let stream_exit = loop {
             tokio::select! {
-                _ = cancel_token.cancelled() => break RegistrationStreamExit::Stop,
-                changed = parent_stop_rx.changed() => {
-                    if changed.is_err()
-                        || registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token)
-                    {
-                        break RegistrationStreamExit::Stop;
-                    }
-                }
-                changed = local_stop_rx.changed() => {
-                    if changed.is_err()
-                        || registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token)
-                    {
-                        break RegistrationStreamExit::Stop;
-                    }
-                }
+                _ = stop.cancelled() => break RegistrationStreamExit::Stop,
                 _ = tick_interval.tick() => {
-                    let changed = shared_state.drain_updates();
                     let heartbeat_due = last_send.elapsed() >= min_update_interval;
 
-                    if changed || heartbeat_due {
+                    if heartbeat_due {
+                        let reverse_connected = reverse_state_rx.borrow().is_connected();
                         // Heartbeats resend the full current snapshot; identical model
                         // stats across sends are normal liveness traffic.
                         let registration_update = build_inference_server_registration(
                             &inference_server_id,
                             &cluster_id,
                             &inference_server_url,
-                            &shared_state.snapshot(),
-                            reverse_tunnel,
-                            coordinated_calibration,
-                            *connected_rx.borrow(),
-                        );
-                        let advertised = advertised_model_statuses(&registration_update);
-                        if update_tx.send(registration_update).await.is_err() {
-                            break RegistrationStreamExit::Retry;
-                        }
-                        advertised_status.record_successful_advertisement(advertised);
-                        last_send = Instant::now();
-                    }
-                }
-                connected_changed = connected_rx.changed(), if reverse_tunnel => {
-                    if connected_changed.is_ok() {
-                        let reverse_connected = *connected_rx.borrow();
-                        advertised_status.record_reverse_tunnel_connected(reverse_connected);
-                        let registration_update = build_inference_server_registration(
-                            &inference_server_id,
-                            &cluster_id,
-                            &inference_server_url,
-                            &shared_state.snapshot(),
+                            &runtime_state.advertised_models(),
                             reverse_tunnel,
                             coordinated_calibration,
                             reverse_connected,
                         );
                         let advertised = advertised_model_statuses(&registration_update);
-                        if update_tx.send(registration_update).await.is_err() {
+                        if !send_registration_update(&update_tx, registration_update, &stop).await {
                             break RegistrationStreamExit::Retry;
                         }
                         advertised_status.record_successful_advertisement(advertised);
+                        advertised_reverse_connected = reverse_connected;
+                        last_send = Instant::now();
+                    }
+                }
+                state_changed = reverse_state_rx.changed(), if reverse_tunnel => {
+                    if state_changed.is_ok() {
+                        let reverse_connected =
+                            reverse_state_rx.borrow_and_update().is_connected();
+                        advertised_status.record_reverse_tunnel_connected(reverse_connected);
+                        if reverse_connected == advertised_reverse_connected {
+                            continue;
+                        }
+                        let registration_update = build_inference_server_registration(
+                            &inference_server_id,
+                            &cluster_id,
+                            &inference_server_url,
+                            &runtime_state.advertised_models(),
+                            reverse_tunnel,
+                            coordinated_calibration,
+                            reverse_connected,
+                        );
+                        let advertised = advertised_model_statuses(&registration_update);
+                        if !send_registration_update(&update_tx, registration_update, &stop).await {
+                            break RegistrationStreamExit::Retry;
+                        }
+                        advertised_status.record_successful_advertisement(advertised);
+                        advertised_reverse_connected = reverse_connected;
                         last_send = Instant::now();
                     } else {
                         break RegistrationStreamExit::Retry;
@@ -371,20 +315,20 @@ pub(super) async fn run_router_registration_stream(
                 maybe_ack = ack_stream.message() => {
                     match maybe_ack {
                         Ok(Some(ack)) => {
-                            publish_cluster_calibration_directives(
+                            if !publish_cluster_calibration_directives(
                                 &cluster_calibration_directive_tx,
                                 &router_endpoint,
                                 ack.model_calibration_directives.clone(),
+                                &stop,
                             )
-                            .await;
+                            .await
+                            {
+                                break RegistrationStreamExit::Stop;
+                            }
                             if reverse_tunnel {
                                 let endpoint = reverse_tunnel_endpoint_from_ack(&ack);
-                                endpoint_tx.send_if_modified(move |current| {
-                                    if *current == endpoint {
-                                        return false;
-                                    }
-                                    *current = endpoint;
-                                    true
+                                reverse_state_tx.send_if_modified(move |state| {
+                                    state.replace_endpoint(endpoint)
                                 });
                             }
                         }
@@ -396,12 +340,32 @@ pub(super) async fn run_router_registration_stream(
         };
 
         if let Some(task) = reverse_task {
-            stop_reverse_tunnel_task(reverse_cancel_token, task).await;
+            stop_reverse_tunnel_task(task).await;
         }
         if stream_exit == RegistrationStreamExit::Stop {
             return;
         }
+        if coordinated_calibration
+            && !publish_router_calibration_disconnect(
+                &cluster_calibration_directive_tx,
+                &router_endpoint,
+                &stop,
+            )
+            .await
+        {
+            return;
+        }
     }
+}
+
+pub(super) async fn send_registration_update(
+    update_tx: &mpsc::Sender<InferenceServerRegistration>,
+    update: InferenceServerRegistration,
+    stop: &CancellationToken,
+) -> bool {
+    stop.run_until_cancelled(update_tx.send(update))
+        .await
+        .is_some_and(|result| result.is_ok())
 }
 
 #[derive(Debug)]

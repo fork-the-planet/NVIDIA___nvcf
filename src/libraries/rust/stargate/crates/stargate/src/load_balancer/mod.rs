@@ -24,6 +24,7 @@ mod random;
 mod request;
 mod round_robin;
 mod router;
+mod target_state;
 #[cfg(test)]
 mod tests;
 
@@ -38,10 +39,11 @@ pub use config::{
     GroqMultiregionAlgorithmConfig, LoadBalancerAlgorithm, LoadBalancerAlgorithmConfig,
     LoadBalancerAlgorithmOverride, LoadBalancerAlgorithmSettings, LoadBalancerConfig,
     LoadBalancerModelConfig, LoadBalancerRequestPolicy, LoadBalancerRoutingAlgorithmError,
-    LoadBalancerSeedError, PulsarAlgorithmConfig, PulsarMultiregionAlgorithmConfig,
+    LoadBalancerSeedError,
 };
 pub use factory::create_load_balancer_with_config;
 pub use request::{LoadBalancerCandidateChoice, LoadBalancerRequest};
 pub use router::{
     LoadBalancerAlgorithmResolution, LoadBalancerCandidateSelection, LoadBalancerRouter,
 };
+pub use target_state::LoadBalancerTargetState;

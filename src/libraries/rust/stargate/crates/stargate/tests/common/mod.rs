@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,17 +30,19 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use pylon_lib::{
     BringupConfig, InferenceServerRegistrationClient, InferenceServerRegistrationConfig,
-    InferenceServerUpdateChannels, OutputTokenParserFactory, QuicHttpTunnelConfig,
-    QuicHttpTunnelHandle, start_quic_http_tunnel,
+    OutputTokenParserFactory, PylonRuntimeState, QuicHttpTunnelConfig, QuicHttpTunnelHandle,
+    TunnelTransportProtocol, start_quic_http_tunnel,
 };
 use serde::{Deserialize, Serialize};
 use stargate::auth::{AuthResult, WorkerAuthenticator};
 use stargate::discovery::Discovery;
 use stargate::proxy::ProxyTransportConfig;
-use stargate::runtime::{StargateRuntime, StargateRuntimeConfig};
+use stargate::runtime::{ReverseTunnelConfig, StargateRuntime, StargateRuntimeConfig};
 use stargate_forwarding::{ForwardingResolver, PeerResolution, PeerTarget};
 use stargate_proto::pb::{InferenceServerStatus, StargateInfo};
 use tokio::net::TcpListener;
+
+pub mod sse;
 
 // ---------------------------------------------------------------------------
 // Test authenticator
@@ -308,29 +310,6 @@ pub struct DummyState {
 }
 
 #[derive(Clone)]
-pub struct CountingDummyState {
-    pub model: String,
-    pub bringup_chat_requests: Arc<AtomicUsize>,
-    pub proxy_chat_requests: Arc<AtomicUsize>,
-}
-
-pub struct CountingDummyBackend {
-    pub addr: SocketAddr,
-    pub bringup_chat_requests: Arc<AtomicUsize>,
-    pub proxy_chat_requests: Arc<AtomicUsize>,
-}
-
-impl CountingDummyBackend {
-    pub fn bringup_chat_requests(&self) -> usize {
-        self.bringup_chat_requests.load(Ordering::SeqCst)
-    }
-
-    pub fn proxy_chat_requests(&self) -> usize {
-        self.proxy_chat_requests.load(Ordering::SeqCst)
-    }
-}
-
-#[derive(Clone)]
 pub struct LifecycleDummyState {
     pub model: String,
     health_ok: Arc<AtomicBool>,
@@ -340,6 +319,8 @@ pub struct LifecycleDummyState {
     calibration_requests: Arc<AtomicUsize>,
     canary_requests: Arc<AtomicUsize>,
     proxy_requests: Arc<AtomicUsize>,
+    calibration_gate: Arc<CalibrationRequestGate>,
+    calibration_delay_ms: Arc<AtomicU64>,
 }
 
 pub struct LifecycleDummyBackend {
@@ -350,6 +331,55 @@ pub struct LifecycleDummyBackend {
     health_requests: Arc<AtomicUsize>,
     calibration_requests: Arc<AtomicUsize>,
     canary_requests: Arc<AtomicUsize>,
+    calibration_gate: Arc<CalibrationRequestGate>,
+    calibration_delay_ms: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Default)]
+struct CalibrationRequestGate {
+    remaining: AtomicUsize,
+    released: AtomicBool,
+    release_notify: tokio::sync::Notify,
+}
+
+impl CalibrationRequestGate {
+    fn arm(&self, request_count: usize) {
+        // Each fixture gate is one-shot: arm before requests start, then release
+        // once. Rearming while a claimed request is blocked would strand it.
+        assert!(request_count > 0, "calibration gate count must be positive");
+        assert_eq!(
+            self.remaining.swap(request_count, Ordering::SeqCst),
+            0,
+            "calibration gate cannot be rearmed while requests remain"
+        );
+        self.released.store(false, Ordering::SeqCst);
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
+    }
+
+    async fn wait_if_claimed(&self) {
+        let claimed = self
+            .remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if !claimed {
+            return;
+        }
+        while !self.released.load(Ordering::SeqCst) {
+            // Create the notification future before rechecking `released` so a
+            // concurrent release leaves a permit instead of losing the wakeup.
+            let notified = self.release_notify.notified();
+            if self.released.load(Ordering::SeqCst) {
+                break;
+            }
+            notified.await;
+        }
+    }
 }
 
 impl LifecycleDummyBackend {
@@ -375,6 +405,21 @@ impl LifecycleDummyBackend {
 
     pub fn canary_requests(&self) -> usize {
         self.canary_requests.load(Ordering::SeqCst)
+    }
+
+    pub fn gate_next_calibration_requests(&self, request_count: usize) {
+        self.calibration_gate.arm(request_count);
+    }
+
+    pub fn release_calibration_gate(&self) {
+        self.calibration_gate.release();
+    }
+
+    pub fn set_calibration_delay(&self, delay: Duration) {
+        self.calibration_delay_ms.store(
+            delay.as_millis().try_into().unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
     }
 }
 
@@ -476,23 +521,6 @@ pub async fn dummy_chat(State(state): State<DummyState>, Json(req): Json<ChatReq
     .into_response()
 }
 
-pub async fn counting_dummy_chat(
-    headers: HeaderMap,
-    State(state): State<CountingDummyState>,
-    Json(req): Json<ChatRequest>,
-) -> Response {
-    let is_bringup = headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|request_id| request_id.starts_with("bringup-"));
-    if is_bringup {
-        state.bringup_chat_requests.fetch_add(1, Ordering::SeqCst);
-    } else {
-        state.proxy_chat_requests.fetch_add(1, Ordering::SeqCst);
-    }
-    dummy_chat(State(DummyState { model: state.model }), Json(req)).await
-}
-
 pub async fn lifecycle_dummy_health(State(state): State<LifecycleDummyState>) -> Response {
     state.health_requests.fetch_add(1, Ordering::SeqCst);
     if state.health_ok.load(Ordering::SeqCst) {
@@ -511,12 +539,21 @@ pub async fn lifecycle_dummy_chat(
         .get("x-request-id")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|request_id| request_id.starts_with("bringup-"));
-    if is_bringup && is_canary_request(&req) {
+    let is_canary = is_bringup && is_canary_request(&req);
+    if is_canary {
         state.canary_requests.fetch_add(1, Ordering::SeqCst);
     } else if is_bringup {
         state.calibration_requests.fetch_add(1, Ordering::SeqCst);
     } else {
         state.proxy_requests.fetch_add(1, Ordering::SeqCst);
+    }
+
+    if is_bringup && !is_canary {
+        state.calibration_gate.wait_if_claimed().await;
+        let delay_ms = state.calibration_delay_ms.load(Ordering::SeqCst);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
     }
 
     if !state.completions_ok.load(Ordering::SeqCst) {
@@ -570,13 +607,11 @@ pub fn base_config(
         grpc_listen_addr: grpc_addr,
         model_discovery_listen_addr: "127.0.0.1:0".parse().unwrap(),
         http_listen_addr: http_addr,
+        metrics_listen_addr: None,
         advertise_addr: grpc_addr,
         stargate_discovery_dns_name: "localhost".to_string(),
         remote_watch_stargate_urls: Vec::new(),
         grpc_pylon_dial_addr: None,
-        advertised_hostname_template: None,
-        pod_name: None,
-        pod_namespace: None,
         dns_poll_interval: Duration::from_secs(60),
         watch_heartbeat_interval: Duration::from_secs(60),
         registration_update_idle_timeout:
@@ -595,14 +630,111 @@ pub fn base_config(
         },
         lb_config_path: None,
         metrics_prefix: stargate::metrics::DEFAULT_PREFIX.to_string(),
-        reverse_tunnel_listen_addr: None,
-        reverse_tunnel_pylon_dial_addr: None,
-        reverse_tunnel_connect_timeout: Duration::from_secs(10),
+        reverse_tunnel: None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunnelDirection {
+    Direct,
+    Reverse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TunnelTestCase {
+    pub direction: TunnelDirection,
+    pub protocol: TunnelTransportProtocol,
+}
+
+impl TunnelTestCase {
+    pub const fn direct(protocol: TunnelTransportProtocol) -> Self {
+        Self {
+            direction: TunnelDirection::Direct,
+            protocol,
+        }
+    }
+
+    pub const fn reverse(protocol: TunnelTransportProtocol) -> Self {
+        Self {
+            direction: TunnelDirection::Reverse,
+            protocol,
+        }
+    }
+
+    pub const fn reverse_tunnel(self) -> bool {
+        matches!(self.direction, TunnelDirection::Reverse)
+    }
+
+    pub const fn direction_label(self) -> &'static str {
+        match self.direction {
+            TunnelDirection::Direct => "direct",
+            TunnelDirection::Reverse => "reverse",
+        }
+    }
+
+    pub const fn protocol_label(self) -> &'static str {
+        match self.protocol {
+            TunnelTransportProtocol::Custom => "custom",
+            TunnelTransportProtocol::Http3 => "http3",
+            TunnelTransportProtocol::WebTransport => "webtransport",
+        }
+    }
+}
+
+#[test]
+fn tunnel_test_case_reports_direction_and_protocol() {
+    let direct = TunnelTestCase::direct(TunnelTransportProtocol::Http3);
+    assert!(!direct.reverse_tunnel());
+    assert_eq!(direct.direction_label(), "direct");
+    assert_eq!(direct.protocol_label(), "http3");
+
+    let reverse = TunnelTestCase::reverse(TunnelTransportProtocol::WebTransport);
+    assert!(reverse.reverse_tunnel());
+    assert_eq!(reverse.direction_label(), "reverse");
+    assert_eq!(reverse.protocol_label(), "webtransport");
+}
+
+pub fn localhost_reverse_tunnel_config(listen_addr: SocketAddr) -> ReverseTunnelConfig {
+    ReverseTunnelConfig {
+        listen_addr,
+        advertised_host: "localhost".to_string(),
+        pylon_dial_addr: None,
+        connect_timeout: Duration::from_secs(10),
     }
 }
 
 pub fn make_stargate_runtime(id: &str) -> (SocketAddr, SocketAddr, StargateRuntime) {
     make_stargate_runtime_with_lb(id, None)
+}
+
+pub fn make_stargate_runtime_for_tunnel_case(
+    id: &str,
+    case: TunnelTestCase,
+) -> (SocketAddr, SocketAddr, Option<String>, StargateRuntime) {
+    let (grpc_addr, grpc_listener) = bind_ephemeral();
+    let (http_addr, http_listener) = bind_ephemeral();
+    let discovery = SelfDiscovery::new(id, grpc_addr, http_addr);
+    let mut config = base_config(id, grpc_addr, http_addr);
+    config.proxy_transport.tunnel_protocol = case.protocol;
+
+    let (reverse_target, reverse_socket) = if case.reverse_tunnel() {
+        let (reverse_addr, reverse_socket) = bind_ephemeral_udp();
+        config.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_addr));
+        (
+            Some(format!("localhost:{}", reverse_addr.port())),
+            Some(reverse_socket),
+        )
+    } else {
+        (None, None)
+    };
+
+    let mut runtime = StargateRuntime::new(config, Box::new(discovery))
+        .with_grpc_listener(grpc_listener)
+        .with_http_listener(http_listener);
+    if let Some(reverse_socket) = reverse_socket {
+        runtime = runtime.with_reverse_tunnel_socket(reverse_socket);
+    }
+    (grpc_addr, http_addr, reverse_target, runtime)
 }
 
 pub fn make_stargate_runtime_with_watch_intervals(
@@ -704,9 +836,8 @@ pub fn make_stargate_runtime_with_reverse_and_lb(
     let (http_addr, http_listener) = bind_ephemeral();
     let discovery = SelfDiscovery::new(id, grpc_addr, http_addr);
     let mut config = base_config(id, grpc_addr, http_addr);
-    config.advertised_hostname_template = Some("localhost".to_string());
     config.lb_config_path = lb_config_path;
-    config.reverse_tunnel_listen_addr = Some(reverse_addr);
+    config.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_addr));
     let mut runtime = StargateRuntime::new(config, Box::new(discovery))
         .with_grpc_listener(grpc_listener)
         .with_http_listener(http_listener);
@@ -726,8 +857,7 @@ pub fn make_stargate_runtime_with_reverse_and_auth(
     let (http_addr, http_listener) = bind_ephemeral();
     let discovery = SelfDiscovery::new(id, grpc_addr, http_addr);
     let mut config = base_config(id, grpc_addr, http_addr);
-    config.advertised_hostname_template = Some("localhost".to_string());
-    config.reverse_tunnel_listen_addr = Some(reverse_addr);
+    config.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_addr));
     let mut runtime = StargateRuntime::new(config, Box::new(discovery))
         .with_grpc_listener(grpc_listener)
         .with_http_listener(http_listener)
@@ -786,8 +916,7 @@ pub fn make_stargate_runtime_with_shared_discovery_and_reverse(
     let discovery = SharedDiscovery::new(id, grpc_addr, http_addr, peers);
     let mut config = base_config(id, grpc_addr, http_addr);
     config.dns_poll_interval = Duration::from_secs(1);
-    config.advertised_hostname_template = Some("localhost".to_string());
-    config.reverse_tunnel_listen_addr = Some(reverse_addr);
+    config.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_addr));
     let mut runtime = StargateRuntime::new(config, Box::new(discovery))
         .with_grpc_listener(grpc_listener)
         .with_http_listener(http_listener);
@@ -814,29 +943,6 @@ pub async fn start_dummy_backend(model: &str) -> SocketAddr {
     addr
 }
 
-pub async fn start_counting_dummy_backend(model: &str) -> CountingDummyBackend {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let bringup_chat_requests = Arc::new(AtomicUsize::new(0));
-    let proxy_chat_requests = Arc::new(AtomicUsize::new(0));
-    let app = Router::new()
-        .route("/v1/chat/completions", post(counting_dummy_chat))
-        .route("/health", axum::routing::get(|| async { "ok" }))
-        .with_state(CountingDummyState {
-            model: model.to_string(),
-            bringup_chat_requests: bringup_chat_requests.clone(),
-            proxy_chat_requests: proxy_chat_requests.clone(),
-        });
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    CountingDummyBackend {
-        addr,
-        bringup_chat_requests,
-        proxy_chat_requests,
-    }
-}
-
 pub async fn start_lifecycle_dummy_backend(model: &str) -> LifecycleDummyBackend {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -847,6 +953,8 @@ pub async fn start_lifecycle_dummy_backend(model: &str) -> LifecycleDummyBackend
     let calibration_requests = Arc::new(AtomicUsize::new(0));
     let canary_requests = Arc::new(AtomicUsize::new(0));
     let proxy_requests = Arc::new(AtomicUsize::new(0));
+    let calibration_gate = Arc::new(CalibrationRequestGate::default());
+    let calibration_delay_ms = Arc::new(AtomicU64::new(0));
     let app = Router::new()
         .route("/v1/chat/completions", post(lifecycle_dummy_chat))
         .route("/health", get(lifecycle_dummy_health))
@@ -859,6 +967,8 @@ pub async fn start_lifecycle_dummy_backend(model: &str) -> LifecycleDummyBackend
             calibration_requests: calibration_requests.clone(),
             canary_requests: canary_requests.clone(),
             proxy_requests: proxy_requests.clone(),
+            calibration_gate: calibration_gate.clone(),
+            calibration_delay_ms: calibration_delay_ms.clone(),
         });
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -871,7 +981,53 @@ pub async fn start_lifecycle_dummy_backend(model: &str) -> LifecycleDummyBackend
         health_requests,
         calibration_requests,
         canary_requests,
+        calibration_gate,
+        calibration_delay_ms,
     }
+}
+
+#[tokio::test]
+async fn lifecycle_dummy_calibration_gate_holds_counted_requests_until_release() {
+    let backend = start_lifecycle_dummy_backend("gate-model").await;
+    backend.gate_next_calibration_requests(1);
+    let backend_addr = backend.addr;
+    let request = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://{backend_addr}/v1/chat/completions"))
+            .header("x-request-id", "bringup-gate-test")
+            .header("x-model", "gate-model")
+            .header("x-input-tokens", "256")
+            .json(&serde_json::json!({
+                "model": "gate-model",
+                "messages": [{"role": "user", "content": "1".repeat(256)}],
+                "stream": false,
+            }))
+            .send()
+            .await
+            .expect("gated calibration request failed")
+    });
+    wait_until(
+        "gated calibration request observed",
+        Duration::from_secs(2),
+        Duration::from_millis(10),
+        || async {
+            if backend.calibration_requests() == 1 {
+                Ok(())
+            } else {
+                Err(backend.calibration_requests())
+            }
+        },
+    )
+    .await;
+    assert!(
+        !request.is_finished(),
+        "gated calibration request completed before release"
+    );
+    backend.release_calibration_gate();
+    assert_eq!(
+        request.await.expect("gated request task failed").status(),
+        StatusCode::OK
+    );
 }
 
 /// Starts a dummy HTTP backend fronted by a QUIC HTTP tunnel.
@@ -889,22 +1045,6 @@ pub async fn start_dummy_inst(model: &str) -> (SocketAddr, String, QuicHttpTunne
     let tunnel_addr = tunnel.listen_addr();
     let quic_url = format!("quic://{tunnel_addr}");
     (addr, quic_url, tunnel)
-}
-
-pub async fn start_counting_dummy_inst(
-    model: &str,
-) -> (CountingDummyBackend, String, QuicHttpTunnelHandle) {
-    let backend = start_counting_dummy_backend(model).await;
-
-    let tunnel = start_quic_http_tunnel(QuicHttpTunnelConfig::new(
-        "127.0.0.1:0".parse().unwrap(),
-        format!("http://{}", backend.addr),
-    ))
-    .await
-    .expect("tunnel failed to start");
-    let tunnel_addr = tunnel.listen_addr();
-    let quic_url = format!("quic://{tunnel_addr}");
-    (backend, quic_url, tunnel)
 }
 
 /// Polls the stargate `/healthz` endpoint until it responds 200.
@@ -1182,7 +1322,7 @@ pub fn init_crypto() {
 
 pub struct BackendHandle {
     reg_client: InferenceServerRegistrationClient,
-    _channels: InferenceServerUpdateChannels,
+    _runtime_state: PylonRuntimeState,
     _tunnel: Option<QuicHttpTunnelHandle>,
 }
 
@@ -1239,36 +1379,33 @@ pub async fn start_and_register_backend_with_bringup(
     };
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: seeds.to_vec(),
-                inference_server_id: backend_id.to_string(),
-                cluster_id: String::new(),
-                inference_server_url,
-                upstream_http_base_url: Some(upstream_http_base_url),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel,
-                bringup,
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec![model.to_string()],
-        )
+    let runtime_state = PylonRuntimeState::new(InferenceServerStatus::Active, &[model.to_string()]);
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: seeds.to_vec(),
+            inference_server_id: backend_id.to_string(),
+            cluster_id: String::new(),
+            inference_server_url,
+            upstream_http_base_url: Some(upstream_http_base_url),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel,
+            bringup,
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: runtime_state.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     BackendHandle {
         reg_client,
-        _channels: channels,
+        _runtime_state: runtime_state,
         _tunnel: tunnel,
     }
 }

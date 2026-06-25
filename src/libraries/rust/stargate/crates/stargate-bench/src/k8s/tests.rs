@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::images::{ImageRefs, tilt_image_matches};
@@ -169,6 +169,7 @@ fi
     fn with_body(body: &str) -> Self {
         let tempdir = tempfile::tempdir().expect("fake kubectl tempdir should create");
         let program = tempdir.path().join("kubectl");
+        let pending_program = tempdir.path().join("kubectl.pending");
         let log_path = tempdir.path().join("kubectl.log");
         let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
         script.push_str(&format!(
@@ -176,12 +177,14 @@ fi
             shell_single_quote(&log_path.display().to_string())
         ));
         script.push_str(body);
-        fs::write(&program, script).expect("fake kubectl script should write");
-        let mut permissions = fs::metadata(&program)
-            .expect("fake kubectl metadata should read")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&program, permissions).expect("fake kubectl should be executable");
+        {
+            let mut file =
+                fs::File::create(&pending_program).expect("fake kubectl script should create");
+            file.write_all(script.as_bytes())
+                .expect("fake kubectl script should write");
+            file.sync_all().expect("fake kubectl script should sync");
+        }
+        fs::rename(&pending_program, &program).expect("fake kubectl script should publish");
         Self {
             _tempdir: tempdir,
             program,
@@ -190,7 +193,7 @@ fi
     }
 
     fn runner(&self) -> Kubectl {
-        Kubectl::new(&self.program)
+        Kubectl::with_args("bash", [self.program.clone()])
     }
 
     fn command_log(&self) -> String {

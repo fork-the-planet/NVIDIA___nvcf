@@ -17,13 +17,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use pylon_lib::{
-    BringupConfig, ClientError, CurrentModelStats, InferenceServerRegistrationClient,
-    InferenceServerRegistrationConfig, OutputTokenParserFactory, PylonQueueMismatchRetryConfig,
-    PylonRetryConfig, QueueAdmissionTracker, QuicHttpTunnelConfig, RequestCounterUpdate,
-    RequestCounterUpdateInput, RequestQualityMonitorConfig, ReverseQuicTunnelConfig,
-    StatsUpdateSource, TunnelTransportProtocol,
+    BringupConfig, ClientError, CurrentModelStats, DEFAULT_MAX_SSE_BUFFER_BYTES,
+    InferenceServerRegistrationClient, InferenceServerRegistrationConfig, OutputTokenParserFactory,
+    PylonQueueMismatchRetryConfig, PylonRetryConfig, PylonRuntimeState, QuicHttpTunnelConfig,
+    RequestCounterUpdate, RequestCounterUpdateInput, RequestQualityMonitorConfig,
+    ReverseQuicTunnelConfig, StatsUpdateSource, TunnelTransportProtocol,
 };
-use stargate_proto::pb::InferenceServerStatus;
 
 #[test]
 fn crate_root_exports_registration_public_api() {
@@ -40,18 +39,17 @@ fn crate_root_exports_registration_public_api() {
         inference_server_url: "quic://127.0.0.1:8443".to_string(),
         upstream_http_base_url: Some("http://127.0.0.1:8000".to_string()),
         min_update_interval: Duration::from_secs(1),
-        status: InferenceServerStatus::Active,
         reverse_tunnel: false,
+        tls_cert_pem: None,
         quic_insecure: true,
         tunnel_protocol: TunnelTransportProtocol::Custom,
         bringup: BringupConfig::default(),
         output_token_parser_factory: OutputTokenParserFactory,
-        request_observation_tx: None,
+        runtime_state: PylonRuntimeState::default(),
         request_quality_monitor: RequestQualityMonitorConfig::default(),
         metrics: None,
         retry: PylonRetryConfig::default(),
         queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-        queue_tracker: QueueAdmissionTracker::default(),
         auth_token_provider: None,
     };
 
@@ -79,6 +77,7 @@ fn crate_root_exports_tunnel_config_public_api() {
         inference_server_id: Some("direct-a".to_string()),
         upstream_http_base_url: "http://127.0.0.1:8000".to_string(),
         max_request_body_bytes: 1024,
+        max_sse_buffer_bytes: 512,
         first_output_timeout: Duration::from_secs(1),
         output_chunk_timeout: Duration::from_secs(2),
         output_token_parser_factory: OutputTokenParserFactory,
@@ -86,11 +85,10 @@ fn crate_root_exports_tunnel_config_public_api() {
         tls_key_pem: None,
         quic_insecure: true,
         tunnel_protocol: TunnelTransportProtocol::Custom,
-        request_observation_tx: None,
+        runtime_state: PylonRuntimeState::default(),
         request_quality_monitor: RequestQualityMonitorConfig::default(),
         retry: PylonRetryConfig::default(),
         queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-        queue_tracker: QueueAdmissionTracker::default(),
         metrics: None,
     };
     assert_eq!(
@@ -103,23 +101,41 @@ fn crate_root_exports_tunnel_config_public_api() {
         inference_server_id: "reverse-a".to_string(),
         upstream_http_base_url: "http://127.0.0.1:8001".to_string(),
         max_request_body_bytes: 2048,
+        max_sse_buffer_bytes: 1024,
         first_output_timeout: Duration::from_secs(3),
         output_chunk_timeout: Duration::from_secs(4),
         output_token_parser_factory: OutputTokenParserFactory,
         tls_cert_pem: None,
         quic_insecure: true,
         tunnel_protocol: TunnelTransportProtocol::Http3,
-        request_observation_tx: None,
+        runtime_state: PylonRuntimeState::default(),
         request_quality_monitor: RequestQualityMonitorConfig::default(),
         sni_override: None,
         auth_token_provider: None,
         retry: PylonRetryConfig::default(),
         queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-        queue_tracker: QueueAdmissionTracker::default(),
         metrics: None,
     };
     assert_eq!(
         reverse_config.upstream_http_base_url,
         "http://127.0.0.1:8001"
+    );
+
+    let default_direct = QuicHttpTunnelConfig::new(
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        "http://upstream".into(),
+    );
+    let default_reverse = ReverseQuicTunnelConfig::new(
+        "stargate.example:50072".into(),
+        "reverse-a".into(),
+        "http://upstream".into(),
+    );
+    assert_eq!(
+        default_direct.max_sse_buffer_bytes,
+        DEFAULT_MAX_SSE_BUFFER_BYTES
+    );
+    assert_eq!(
+        default_reverse.max_sse_buffer_bytes,
+        DEFAULT_MAX_SSE_BUFFER_BYTES
     );
 }

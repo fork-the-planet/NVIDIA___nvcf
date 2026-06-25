@@ -30,19 +30,41 @@ pub struct PodTarget {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TargetSnapshot {
-    pub initialized: bool,
-    pub targets: BTreeMap<String, PodTarget>,
-    pub ready_targets: Vec<PodTarget>,
+    state: TargetSnapshotState,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum TargetSnapshotState {
+    #[default]
+    Uninitialized,
+    Initialized(ReadyTargets),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReadyTargets {
+    by_pod: BTreeMap<String, usize>,
+    ordered: Vec<PodTarget>,
 }
 
 impl TargetSnapshot {
-    pub fn initialized(targets: BTreeMap<String, PodTarget>) -> Self {
-        let ready_targets = targets.values().cloned().collect();
-        Self {
-            initialized: true,
-            targets,
-            ready_targets,
+    pub fn initialized(targets: impl IntoIterator<Item = PodTarget>) -> Self {
+        let deduplicated = targets
+            .into_iter()
+            .map(|target| (target.pod_name.clone(), target))
+            .collect::<BTreeMap<_, _>>();
+        let mut by_pod = BTreeMap::new();
+        let mut ordered = Vec::with_capacity(deduplicated.len());
+        for (pod_name, target) in deduplicated {
+            by_pod.insert(pod_name, ordered.len());
+            ordered.push(target);
         }
+        Self {
+            state: TargetSnapshotState::Initialized(ReadyTargets { by_pod, ordered }),
+        }
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        matches!(self.state, TargetSnapshotState::Initialized(_))
     }
 
     pub fn target_for_pod(&self, pod_name: &str) -> Option<PodTarget> {
@@ -50,7 +72,11 @@ impl TargetSnapshot {
     }
 
     pub fn target_for_pod_ref(&self, pod_name: &str) -> Option<&PodTarget> {
-        self.targets.get(pod_name)
+        let targets = self.ready_targets()?;
+        targets
+            .by_pod
+            .get(pod_name)
+            .and_then(|index| targets.ordered.get(*index))
     }
 
     pub fn first_ready(&self, offset: usize) -> Option<PodTarget> {
@@ -58,15 +84,33 @@ impl TargetSnapshot {
     }
 
     pub fn first_ready_ref(&self, offset: usize) -> Option<&PodTarget> {
-        if self.ready_targets.is_empty() {
+        let targets = self.ready_targets()?;
+        if targets.is_empty() {
             return None;
         }
-        let index = offset % self.ready_targets.len();
-        self.ready_targets.get(index)
+        let index = offset % targets.len();
+        targets.ordered.get(index)
     }
 
     pub fn ready_count(&self) -> usize {
-        self.ready_targets.len()
+        self.ready_targets().map_or(0, ReadyTargets::len)
+    }
+
+    fn ready_targets(&self) -> Option<&ReadyTargets> {
+        match &self.state {
+            TargetSnapshotState::Uninitialized => None,
+            TargetSnapshotState::Initialized(targets) => Some(targets),
+        }
+    }
+}
+
+impl ReadyTargets {
+    fn is_empty(&self) -> bool {
+        self.ordered.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.ordered.len()
     }
 }
 
@@ -81,7 +125,7 @@ pub fn snapshot_from_slices<'a>(
     slices: impl IntoIterator<Item = &'a EndpointSlice>,
     config: &TargetBuildConfig,
 ) -> TargetSnapshot {
-    let mut targets = BTreeMap::new();
+    let mut targets = Vec::new();
     for slice in slices {
         if !slice_belongs_to_service(slice, &config.service_name) {
             continue;
@@ -101,7 +145,7 @@ pub fn snapshot_from_slices<'a>(
             let Some(target) = target_from_endpoint(endpoint, grpc_port, quic_port) else {
                 continue;
             };
-            targets.insert(target.pod_name.clone(), target);
+            targets.push(target);
         }
     }
     TargetSnapshot::initialized(targets)
@@ -241,20 +285,86 @@ mod tests {
     }
 
     fn many_targets(count: usize) -> TargetSnapshot {
-        let targets = (0..count)
+        let targets: Vec<_> = (0..count)
             .map(|index| {
                 let pod_name = format!("stargate-{index}");
-                (
-                    pod_name.clone(),
-                    PodTarget {
-                        pod_name,
-                        grpc_addr: format!("10.0.0.{index}:50071"),
-                        quic_addr: format!("10.0.0.{index}:50072"),
-                    },
-                )
+                PodTarget {
+                    pod_name,
+                    grpc_addr: format!("10.0.0.{index}:50071"),
+                    quic_addr: format!("10.0.0.{index}:50072"),
+                }
             })
             .collect();
         TargetSnapshot::initialized(targets)
+    }
+
+    #[test]
+    fn initialized_snapshot_owns_one_stable_ready_target_sequence() {
+        let snapshot = TargetSnapshot::initialized(vec![
+            PodTarget {
+                pod_name: "stargate-1".to_string(),
+                grpc_addr: "10.0.0.11:50071".to_string(),
+                quic_addr: "10.0.0.11:50072".to_string(),
+            },
+            PodTarget {
+                pod_name: "stargate-0".to_string(),
+                grpc_addr: "10.0.0.10:50071".to_string(),
+                quic_addr: "10.0.0.10:50072".to_string(),
+            },
+        ]);
+
+        assert!(snapshot.is_initialized());
+        assert_eq!(
+            snapshot
+                .first_ready_ref(0)
+                .map(|target| target.pod_name.as_str()),
+            Some("stargate-0")
+        );
+        assert_eq!(
+            snapshot
+                .first_ready_ref(1)
+                .map(|target| target.pod_name.as_str()),
+            Some("stargate-1")
+        );
+        assert_eq!(
+            snapshot
+                .target_for_pod_ref("stargate-1")
+                .map(|target| target.grpc_addr.as_str()),
+            Some("10.0.0.11:50071")
+        );
+        assert!(std::ptr::eq(
+            snapshot
+                .first_ready_ref(1)
+                .expect("ordered target should exist"),
+            snapshot
+                .target_for_pod_ref("stargate-1")
+                .expect("named target should exist")
+        ));
+        assert!(!TargetSnapshot::default().is_initialized());
+    }
+
+    #[test]
+    fn initialized_snapshot_normalizes_duplicate_pods_by_last_observation() {
+        let snapshot = TargetSnapshot::initialized([
+            PodTarget {
+                pod_name: "stargate-0".to_string(),
+                grpc_addr: "10.0.0.10:50071".to_string(),
+                quic_addr: "10.0.0.10:50072".to_string(),
+            },
+            PodTarget {
+                pod_name: "stargate-0".to_string(),
+                grpc_addr: "10.0.0.11:50071".to_string(),
+                quic_addr: "10.0.0.11:50072".to_string(),
+            },
+        ]);
+
+        assert_eq!(snapshot.ready_count(), 1);
+        assert_eq!(
+            snapshot
+                .target_for_pod_ref("stargate-0")
+                .map(|target| target.grpc_addr.as_str()),
+            Some("10.0.0.11:50071")
+        );
     }
 
     #[test]
@@ -274,7 +384,7 @@ mod tests {
 
         let snapshot = snapshot_from_slices([&slice], &config());
 
-        assert!(snapshot.initialized);
+        assert!(snapshot.is_initialized());
         assert_eq!(
             snapshot.target_for_pod("stargate-0"),
             Some(PodTarget {
@@ -328,7 +438,7 @@ mod tests {
 
         let snapshot = snapshot_from_slices([&slice], &config());
 
-        assert!(snapshot.targets.is_empty());
+        assert_eq!(snapshot.ready_count(), 0);
     }
 
     #[test]
@@ -353,7 +463,7 @@ mod tests {
 
         let snapshot = snapshot_from_slices([&slice], &config());
 
-        assert!(snapshot.targets.is_empty());
+        assert_eq!(snapshot.ready_count(), 0);
     }
 
     #[test]

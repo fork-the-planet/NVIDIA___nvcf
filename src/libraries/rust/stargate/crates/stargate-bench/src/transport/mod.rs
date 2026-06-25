@@ -14,6 +14,7 @@
 // limitations under the License.
 
 mod artifacts;
+mod command;
 mod config;
 mod custom;
 mod http3;
@@ -37,6 +38,7 @@ use tokio::sync::oneshot;
 use crate::statistics::{DistributionStats, NoiseClassification};
 
 pub use artifacts::write_transport_benchmark_artifacts;
+pub use command::run_transport_benchmark_command;
 pub use config::TransportBenchConfig;
 pub use report::render_transport_benchmark_report;
 pub use trials::run_transport_benchmark;

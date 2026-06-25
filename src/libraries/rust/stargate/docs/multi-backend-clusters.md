@@ -21,15 +21,32 @@ Pylon supports `--cluster-id`; default is `--inference-server-id`.
 
 ```text
 (routing_key, model_id)
-  -> cluster_id
-     -> active backend_id set
-     -> aggregated cluster snapshot
+  -> active target generation
+     -> active backend count
+     -> cluster_id
+        -> exact registration-cluster generation
+        -> shared immutable backend publications
+           -> exact registration generation
+           -> exported routing data
+        -> aggregated cluster snapshot
 
 backend_id
-  -> registration stream
+  -> exact running registration
   -> QUIC/reverse tunnel delivery target
-  -> latest per-model backend snapshot
+  -> latest per-model backend publication
 ```
+
+Target cluster membership, active-backend count, and final retirement change
+as one generation. The final empty generation retires while its top-level map
+entry is exclusively owned; a stale registration update retries against the
+replacement target instead of publishing into detached state.
+
+Overlapping registrations in one `(routing_key, cluster_id)` scope share one
+registration-cluster generation. It retires at the true zero-registration
+boundary and owns that cluster lifetime's coordinated calibration. Routed
+cleanup matches exact registration and cluster-generation identity, so delayed
+cleanup cannot remove a same-ID replacement or mix a fresh cluster lifetime
+with retired routing state.
 
 Proxy flow:
 
@@ -37,9 +54,13 @@ Proxy flow:
 request
   -> find active clusters for RoutingTargetKey
   -> load balancer chooses cluster_id
-  -> state round-robins an active backend_id in that cluster
-  -> proxy over that backend's QUIC path
+  -> state round-robins a shared immutable backend publication in that cluster
+  -> proxy and same-backend retries retain that exact publication
 ```
+
+A later heartbeat replaces the stored backend publication. In-flight requests
+retain the immutable snapshot they selected, so request routing does not
+deep-clone full backend stats and identity on selection or reconnect retry.
 
 ## Aggregation
 

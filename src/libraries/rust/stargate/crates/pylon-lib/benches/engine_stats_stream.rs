@@ -26,13 +26,12 @@ use axum::{
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::{StreamExt, stream};
 use pylon_lib::{
-    CurrentModelStats, EngineStatsStreamConfig, EngineStatsStreamMode, RequestCounterUpdate,
+    EngineStatsStreamConfig, EngineStatsStreamMode, PylonRuntimeState, RequestCounterUpdate,
     RequestCounterUpdateInput, StatsAggregatorUpdate, StatsCollectorConfig, StatsUpdateSource,
-    parse_engine_stats_line_for_benchmark, request_observation_channel, start_engine_stats_stream,
+    parse_engine_stats_line_for_benchmark, start_engine_stats_stream,
     start_stats_collector_with_engine_stats, stats_aggregator_update_channel,
 };
 use tokio::net::TcpListener;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant as TokioInstant;
 
@@ -126,16 +125,18 @@ async fn ingest_and_apply_request_counters(event_count: u64) -> Duration {
         engine_stats_model_ttl: Duration::from_secs(300),
         ..Default::default()
     };
-    let (_observation_tx, observation_rx) = request_observation_channel(&config);
+    let (runtime_state, observation_rx) = PylonRuntimeState::observed(
+        stargate_proto::pb::InferenceServerStatus::Unknown,
+        &[],
+        config.observation_channel_capacity,
+        None,
+    );
     let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&config);
-    let (model_stats_tx, model_stats_rx) = flume::unbounded();
-    let (stop_tx, stop_rx) = watch::channel(false);
     let collector = start_stats_collector_with_engine_stats(
         config,
         observation_rx,
         Some(stats_update_rx),
-        model_stats_tx,
-        stop_rx,
+        runtime_state.clone(),
     );
 
     let observed_start = TokioInstant::now();
@@ -159,10 +160,9 @@ async fn ingest_and_apply_request_counters(event_count: u64) -> Duration {
             .expect("stats collector should receive benchmark update");
     }
     send_sentinel_updates(&stats_update_tx, observed_start, event_count).await;
-    wait_for_sentinel_snapshot(&model_stats_rx).await;
+    wait_for_sentinel_snapshot(&runtime_state).await;
     let elapsed = started_at.elapsed();
 
-    stop_tx.send(true).expect("collector should receive stop");
     collector.shutdown().await;
     elapsed
 }
@@ -174,16 +174,18 @@ async fn ingest_endpoint_to_collector(events: Arc<Vec<Bytes>>) -> Duration {
         engine_stats_model_ttl: Duration::from_secs(300),
         ..Default::default()
     };
-    let (_observation_tx, observation_rx) = request_observation_channel(&config);
+    let (runtime_state, observation_rx) = PylonRuntimeState::observed(
+        stargate_proto::pb::InferenceServerStatus::Unknown,
+        &[],
+        config.observation_channel_capacity,
+        None,
+    );
     let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(&config);
-    let (model_stats_tx, model_stats_rx) = flume::unbounded();
-    let (stop_tx, stop_rx) = watch::channel(false);
     let collector = start_stats_collector_with_engine_stats(
         config,
         observation_rx,
         Some(stats_update_rx),
-        model_stats_tx,
-        stop_rx.clone(),
+        runtime_state.clone(),
     );
     let (base_url, endpoint) = start_stats_endpoint(events.clone()).await;
     let mut stream_config = EngineStatsStreamConfig::new(
@@ -193,14 +195,13 @@ async fn ingest_endpoint_to_collector(events: Arc<Vec<Bytes>>) -> Duration {
     );
     stream_config.initial_reconnect_backoff = Duration::from_secs(60);
     stream_config.max_reconnect_backoff = Duration::from_secs(60);
-    let stream = start_engine_stats_stream(stream_config, stats_update_tx, stop_rx)
+    let stream = start_engine_stats_stream(stream_config, stats_update_tx)
         .expect("benchmark stats stream should start");
 
     let started_at = Instant::now();
-    wait_for_sentinel_snapshot(&model_stats_rx).await;
+    wait_for_sentinel_snapshot(&runtime_state).await;
     let elapsed = started_at.elapsed();
 
-    stop_tx.send(true).expect("collector should receive stop");
     stream.shutdown().await;
     collector.shutdown().await;
     endpoint.abort();
@@ -313,14 +314,15 @@ async fn send_sentinel_updates(
         .expect("stats collector should receive sentinel finish");
 }
 
-async fn wait_for_sentinel_snapshot(model_stats_rx: &flume::Receiver<(String, CurrentModelStats)>) {
+async fn wait_for_sentinel_snapshot(runtime_state: &PylonRuntimeState) {
     let receive_sentinel = async {
+        let mut poll = tokio::time::interval(Duration::from_millis(1));
         loop {
-            let (_model_id, stats) = model_stats_rx
-                .recv_async()
-                .await
-                .expect("stats collector should publish benchmark snapshot");
-            if stats.max_output_tps >= SENTINEL_OUTPUT_TPS {
+            poll.tick().await;
+            if runtime_state
+                .model_stats("model-a")
+                .is_some_and(|stats| stats.max_output_tps >= SENTINEL_OUTPUT_TPS)
+            {
                 break;
             }
         }

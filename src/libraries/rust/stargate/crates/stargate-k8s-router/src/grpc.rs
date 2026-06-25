@@ -373,7 +373,6 @@ pub async fn serve_grpc_router(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::hint::black_box;
     use std::net::SocketAddr;
     use std::sync::Mutex;
@@ -560,39 +559,22 @@ mod tests {
     }
 
     fn snapshot(targets: &[(&str, SocketAddr)]) -> TargetSnapshot {
-        TargetSnapshot::initialized(
-            targets
-                .iter()
-                .map(|(pod, addr)| {
-                    (
-                        (*pod).to_string(),
-                        PodTarget {
-                            pod_name: (*pod).to_string(),
-                            grpc_addr: addr.to_string(),
-                            quic_addr: "127.0.0.1:50072".to_string(),
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>(),
-        )
+        TargetSnapshot::initialized(targets.iter().map(|(pod, addr)| PodTarget {
+            pod_name: (*pod).to_string(),
+            grpc_addr: addr.to_string(),
+            quic_addr: "127.0.0.1:50072".to_string(),
+        }))
     }
 
     fn synthetic_snapshot(count: usize) -> TargetSnapshot {
-        TargetSnapshot::initialized(
-            (0..count)
-                .map(|index| {
-                    let pod_name = format!("stargate-{index}");
-                    (
-                        pod_name.clone(),
-                        PodTarget {
-                            pod_name,
-                            grpc_addr: format!("10.0.0.{index}:50071"),
-                            quic_addr: format!("10.0.0.{index}:50072"),
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>(),
-        )
+        TargetSnapshot::initialized((0..count).map(|index| {
+            let pod_name = format!("stargate-{index}");
+            PodTarget {
+                pod_name,
+                grpc_addr: format!("10.0.0.{index}:50071"),
+                quic_addr: format!("10.0.0.{index}:50072"),
+            }
+        }))
     }
 
     fn request_with_authority(host: &str) -> Request<()> {
@@ -979,8 +961,7 @@ mod tests {
 
     #[tokio::test]
     async fn registration_returns_unavailable_for_unready_target_pod() {
-        let (router_addr, shutdown, router) =
-            start_router(TargetSnapshot::initialized(BTreeMap::new())).await;
+        let (router_addr, shutdown, router) = start_router(TargetSnapshot::initialized([])).await;
 
         let mut client =
             connect_with_authority(router_addr, "stargate-9.stargate.external", 50071).await;
@@ -997,8 +978,7 @@ mod tests {
 
     #[tokio::test]
     async fn watch_stargates_returns_unavailable_for_unready_target_pod() {
-        let (router_addr, shutdown, router) =
-            start_router(TargetSnapshot::initialized(BTreeMap::new())).await;
+        let (router_addr, shutdown, router) = start_router(TargetSnapshot::initialized([])).await;
 
         let mut client =
             connect_with_authority(router_addr, "stargate-9.stargate.external", 50071).await;

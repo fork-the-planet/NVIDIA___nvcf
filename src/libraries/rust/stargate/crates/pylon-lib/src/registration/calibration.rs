@@ -33,6 +33,7 @@ use crate::stats::PylonMetrics;
 
 use super::CLUSTER_CALIBRATION_SUBMISSION_TIMEOUT;
 use super::grpc_endpoint::{StargateGrpcEndpoint, connect_stargate_grpc_channel};
+use super::topology::RegistrationRouterTopology;
 
 #[derive(Debug, Clone)]
 pub(super) struct ClusterCalibrationExecutorTaskConfig {
@@ -43,15 +44,33 @@ pub(super) struct ClusterCalibrationExecutorTaskConfig {
     pub(super) bringup: BringupConfig,
     pub(super) metrics: Option<Arc<PylonMetrics>>,
     pub(super) auth_token_provider: Option<Arc<AuthTokenProvider>>,
-    pub(super) cancel_token: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ClusterCalibrationDirective {
-    pub(super) router_endpoint: StargateGrpcEndpoint,
-    pub(super) model_id: String,
-    pub(super) state: ClusterCalibrationDirectiveState,
-    pub(super) assignment_token: String,
+pub(super) enum ClusterCalibrationDirective {
+    Model {
+        router_endpoint: StargateGrpcEndpoint,
+        model_id: String,
+        state: ClusterCalibrationDirectiveState,
+        assignment_token: String,
+    },
+    RouterDisconnected {
+        router_endpoint: StargateGrpcEndpoint,
+    },
+}
+
+impl ClusterCalibrationDirective {
+    fn from_model_directive(
+        router_endpoint: &StargateGrpcEndpoint,
+        directive: ModelCalibrationDirective,
+    ) -> Option<Self> {
+        Some(Self::Model {
+            router_endpoint: router_endpoint.clone(),
+            model_id: directive.model_id,
+            state: cluster_calibration_directive_state(directive.state)?,
+            assignment_token: directive.assignment_token,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,25 +133,25 @@ impl RouterCalibrationWork {
         }
     }
 
-    fn owns_task(&self, id: TaskId) -> bool {
+    fn active_task(&self) -> Option<&OwnedCalibrationTask> {
         match self {
-            Self::Sweeping { task, .. } => task.id == id,
-            Self::PendingSubmission {
-                task: Some(task), ..
-            } => task.id == id,
-            Self::PendingSubmission { task: None, .. } => false,
-            Self::Submitted { .. } => false,
+            Self::Sweeping { task, .. } => Some(task),
+            Self::PendingSubmission { task, .. } => task.as_ref(),
+            Self::Submitted { .. } => None,
+        }
+    }
+
+    fn into_active_task(self) -> Option<OwnedCalibrationTask> {
+        match self {
+            Self::Sweeping { task, .. } => Some(task),
+            Self::PendingSubmission { task, .. } => task,
+            Self::Submitted { .. } => None,
         }
     }
 
     fn abort(self) {
-        match self {
-            Self::Sweeping { task, .. } => task.abort(),
-            Self::PendingSubmission {
-                task: Some(task), ..
-            } => task.abort(),
-            Self::PendingSubmission { task: None, .. } => {}
-            Self::Submitted { .. } => {}
+        if let Some(task) = self.into_active_task() {
+            task.abort();
         }
     }
 }
@@ -154,7 +173,8 @@ pub(super) struct CompletedCalibrationSubmission {
 pub(super) async fn run_cluster_calibration_executor(
     task_config: ClusterCalibrationExecutorTaskConfig,
     directive_rx: flume::Receiver<ClusterCalibrationDirective>,
-    mut active_calibration_routers: watch::Receiver<BTreeSet<StargateGrpcEndpoint>>,
+    mut router_topology_rx: watch::Receiver<RegistrationRouterTopology>,
+    cancel_token: tokio_util::sync::CancellationToken,
 ) {
     let ClusterCalibrationExecutorTaskConfig {
         inference_server_id,
@@ -164,7 +184,6 @@ pub(super) async fn run_cluster_calibration_executor(
         bringup,
         metrics,
         auth_token_provider,
-        cancel_token,
     } = task_config;
     let mut work = HashMap::<RouterCalibrationKey, RouterCalibrationWork>::new();
     let mut sweep_tasks = JoinSet::<CompletedCalibrationSweep>::new();
@@ -181,13 +200,17 @@ pub(super) async fn run_cluster_calibration_executor(
                 submission_tasks.abort_all();
                 return;
             }
-            changed = active_calibration_routers.changed() => {
+            changed = router_topology_rx.changed() => {
                 if changed.is_err() {
                     sweep_tasks.abort_all();
                     submission_tasks.abort_all();
                     return;
                 }
-                let active_routers = active_calibration_routers.borrow().clone();
+                let active_routers = router_topology_rx
+                    .borrow_and_update()
+                    .published_routers()
+                    .cloned()
+                    .unwrap_or_default();
                 cancel_removed_router_calibration_work(&mut work, &active_routers);
             }
             directive = directive_rx.recv_async() => {
@@ -196,28 +219,41 @@ pub(super) async fn run_cluster_calibration_executor(
                     submission_tasks.abort_all();
                     return;
                 };
+                let (router_endpoint, model_id, state, assignment_token) = match directive {
+                    ClusterCalibrationDirective::Model {
+                        router_endpoint,
+                        model_id,
+                        state,
+                        assignment_token,
+                    } => (router_endpoint, model_id, state, assignment_token),
+                    ClusterCalibrationDirective::RouterDisconnected { router_endpoint } => {
+                        cancel_router_calibration_work_for_router(&mut work, &router_endpoint);
+                        continue;
+                    }
+                };
                 let key = (
-                    directive.router_endpoint.clone(),
-                    directive.model_id.clone(),
+                    router_endpoint.clone(),
+                    model_id,
                 );
-                if !active_calibration_routers
+                if !router_topology_rx
                     .borrow()
-                    .contains(&directive.router_endpoint)
+                    .published_routers()
+                    .is_some_and(|routers| routers.contains(&router_endpoint))
                 {
                     cancel_router_calibration_work(&mut work, &key);
                     continue;
                 }
-                match directive.state {
-                    ClusterCalibrationDirectiveState::Run if !directive.assignment_token.is_empty() => {
+                match state {
+                    ClusterCalibrationDirectiveState::Run if !assignment_token.is_empty() => {
                         let assignment_is_running_or_pending = work
                             .get(&key)
-                            .is_some_and(|state| state.assignment_token() == directive.assignment_token);
+                            .is_some_and(|state| state.assignment_token() == assignment_token);
                         if !assignment_is_running_or_pending {
                             cancel_router_calibration_work(&mut work, &key);
                             let state = start_assigned_calibration_sweep(
                                 &mut sweep_tasks,
                                 key.clone(),
-                                directive.assignment_token,
+                                assignment_token,
                                 &upstream_http_base_url,
                                 &bringup,
                                 metrics.as_ref(),
@@ -275,7 +311,7 @@ pub(super) async fn run_cluster_calibration_executor(
                         };
                     }
                     Some(Err(error)) if !error.is_cancelled() => {
-                        remove_panicked_calibration_work(&mut work, error.id());
+                        handle_panicked_calibration_task(&mut work, error.id());
                         tracing::warn!(error = %error, "assigned cluster calibration task failed unexpectedly");
                     }
                     Some(Err(_)) | None => {}
@@ -287,7 +323,7 @@ pub(super) async fn run_cluster_calibration_executor(
                         finish_pending_cluster_calibration_submission(&mut work, completed);
                     }
                     Some(Err(error)) if !error.is_cancelled() => {
-                        remove_panicked_calibration_work(&mut work, error.id());
+                        handle_panicked_calibration_task(&mut work, error.id());
                         tracing::warn!(error = %error, "cluster calibration submission task failed unexpectedly");
                     }
                     Some(Err(_)) | None => {}
@@ -429,6 +465,20 @@ fn cancel_router_calibration_work(
     }
 }
 
+fn cancel_router_calibration_work_for_router(
+    work: &mut HashMap<RouterCalibrationKey, RouterCalibrationWork>,
+    router_endpoint: &StargateGrpcEndpoint,
+) {
+    let keys = work
+        .keys()
+        .filter(|(endpoint, _model_id)| endpoint == router_endpoint)
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in keys {
+        cancel_router_calibration_work(work, &key);
+    }
+}
+
 fn cancel_removed_router_calibration_work(
     work: &mut HashMap<RouterCalibrationKey, RouterCalibrationWork>,
     active_routers: &BTreeSet<StargateGrpcEndpoint>,
@@ -443,14 +493,28 @@ fn cancel_removed_router_calibration_work(
     }
 }
 
-fn remove_panicked_calibration_work(
+pub(super) fn handle_panicked_calibration_task(
     work: &mut HashMap<RouterCalibrationKey, RouterCalibrationWork>,
     task_id: TaskId,
 ) {
-    let failed_key = work
-        .iter()
-        .find_map(|(key, state)| state.owns_task(task_id).then(|| key.clone()));
-    if let Some(failed_key) = failed_key {
+    let failed_key = work.iter().find_map(|(key, state)| {
+        state
+            .active_task()
+            .is_some_and(|task| task.id == task_id)
+            .then(|| key.clone())
+    });
+    let Some(failed_key) = failed_key else {
+        return;
+    };
+    let should_remove = match work.get_mut(&failed_key) {
+        Some(RouterCalibrationWork::PendingSubmission { task, .. }) => {
+            *task = None;
+            false
+        }
+        Some(_) => true,
+        None => false,
+    };
+    if should_remove {
         work.remove(&failed_key);
     }
 }
@@ -524,19 +588,42 @@ pub(super) async fn publish_cluster_calibration_directives(
     tx: &flume::Sender<ClusterCalibrationDirective>,
     router_endpoint: &StargateGrpcEndpoint,
     directives: Vec<ModelCalibrationDirective>,
+    stop: &tokio_util::sync::CancellationToken,
+) -> bool {
+    stop.run_until_cancelled(send_cluster_calibration_directives(
+        tx,
+        router_endpoint,
+        directives,
+    ))
+    .await
+    .is_some()
+}
+
+pub(super) async fn publish_router_calibration_disconnect(
+    tx: &flume::Sender<ClusterCalibrationDirective>,
+    router_endpoint: &StargateGrpcEndpoint,
+    stop: &tokio_util::sync::CancellationToken,
+) -> bool {
+    stop.run_until_cancelled(
+        tx.send_async(ClusterCalibrationDirective::RouterDisconnected {
+            router_endpoint: router_endpoint.clone(),
+        }),
+    )
+    .await
+    .is_some_and(|result| result.is_ok())
+}
+
+async fn send_cluster_calibration_directives(
+    tx: &flume::Sender<ClusterCalibrationDirective>,
+    router_endpoint: &StargateGrpcEndpoint,
+    directives: Vec<ModelCalibrationDirective>,
 ) {
-    for directive in directives {
-        let Some(state) = cluster_calibration_directive_state(directive.state) else {
-            continue;
-        };
-        let _ = tx
-            .send_async(ClusterCalibrationDirective {
-                router_endpoint: router_endpoint.clone(),
-                model_id: directive.model_id,
-                state,
-                assignment_token: directive.assignment_token,
-            })
-            .await;
+    for directive in directives.into_iter().filter_map(|directive| {
+        ClusterCalibrationDirective::from_model_directive(router_endpoint, directive)
+    }) {
+        if tx.send_async(directive).await.is_err() {
+            return;
+        }
     }
 }
 

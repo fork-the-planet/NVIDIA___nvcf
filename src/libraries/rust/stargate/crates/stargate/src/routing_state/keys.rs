@@ -19,11 +19,6 @@ pub struct RoutingTargetKey {
     pub model_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DeliveryTarget {
-    Local { inference_server_id: String },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistrationIdentity {
     pub(crate) inference_server_id: String,

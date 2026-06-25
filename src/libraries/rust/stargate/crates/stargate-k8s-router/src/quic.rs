@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,57 +64,111 @@ impl QuicRouterRuntimeConfig {
     }
 }
 
+struct QuicRouterRuntime {
+    endpoint: Endpoint,
+    bound_addr: SocketAddr,
+    relay_config: RelayEndpointConfig,
+    relay_endpoints: Arc<RelayEndpoints>,
+    config: Arc<QuicRouterRuntimeConfig>,
+}
+
+impl QuicRouterRuntime {
+    fn bind(config: QuicRouterConfig) -> Result<Self> {
+        let relay_config = RelayEndpointConfig {
+            max_idle_timeout: config.relay_max_idle_timeout,
+            keep_alive_interval: config.relay_keep_alive_interval,
+        };
+        let server_config = build_server_config(
+            config.tls_cert_pem.as_deref(),
+            config.tls_key_pem.as_deref(),
+            relay_config,
+        )?;
+        let endpoint = Endpoint::server(server_config, config.listen_addr)?;
+        let bound_addr = endpoint.local_addr()?;
+        let client_config =
+            build_client_config(config.tls_cert_pem.as_deref(), config.quic_insecure)?;
+        let relay_endpoints = Arc::new(build_relay_endpoints(relay_config, client_config)?);
+        let config = Arc::new(QuicRouterRuntimeConfig::new(config));
+
+        Ok(Self {
+            endpoint,
+            bound_addr,
+            relay_config,
+            relay_endpoints,
+            config,
+        })
+    }
+
+    async fn serve(
+        self,
+        targets: watch::Receiver<TargetSnapshot>,
+        metrics: Arc<RouterMetrics>,
+        shutdown: CancellationToken,
+    ) -> Result<()> {
+        self.log_listening();
+        self.accept_loop(targets, metrics, shutdown).await
+    }
+
+    async fn accept_loop(
+        &self,
+        targets: watch::Receiver<TargetSnapshot>,
+        metrics: Arc<RouterMetrics>,
+        shutdown: CancellationToken,
+    ) -> Result<()> {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    self.endpoint.close(0u32.into(), b"shutdown");
+                    return Ok(());
+                }
+                incoming = self.endpoint.accept() => {
+                    let Some(incoming) = incoming else {
+                        warn!("QUIC router endpoint stopped accepting");
+                        return Ok(());
+                    };
+                    self.spawn_dispatch(incoming, targets.clone(), metrics.clone());
+                }
+            }
+        }
+    }
+
+    fn spawn_dispatch(
+        &self,
+        incoming: quinn::Incoming,
+        targets: watch::Receiver<TargetSnapshot>,
+        metrics: Arc<RouterMetrics>,
+    ) {
+        let relay_endpoints = self.relay_endpoints.clone();
+        let config = self.config.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                dispatch_incoming(incoming, targets, relay_endpoints, metrics, config).await
+            {
+                warn!(%error, "QUIC router connection failed");
+            }
+        });
+    }
+
+    fn log_listening(&self) {
+        info!(
+            addr = %self.bound_addr,
+            relay_max_idle_timeout_ms = self.relay_config.max_idle_timeout.as_millis(),
+            relay_keep_alive_interval_ms =
+                self.relay_config.keep_alive_interval.map(|duration| duration.as_millis()),
+            "QUIC router listening"
+        );
+    }
+}
+
 pub async fn serve_quic_router(
     config: QuicRouterConfig,
     targets: watch::Receiver<TargetSnapshot>,
     metrics: Arc<RouterMetrics>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let relay_config = RelayEndpointConfig {
-        max_idle_timeout: config.relay_max_idle_timeout,
-        keep_alive_interval: config.relay_keep_alive_interval,
-    };
-    let server_config = build_server_config(
-        config.tls_cert_pem.as_deref(),
-        config.tls_key_pem.as_deref(),
-        relay_config,
-    )?;
-    let endpoint = Endpoint::server(server_config, config.listen_addr)?;
-    let bound_addr = endpoint.local_addr()?;
-    let client_config = build_client_config(config.tls_cert_pem.as_deref(), config.quic_insecure)?;
-    let relay_endpoints = Arc::new(build_relay_endpoints(relay_config, client_config)?);
-    let config = Arc::new(QuicRouterRuntimeConfig::new(config));
-    info!(
-        addr = %bound_addr,
-        relay_max_idle_timeout_ms = relay_config.max_idle_timeout.as_millis(),
-        relay_keep_alive_interval_ms =
-            relay_config.keep_alive_interval.map(|duration| duration.as_millis()),
-        "QUIC router listening"
-    );
-
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                endpoint.close(0u32.into(), b"shutdown");
-                return Ok(());
-            }
-            incoming = endpoint.accept() => {
-                let Some(incoming) = incoming else {
-                    warn!("QUIC router endpoint stopped accepting");
-                    return Ok(());
-                };
-                let targets = targets.clone();
-                let relay_endpoints = relay_endpoints.clone();
-                let metrics = metrics.clone();
-                let config = config.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = dispatch_incoming(incoming, targets, relay_endpoints, metrics, config).await {
-                        warn!(%error, "QUIC router connection failed");
-                    }
-                });
-            }
-        }
-    }
+    QuicRouterRuntime::bind(config)?
+        .serve(targets, metrics, shutdown)
+        .await
 }
 
 async fn dispatch_incoming(
@@ -260,58 +315,98 @@ fn build_client_config(cert_pem: Option<&[u8]>, insecure: bool) -> Result<Client
     )))
 }
 
+#[derive(Debug)]
+struct RouterTlsIdentity<'a> {
+    cert_pem: Cow<'a, [u8]>,
+    key_pem: Cow<'a, [u8]>,
+}
+
+impl<'a> RouterTlsIdentity<'a> {
+    fn from_optional_pem(cert_pem: Option<&'a [u8]>, key_pem: Option<&'a [u8]>) -> Result<Self> {
+        match (cert_pem, key_pem) {
+            (Some(cert_pem), Some(key_pem)) => Ok(Self {
+                cert_pem: Cow::Borrowed(cert_pem),
+                key_pem: Cow::Borrowed(key_pem),
+            }),
+            (Some(_), None) => {
+                anyhow::bail!("router TLS key required when TLS cert is provided");
+            }
+            (None, Some(_)) => {
+                anyhow::bail!("router TLS cert required when TLS key is provided");
+            }
+            (None, None) => {
+                info!("no router TLS cert/key provided, generating self-signed certificate");
+                let (cert_pem, key_pem) = stargate_tls::generate_self_signed_cert()?;
+                Ok(Self {
+                    cert_pem: Cow::Owned(cert_pem),
+                    key_pem: Cow::Owned(key_pem),
+                })
+            }
+        }
+    }
+}
+
 fn build_server_config(
     cert_pem: Option<&[u8]>,
     key_pem: Option<&[u8]>,
     relay_config: RelayEndpointConfig,
 ) -> Result<quinn::ServerConfig> {
-    let (cert_owned, key_owned);
-    let (cert_data, key_data) = match (cert_pem, key_pem) {
-        (Some(c), Some(k)) => (c, k),
-        (Some(_), None) => {
-            anyhow::bail!("router TLS key required when TLS cert is provided");
-        }
-        (None, Some(_)) => {
-            anyhow::bail!("router TLS cert required when TLS key is provided");
-        }
-        _ => {
-            info!("no router TLS cert/key provided, generating self-signed certificate");
-            let (c, k) = stargate_tls::generate_self_signed_cert()?;
-            cert_owned = c;
-            key_owned = k;
-            (cert_owned.as_slice(), key_owned.as_slice())
-        }
-    };
-    let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut &*cert_data)
-            .collect::<std::result::Result<_, _>>()
-            .context("failed to parse router cert PEM")?;
-    let key = rustls_pemfile::private_key(&mut &*key_data)
-        .context("failed to parse router key PEM")?
-        .context("no private key found in router key PEM")?;
+    let identity = RouterTlsIdentity::from_optional_pem(cert_pem, key_pem)?;
+    build_server_config_from_identity(identity, relay_config)
+}
+
+fn build_server_config_from_identity(
+    identity: RouterTlsIdentity<'_>,
+    relay_config: RelayEndpointConfig,
+) -> Result<quinn::ServerConfig> {
+    let cert_chain = parse_router_cert_chain(identity.cert_pem.as_ref())?;
+    let key = parse_router_private_key(identity.key_pem.as_ref())?;
     let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key)
         .context("build router QUIC server config failed")?;
     server_config.transport_config(build_relay_transport_config(relay_config)?);
     Ok(server_config)
 }
 
+fn parse_router_cert_chain(
+    cert_data: &[u8],
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut &*cert_data)
+            .collect::<std::result::Result<_, _>>()
+            .context("failed to parse router cert PEM")?;
+    if cert_chain.is_empty() {
+        anyhow::bail!("no certificate found in router cert PEM");
+    }
+    Ok(cert_chain)
+}
+
+fn parse_router_private_key(key_data: &[u8]) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let key = rustls_pemfile::private_key(&mut &*key_data)
+        .context("failed to parse router key PEM")?
+        .context("no private key found in router key PEM")?;
+    Ok(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::hint::black_box;
     use std::time::Instant;
 
     use crate::endpoints::PodTarget;
     use crate::perf_tests::assert_twenty_percent_faster;
 
-    fn cert_and_key() -> (Vec<u8>, Vec<u8>) {
+    fn install_crypto_provider() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+
+    fn cert_and_key() -> (Vec<u8>, Vec<u8>) {
+        install_crypto_provider();
         stargate_tls::generate_self_signed_cert().expect("self-signed cert should generate")
     }
 
     fn cert_and_key_for_names(names: Vec<String>) -> (Vec<u8>, Vec<u8>) {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        install_crypto_provider();
         stargate_tls::generate_self_signed_cert_for_names(names)
             .expect("self-signed cert should generate")
     }
@@ -331,32 +426,22 @@ mod tests {
     }
 
     fn snapshot_with_quic_target(pod_name: &str, quic_addr: SocketAddr) -> TargetSnapshot {
-        TargetSnapshot::initialized(BTreeMap::from([(
-            pod_name.to_string(),
-            PodTarget {
-                pod_name: pod_name.to_string(),
-                grpc_addr: "127.0.0.1:50071".to_string(),
-                quic_addr: quic_addr.to_string(),
-            },
-        )]))
+        TargetSnapshot::initialized([PodTarget {
+            pod_name: pod_name.to_string(),
+            grpc_addr: "127.0.0.1:50071".to_string(),
+            quic_addr: quic_addr.to_string(),
+        }])
     }
 
     fn synthetic_snapshot(count: usize) -> TargetSnapshot {
-        TargetSnapshot::initialized(
-            (0..count)
-                .map(|index| {
-                    let pod_name = format!("stargate-{index}");
-                    (
-                        pod_name.clone(),
-                        PodTarget {
-                            pod_name,
-                            grpc_addr: format!("10.0.0.{index}:50071"),
-                            quic_addr: format!("10.0.0.{index}:50072"),
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>(),
-        )
+        TargetSnapshot::initialized((0..count).map(|index| {
+            let pod_name = format!("stargate-{index}");
+            PodTarget {
+                pod_name,
+                grpc_addr: format!("10.0.0.{index}:50071"),
+                quic_addr: format!("10.0.0.{index}:50072"),
+            }
+        }))
     }
 
     fn server_config_from_pem(
@@ -468,6 +553,54 @@ mod tests {
             .expect_err("cert should be required");
 
         assert!(error.to_string().contains("TLS cert required"));
+    }
+
+    #[test]
+    fn quic_server_config_builds_with_provided_cert_key() {
+        let (cert, key) = cert_and_key();
+
+        let result = build_server_config(
+            Some(cert.as_slice()),
+            Some(key.as_slice()),
+            RelayEndpointConfig::default(),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn quic_server_config_generates_self_signed_identity_when_tls_absent() {
+        let result = build_server_config(None, None, RelayEndpointConfig::default());
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn quic_server_config_rejects_invalid_cert_pem() {
+        let (_, key) = cert_and_key();
+
+        let error = build_server_config(
+            Some(b"not a cert"),
+            Some(key.as_slice()),
+            RelayEndpointConfig::default(),
+        )
+        .expect_err("invalid cert PEM should be rejected");
+
+        assert!(error.to_string().contains("no certificate found"));
+    }
+
+    #[test]
+    fn quic_server_config_rejects_invalid_key_pem() {
+        let (cert, _) = cert_and_key();
+
+        let error = build_server_config(
+            Some(cert.as_slice()),
+            Some(b"not a key"),
+            RelayEndpointConfig::default(),
+        )
+        .expect_err("invalid key PEM should be rejected");
+
+        assert!(error.to_string().contains("no private key found"));
     }
 
     #[test]
@@ -604,6 +737,24 @@ mod tests {
             build_client_config(None, true).expect("insecure relay client config"),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn quic_router_cancellation_stops_after_startup() {
+        install_crypto_provider();
+        let (_targets_tx, targets_rx) = watch::channel(TargetSnapshot::default());
+        let metrics = Arc::new(RouterMetrics::new().expect("router metrics"));
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            serve_quic_router(test_config(), targets_rx, metrics, shutdown),
+        )
+        .await
+        .expect("router should observe cancellation");
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

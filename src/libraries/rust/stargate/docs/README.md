@@ -21,7 +21,6 @@ humans from ingesting every document when only one topic is relevant.
 | Benchmark runner, benchmark scenarios, or performance evidence | [Benchmarks](benchmarks/README.md) | [Testing](testing/README.md) |
 | Release, change-control, or operator runbooks | [Operations](operations/README.md) | [Architecture](architecture/README.md) |
 | Repo documentation organization or agent-readable docs | [Docs best practices](docs-best-practices.md) | [Architecture](architecture/README.md), [Testing](testing/README.md), [Operations](operations/README.md) |
-| Planning repo documentation improvements | [Stargate docs improvement plan](stargate-docs-improvement-plan.md) | [Docs best practices](docs-best-practices.md) |
 
 ## Current Versus Historical
 

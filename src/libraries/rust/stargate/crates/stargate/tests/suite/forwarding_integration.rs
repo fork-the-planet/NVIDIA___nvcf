@@ -13,7 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Integration tests for backend-facing forwarding across two stargates.
+// Integration tests for the development-only backend-facing peer relay across
+// two stargates.
 // Registration fanout gives each stargate local routing state; HTTP proxy
 // requests themselves remain local and are never forwarded between peers.
 // Matrix: {1,2} backends x {direct-quic, reverse-tunnel} x 2 stargates.
@@ -24,8 +25,8 @@ use std::time::Duration;
 
 use crate::common::{
     BackendHandle, MapResolver, assert_model_routing, base_config, bind_ephemeral,
-    bind_ephemeral_udp, init_crypto, start_and_register_backend, wait_for_routing,
-    wait_for_unroutable, with_proxy_headers,
+    bind_ephemeral_udp, init_crypto, localhost_reverse_tunnel_config, start_and_register_backend,
+    wait_for_routing, wait_for_unroutable, with_proxy_headers,
 };
 use stargate::runtime::{StargateHandle, StargateRuntime};
 use stargate_forwarding::ForwardingResolver;
@@ -69,7 +70,8 @@ impl TwoStargates {
     }
 }
 
-/// Two stargates with backend-facing gRPC forwarding (no reverse tunnel).
+/// Two stargates with development-only backend-facing gRPC relay coverage
+/// (no reverse tunnel).
 async fn two_stargates_direct_quic() -> TwoStargates {
     let (grpc_a, grpc_listener_a) = bind_ephemeral();
     let (grpc_b, grpc_listener_b) = bind_ephemeral();
@@ -118,7 +120,8 @@ async fn two_stargates_direct_quic() -> TwoStargates {
     }
 }
 
-/// Two stargates with backend-facing gRPC and QUIC forwarding (reverse tunnel enabled).
+/// Two stargates with development-only backend-facing gRPC and QUIC relay
+/// coverage (reverse tunnel enabled).
 async fn two_stargates_reverse_tunnel() -> TwoStargates {
     let (grpc_a, grpc_listener_a) = bind_ephemeral();
     let (grpc_b, grpc_listener_b) = bind_ephemeral();
@@ -142,8 +145,7 @@ async fn two_stargates_reverse_tunnel() -> TwoStargates {
     let discovery_a = crate::common::SharedDiscovery::new("sg-a", grpc_a, http_a, peers.clone());
     let mut config_a = base_config("sg-a", grpc_a, http_a);
     config_a.dns_poll_interval = Duration::from_secs(1);
-    config_a.advertised_hostname_template = Some("localhost".to_string());
-    config_a.reverse_tunnel_listen_addr = Some(reverse_a);
+    config_a.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_a));
     let runtime_a = StargateRuntime::new(config_a, Box::new(discovery_a))
         .with_forwarding(resolver_a)
         .with_grpc_listener(grpc_listener_a)
@@ -153,8 +155,7 @@ async fn two_stargates_reverse_tunnel() -> TwoStargates {
     let discovery_b = crate::common::SharedDiscovery::new("sg-b", grpc_b, http_b, peers.clone());
     let mut config_b = base_config("sg-b", grpc_b, http_b);
     config_b.dns_poll_interval = Duration::from_secs(1);
-    config_b.advertised_hostname_template = Some("localhost".to_string());
-    config_b.reverse_tunnel_listen_addr = Some(reverse_b);
+    config_b.reverse_tunnel = Some(localhost_reverse_tunnel_config(reverse_b));
     let runtime_b = StargateRuntime::new(config_b, Box::new(discovery_b))
         .with_forwarding(resolver_b)
         .with_grpc_listener(grpc_listener_b)

@@ -57,8 +57,9 @@ pub(super) fn ensure_rustls_provider() {
 /// Falls back to `"stargate"` if the host is an IP address or localhost.
 pub(super) fn derive_sni(target_addr: &str) -> String {
     let host = target_addr
-        .rsplit_once(':')
-        .map(|(h, _)| h)
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(']').map(|(host, _)| host))
+        .or_else(|| target_addr.rsplit_once(':').map(|(host, _)| host))
         .unwrap_or(target_addr);
     if host.parse::<std::net::IpAddr>().is_ok() || host == "localhost" {
         "stargate".to_string()
@@ -120,17 +121,8 @@ pub(super) fn build_trusted_client_config(
         );
     }
     let cert_data = cert_pem.context("TLS cert required when --quic-insecure is not set")?;
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut &*cert_data) {
-        roots
-            .add(cert.context("failed to parse cert PEM")?)
-            .context("failed to add cert to root store")?;
-    }
-    let mut tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls_config.alpn_protocols = tunnel_protocol.alpn_protocols();
-    Ok(quinn::ClientConfig::new(std::sync::Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)?,
-    )))
+    stargate_tls::build_trusted_quic_client_config_with_alpn(
+        cert_data,
+        tunnel_protocol.alpn_protocols(),
+    )
 }

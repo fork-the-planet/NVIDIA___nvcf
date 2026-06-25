@@ -324,8 +324,9 @@ mod tests {
 
     use super::*;
     use crate::output_token_parser::OutputTokenParserFactory;
-    use crate::queue_admission::{PylonQueueMismatchRetryConfig, QueueAdmissionTracker};
+    use crate::queue_admission::PylonQueueMismatchRetryConfig;
     use crate::request_quality_monitor::RequestQualityMonitorConfig;
+    use crate::runtime_state::PylonRuntimeState;
 
     fn test_app() -> TunnelServerApp {
         TunnelServerApp {
@@ -333,14 +334,14 @@ mod tests {
             inference_server_id: "inst-a".to_string(),
             upstream_http_base_url: "http://127.0.0.1:1".to_string(),
             max_request_body_bytes: 8,
+            max_sse_buffer_bytes: 1024,
             first_output_timeout: Duration::from_secs(1),
             output_chunk_timeout: Duration::from_secs(1),
             output_token_parser_factory: OutputTokenParserFactory,
-            request_observation_tx: None,
+            runtime_state: PylonRuntimeState::default(),
             request_quality_monitor: RequestQualityMonitorConfig::default(),
             retry: PylonRetryConfig::default(),
             queue_mismatch_retry: PylonQueueMismatchRetryConfig::default(),
-            queue_tracker: QueueAdmissionTracker::default(),
             metrics: None,
             #[cfg(test)]
             webtransport_stream_header_wait_tx: None,

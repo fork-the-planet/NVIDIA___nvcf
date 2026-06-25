@@ -17,9 +17,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::common::sse::{assert_sse_done, json_events, parse_sse_events};
 use crate::common::{
-    DummyState, SelfDiscovery, base_config, bind_ephemeral, dummy_chat, init_crypto,
-    make_stargate_runtime, make_stargate_runtime_with_lb, start_dummy_inst, wait_for_routing,
+    DummyState, SelfDiscovery, TunnelTestCase, base_config, bind_ephemeral, dummy_chat,
+    init_crypto, make_stargate_runtime, make_stargate_runtime_for_tunnel_case,
+    make_stargate_runtime_with_lb, start_dummy_inst, wait_for_routing,
     wait_for_routing_with_cache_affinity, wait_until, with_proxy_headers,
 };
 use axum::Router;
@@ -31,9 +33,9 @@ use axum::routing::{get, post};
 use prometheus::{Encoder, TextEncoder};
 use pylon_lib::{
     BringupConfig, CurrentModelStats, InferenceServerRegistrationClient,
-    InferenceServerRegistrationConfig, OutputTokenParserFactory, QueueAdmissionTracker,
+    InferenceServerRegistrationConfig, OutputTokenParserFactory, PylonRuntimeState,
     QuicHttpTunnelConfig, QuicHttpTunnelHandle, RequestObservation, RequestObservationEndpoint,
-    RequestObservationState, start_quic_http_tunnel,
+    RequestObservationState, TunnelTransportProtocol, start_quic_http_tunnel,
 };
 use stargate::proxy::ProxyRetryConfig;
 use stargate::routing::RoutingTargetKey;
@@ -69,6 +71,83 @@ fn metric_sample_value(metrics: &str, metric_name: &str, label_fragments: &[&str
             None
         }
     })
+}
+
+fn metric_sum_value(metrics: &str, metric_name: &str, label_fragments: &[&str]) -> f64 {
+    metrics
+        .lines()
+        .filter_map(|line| {
+            let (sample, value) = line.rsplit_once(' ')?;
+            let name = sample.split('{').next().unwrap_or(sample);
+            if name == metric_name && label_fragments.iter().all(|label| sample.contains(label)) {
+                value.parse::<f64>().ok()
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+#[derive(Clone)]
+struct CapturingChatBackend {
+    addr: std::net::SocketAddr,
+    hits: Arc<AtomicUsize>,
+    bodies: Arc<std::sync::Mutex<Vec<Bytes>>>,
+}
+
+impl CapturingChatBackend {
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+
+    fn bodies(&self) -> Vec<Bytes> {
+        self.bodies.lock().expect("body capture poisoned").clone()
+    }
+}
+
+async fn start_capturing_chat_backend(retryable_rejection: bool) -> CapturingChatBackend {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hits_for_app = hits.clone();
+    let bodies_for_app = bodies.clone();
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(move |req: Request| {
+                let hits = hits_for_app.clone();
+                let bodies = bodies_for_app.clone();
+                async move {
+                    let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                        .await
+                        .expect("capturing backend request body should be readable");
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    bodies.lock().expect("body capture poisoned").push(body);
+                    if retryable_rejection {
+                        let mut response = Response::new(Body::from(r#"{"error":"queue full"}"#));
+                        *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                        response.headers_mut().insert(
+                            HeaderName::from_static("x-stargate-upstream-retryable"),
+                            HeaderValue::from_static("true"),
+                        );
+                        return response;
+                    }
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from(
+                            "data: {\"object\":\"chat.completion.chunk\"}\n\ndata: [DONE]\n\n",
+                        ))
+                        .expect("success response should build")
+                }
+            }),
+        )
+        .route("/health", get(|| async { "ok" }));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    CapturingChatBackend { addr, hits, bodies }
 }
 
 fn make_stargate_runtime_with_retry(
@@ -216,6 +295,85 @@ async fn start_responses_inst(model: &str) -> (std::net::SocketAddr, String, Qui
     (addr, quic_url, tunnel)
 }
 
+async fn start_direct_endpoint_contract_inst(
+    model: &str,
+    protocol: TunnelTransportProtocol,
+) -> (
+    std::net::SocketAddr,
+    String,
+    QuicHttpTunnelHandle,
+    Arc<std::sync::Mutex<Option<EmbeddingsBackendCapture>>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let capture = Arc::new(std::sync::Mutex::new(None));
+    let capture_for_app = capture.clone();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(endpoint_contract_response))
+        .route("/v1/responses", post(endpoint_contract_response))
+        .route(
+            "/v1/embeddings",
+            post(move |req: Request| {
+                let capture = capture_for_app.clone();
+                async move {
+                    let path_and_query = req
+                        .uri()
+                        .path_and_query()
+                        .map(|value| value.as_str().to_string())
+                        .unwrap_or_else(|| "/v1/embeddings".to_string());
+                    let model_header = req
+                        .headers()
+                        .get("x-model")
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned);
+                    let request_id_header = req
+                        .headers()
+                        .get("x-request-id")
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned);
+                    let input_tokens_header = req
+                        .headers()
+                        .get("x-input-tokens")
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned);
+                    let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                        .await
+                        .expect("embedding request body should be readable");
+                    *capture.lock().expect("capture mutex poisoned") =
+                        Some(EmbeddingsBackendCapture {
+                            path_and_query,
+                            body,
+                            model_header,
+                            request_id_header,
+                            input_tokens_header,
+                        });
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"usage":{"prompt_tokens":2,"total_tokens":2}}"#,
+                        ))
+                        .expect("embedding response should build")
+                }
+            }),
+        )
+        .route("/health", get(|| async { "ok" }))
+        .with_state(EndpointContractState {
+            model: model.to_string(),
+        });
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mut config =
+        QuicHttpTunnelConfig::new("127.0.0.1:0".parse().unwrap(), format!("http://{addr}"));
+    config.tunnel_protocol = protocol;
+    let tunnel = start_quic_http_tunnel(config)
+        .await
+        .expect("direct endpoint contract tunnel failed to start");
+    let quic_url = format!("quic://{}", tunnel.listen_addr());
+    (addr, quic_url, tunnel, capture)
+}
+
 #[derive(Clone)]
 struct EndpointContractState {
     model: String,
@@ -341,6 +499,7 @@ fn active_registration_config(
     inference_server_id: &str,
     inference_server_url: String,
     upstream_http_base_url: String,
+    model_id: &str,
 ) -> InferenceServerRegistrationConfig {
     active_registration_config_in_cluster(
         grpc_addr,
@@ -348,7 +507,28 @@ fn active_registration_config(
         "",
         inference_server_url,
         upstream_http_base_url,
+        model_id,
     )
+}
+
+fn active_stale_connection_registration_config(
+    grpc_addr: std::net::SocketAddr,
+    inference_server_id: &str,
+    inference_server_url: String,
+    upstream_http_base_url: String,
+    model_id: &str,
+) -> InferenceServerRegistrationConfig {
+    let mut config = active_registration_config(
+        grpc_addr,
+        inference_server_id,
+        inference_server_url,
+        upstream_http_base_url,
+        model_id,
+    );
+    // Keep the admitted route stable after tunnel shutdown so stale-connection
+    // tests observe the HTTP hot path instead of racing a control-plane heartbeat.
+    config.min_update_interval = Duration::from_secs(60);
+    config
 }
 
 fn active_registration_config_in_cluster(
@@ -357,6 +537,7 @@ fn active_registration_config_in_cluster(
     cluster_id: &str,
     inference_server_url: String,
     upstream_http_base_url: String,
+    model_id: &str,
 ) -> InferenceServerRegistrationConfig {
     InferenceServerRegistrationConfig {
         seeds: vec![grpc_addr.to_string()],
@@ -365,23 +546,797 @@ fn active_registration_config_in_cluster(
         inference_server_url,
         upstream_http_base_url: Some(upstream_http_base_url),
         min_update_interval: Duration::from_millis(100),
-        status: InferenceServerStatus::Active,
         reverse_tunnel: false,
         bringup: BringupConfig {
             enabled: false,
             ..BringupConfig::default()
         },
         output_token_parser_factory: OutputTokenParserFactory::vllm(),
-        request_observation_tx: None,
         request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
         metrics: None,
         retry: pylon_lib::PylonRetryConfig::default(),
         queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-        queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
+        runtime_state: pylon_lib::PylonRuntimeState::new(
+            InferenceServerStatus::Active,
+            &[model_id.to_string()],
+        ),
         auth_token_provider: None,
+        tls_cert_pem: None,
         quic_insecure: true,
         tunnel_protocol: Default::default(),
     }
+}
+
+fn active_registration_config_for_protocol(
+    grpc_addr: std::net::SocketAddr,
+    inference_server_id: &str,
+    inference_server_url: String,
+    upstream_http_base_url: String,
+    model_id: &str,
+    protocol: TunnelTransportProtocol,
+) -> InferenceServerRegistrationConfig {
+    let mut config = active_registration_config(
+        grpc_addr,
+        inference_server_id,
+        inference_server_url,
+        upstream_http_base_url,
+        model_id,
+    );
+    config.tunnel_protocol = protocol;
+    config
+}
+
+fn reverse_registration_config_for_protocol(
+    grpc_addr: std::net::SocketAddr,
+    inference_server_id: &str,
+    cluster_id: &str,
+    upstream_http_base_url: String,
+    protocol: TunnelTransportProtocol,
+    runtime_state: PylonRuntimeState,
+) -> InferenceServerRegistrationConfig {
+    InferenceServerRegistrationConfig {
+        seeds: vec![grpc_addr.to_string()],
+        inference_server_id: inference_server_id.to_string(),
+        cluster_id: cluster_id.to_string(),
+        inference_server_url: upstream_http_base_url.clone(),
+        upstream_http_base_url: Some(upstream_http_base_url),
+        min_update_interval: Duration::from_millis(100),
+        reverse_tunnel: true,
+        bringup: BringupConfig {
+            enabled: false,
+            ..BringupConfig::default()
+        },
+        output_token_parser_factory: OutputTokenParserFactory::vllm(),
+        request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+        metrics: None,
+        retry: pylon_lib::PylonRetryConfig::default(),
+        queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+        runtime_state,
+        auth_token_provider: None,
+        tls_cert_pem: None,
+        quic_insecure: true,
+        tunnel_protocol: protocol,
+    }
+}
+
+#[tokio::test]
+async fn direct_http3_and_webtransport_proxy_supported_endpoint_contracts() {
+    for protocol in [
+        TunnelTransportProtocol::Http3,
+        TunnelTransportProtocol::WebTransport,
+    ] {
+        exercise_direct_protocol_endpoint_contract(protocol).await;
+    }
+}
+
+async fn exercise_direct_protocol_endpoint_contract(protocol: TunnelTransportProtocol) {
+    init_crypto();
+
+    let case = TunnelTestCase::direct(protocol);
+    let id = format!("test-sg-direct-{}-contracts", case.protocol_label());
+    let (grpc_addr, http_addr, reverse_target, runtime) =
+        make_stargate_runtime_for_tunnel_case(&id, case);
+    assert!(
+        reverse_target.is_none(),
+        "direct fixture must not expose a reverse target"
+    );
+    let handle = runtime.start().await.expect("stargate failed to start");
+    let model = format!("direct-{}-contract-model", case.protocol_label());
+    let backend_id = format!("direct-{}-contract-inst", case.protocol_label());
+    let (backend_addr, quic_url, tunnel, embedding_capture) =
+        start_direct_endpoint_contract_inst(&model, protocol).await;
+    let mut reg_client = InferenceServerRegistrationClient::default();
+    reg_client
+        .start(active_registration_config_for_protocol(
+            grpc_addr,
+            &backend_id,
+            quic_url.clone(),
+            format!("http://{backend_addr}"),
+            &model,
+            protocol,
+        ))
+        .expect("registration failed");
+
+    wait_for_routing(http_addr, &model, Duration::from_secs(10)).await;
+
+    let http_client = reqwest::Client::new();
+    let chat_body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "direct transport contract"}],
+        "stream": true,
+    });
+    let chat_response = with_proxy_headers(
+        http_client.post(format!(
+            "http://{http_addr}/v1/chat/completions?transport={}",
+            case.protocol_label()
+        )),
+        &model,
+        &format!("req-direct-{}-chat", case.protocol_label()),
+    )
+    .header("content-type", "application/json")
+    .json(&chat_body)
+    .send()
+    .await
+    .expect("chat contract request failed");
+    assert_eq!(chat_response.status(), StatusCode::OK);
+    assert_eq!(
+        chat_response
+            .headers()
+            .get("x-inference-server-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(backend_id.as_str())
+    );
+    let chat_text = chat_response
+        .text()
+        .await
+        .expect("chat response should be readable");
+    let chat_events = parse_sse_events(&chat_text).expect("chat response should be valid SSE");
+    assert_sse_done(&chat_events);
+    let chat_payloads = json_events(&chat_events);
+    assert!(
+        chat_payloads.iter().any(|payload| {
+            payload["object"] == "chat.completion.chunk"
+                && payload["model"] == model
+                && payload
+                    .pointer("/request/messages/0/content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("direct transport contract")
+        }),
+        "chat SSE payloads did not preserve the request contract: {chat_payloads:#?}"
+    );
+
+    let responses_body = serde_json::json!({
+        "model": model,
+        "input": "direct responses contract",
+        "stream": true,
+    });
+    let responses_response = with_proxy_headers(
+        http_client.post(format!(
+            "http://{http_addr}/v1/responses?transport={}",
+            case.protocol_label()
+        )),
+        &model,
+        &format!("req-direct-{}-responses", case.protocol_label()),
+    )
+    .header("content-type", "application/json")
+    .json(&responses_body)
+    .send()
+    .await
+    .expect("responses contract request failed");
+    assert_eq!(responses_response.status(), StatusCode::OK);
+    assert_eq!(
+        responses_response
+            .headers()
+            .get("x-inference-server-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(backend_id.as_str())
+    );
+    let responses_text = responses_response
+        .text()
+        .await
+        .expect("responses response should be readable");
+    let response_events =
+        parse_sse_events(&responses_text).expect("responses response should be valid SSE");
+    assert!(
+        response_events
+            .iter()
+            .any(|event| event.event_name.as_deref() == Some("response.completed"))
+    );
+    let response_payloads = json_events(&response_events);
+    assert!(
+        response_payloads.iter().any(|payload| {
+            payload["type"] == "response.completed"
+                && payload
+                    .pointer("/response/object")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("response")
+                && payload
+                    .pointer("/response/request/input")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("direct responses contract")
+        }),
+        "responses SSE payloads did not preserve the request contract: {response_payloads:#?}"
+    );
+
+    let embedding_body = Bytes::from(format!(r#"{{"model":"{model}","input":["alpha","beta"]}}"#));
+    let embedding_response = with_proxy_headers(
+        http_client.post(format!(
+            "http://{http_addr}/v1/embeddings?transport={}",
+            case.protocol_label()
+        )),
+        &model,
+        &format!("req-direct-{}-embeddings", case.protocol_label()),
+    )
+    .header("content-type", "application/json")
+    .body(embedding_body.clone())
+    .send()
+    .await
+    .expect("embeddings contract request failed");
+    assert_eq!(embedding_response.status(), StatusCode::OK);
+    assert_eq!(
+        embedding_response
+            .headers()
+            .get("x-inference-server-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(backend_id.as_str())
+    );
+    assert_eq!(
+        embedding_response
+            .bytes()
+            .await
+            .expect("embedding response should be readable"),
+        Bytes::from_static(
+            br#"{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"usage":{"prompt_tokens":2,"total_tokens":2}}"#
+        )
+    );
+    let captured = embedding_capture
+        .lock()
+        .expect("capture mutex poisoned")
+        .clone()
+        .expect("embedding backend should be called");
+    assert_eq!(
+        captured.path_and_query,
+        format!("/v1/embeddings?transport={}", case.protocol_label())
+    );
+    assert_eq!(captured.body, embedding_body);
+    assert_eq!(captured.model_header.as_deref(), Some(model.as_str()));
+    assert_eq!(
+        captured.request_id_header.as_deref(),
+        Some(format!("req-direct-{}-embeddings", case.protocol_label()).as_str())
+    );
+    assert_eq!(captured.input_tokens_header.as_deref(), Some("1"));
+
+    reg_client.stop();
+    tunnel.shutdown().await;
+    handle.begin_shutdown();
+    assert!(handle.wait_for_shutdown(Duration::from_secs(5)).await);
+}
+
+#[tokio::test]
+async fn reverse_custom_http3_webtransport_retryable_rejection_replays_body() {
+    for protocol in [
+        TunnelTransportProtocol::Custom,
+        TunnelTransportProtocol::Http3,
+        TunnelTransportProtocol::WebTransport,
+    ] {
+        exercise_reverse_retryable_rejection(protocol).await;
+    }
+}
+
+async fn exercise_reverse_retryable_rejection(protocol: TunnelTransportProtocol) {
+    init_crypto();
+
+    let case = TunnelTestCase::reverse(protocol);
+    let model = format!("reverse-{}-retry-model", case.protocol_label());
+    let reject_id = format!("reverse-{}-a-reject", case.protocol_label());
+    let success_id = format!("reverse-{}-b-success", case.protocol_label());
+    let (grpc_addr, http_addr, reverse_target, runtime) = make_stargate_runtime_for_tunnel_case(
+        &format!("test-sg-reverse-{}-retry", case.protocol_label()),
+        case,
+    );
+    assert!(
+        reverse_target.is_some(),
+        "reverse fixture must expose a target"
+    );
+    let handle = runtime.start().await.expect("stargate failed to start");
+    let reject_backend = start_capturing_chat_backend(true).await;
+    let success_backend = start_capturing_chat_backend(false).await;
+    let reject_runtime =
+        PylonRuntimeState::new(InferenceServerStatus::Active, std::slice::from_ref(&model));
+    reject_runtime.set_model_stats(
+        model.clone(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 0,
+            ..CurrentModelStats::default()
+        },
+    );
+    let success_runtime =
+        PylonRuntimeState::new(InferenceServerStatus::Active, std::slice::from_ref(&model));
+    success_runtime.set_model_stats(
+        model.clone(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 400,
+            ..CurrentModelStats::default()
+        },
+    );
+    let mut reject_reg = InferenceServerRegistrationClient::default();
+    reject_reg
+        .start(reverse_registration_config_for_protocol(
+            grpc_addr,
+            &reject_id,
+            &format!("reverse-{}-reject-cluster", case.protocol_label()),
+            format!("http://{}", reject_backend.addr),
+            protocol,
+            reject_runtime,
+        ))
+        .expect("reject registration failed");
+    let mut success_reg = InferenceServerRegistrationClient::default();
+    success_reg
+        .start(reverse_registration_config_for_protocol(
+            grpc_addr,
+            &success_id,
+            &format!("reverse-{}-success-cluster", case.protocol_label()),
+            format!("http://{}", success_backend.addr),
+            protocol,
+            success_runtime,
+        ))
+        .expect("success registration failed");
+
+    let target = RoutingTargetKey {
+        routing_key: None,
+        model_id: model.clone(),
+    };
+    wait_until(
+        &format!("reverse {} retry candidates", case.protocol_label()),
+        Duration::from_secs(15),
+        Duration::from_millis(50),
+        || {
+            let state = handle.state();
+            let target = target.clone();
+            async move {
+                let candidates = state.cluster_candidates_for_target(&target).await;
+                if candidates.len() == 2
+                    && candidates
+                        .iter()
+                        .any(|candidate| candidate.stats.queued_input_size == 0)
+                    && candidates
+                        .iter()
+                        .any(|candidate| candidate.stats.queued_input_size == 400)
+                {
+                    Ok(())
+                } else {
+                    Err(format!("candidates={candidates:?}"))
+                }
+            }
+        },
+    )
+    .await;
+
+    let before_metrics = metrics_text(handle.metrics().registry());
+    let request_body = Bytes::from(format!(
+        r#"{{"model":"{model}","messages":[{{"role":"user","content":"replay {}"}}],"stream":true}}"#,
+        case.protocol_label()
+    ));
+    let response = with_proxy_headers(
+        reqwest::Client::new().post(format!("http://{http_addr}/v1/chat/completions")),
+        &model,
+        &format!("req-reverse-{}-retry", case.protocol_label()),
+    )
+    .header("content-type", "application/json")
+    .body(request_body.clone())
+    .send()
+    .await
+    .expect("reverse retry request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-inference-server-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(success_id.as_str())
+    );
+    let success_body = response.text().await.expect("read success body");
+    assert_sse_done(
+        &parse_sse_events(&success_body).expect("successful retry body should be valid SSE"),
+    );
+    assert_eq!(reject_backend.hits(), 1);
+    assert_eq!(success_backend.hits(), 1);
+    assert_eq!(reject_backend.bodies(), vec![request_body.clone()]);
+    assert_eq!(success_backend.bodies(), vec![request_body]);
+
+    let after_metrics = metrics_text(handle.metrics().registry());
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                &format!(r#"inference_server_id="{reject_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                &format!(r#"inference_server_id="{reject_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                &format!(r#"inference_server_id="{success_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                &format!(r#"inference_server_id="{success_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_proxy_retries_total",
+            &[
+                &format!(r#"model="{model}""#),
+                r#"reason="upstream_admission_rejected""#
+            ]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_proxy_retries_total",
+            &[
+                &format!(r#"model="{model}""#),
+                r#"reason="upstream_admission_rejected""#
+            ]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_routing_selections_total",
+            &[&format!(r#"model="{model}""#)]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_routing_selections_total",
+            &[&format!(r#"model="{model}""#)]
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_requests_total",
+            &[&format!(r#"model="{model}""#)]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_requests_total",
+            &[&format!(r#"model="{model}""#)]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_requests_total",
+            &[
+                &format!(r#"inference_server_id="{reject_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_requests_total",
+            &[
+                &format!(r#"inference_server_id="{reject_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ),
+        0.0
+    );
+
+    reject_reg.stop();
+    success_reg.stop();
+    handle.begin_shutdown();
+    assert!(handle.wait_for_shutdown(Duration::from_secs(5)).await);
+}
+
+#[tokio::test]
+async fn reverse_custom_http3_webtransport_queue_mismatch_retries_sibling_before_upstream() {
+    for protocol in [
+        TunnelTransportProtocol::Custom,
+        TunnelTransportProtocol::Http3,
+        TunnelTransportProtocol::WebTransport,
+    ] {
+        exercise_reverse_queue_mismatch(protocol).await;
+    }
+}
+
+async fn exercise_reverse_queue_mismatch(protocol: TunnelTransportProtocol) {
+    init_crypto();
+
+    let case = TunnelTestCase::reverse(protocol);
+    let model = format!("reverse-{}-queue-mismatch-model", case.protocol_label());
+    let reject_id = format!("reverse-{}-a-queue-reject", case.protocol_label());
+    let success_id = format!("reverse-{}-b-queue-success", case.protocol_label());
+    let cluster_id = format!("reverse-{}-queue-cluster", case.protocol_label());
+    let (grpc_addr, http_addr, reverse_target, runtime) = make_stargate_runtime_for_tunnel_case(
+        &format!("test-sg-reverse-{}-queue", case.protocol_label()),
+        case,
+    );
+    assert!(
+        reverse_target.is_some(),
+        "reverse fixture must expose a target"
+    );
+    let handle = runtime.start().await.expect("stargate failed to start");
+    let reject_backend = start_capturing_chat_backend(false).await;
+    let success_backend = start_capturing_chat_backend(false).await;
+    let reject_runtime =
+        PylonRuntimeState::new(InferenceServerStatus::Active, std::slice::from_ref(&model));
+    reject_runtime.set_model_stats(
+        model.clone(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 0,
+            ..CurrentModelStats::default()
+        },
+    );
+    reject_runtime.observe_request(RequestObservation {
+        endpoint: RequestObservationEndpoint::ChatCompletions,
+        request_id: format!("existing-reverse-{}-queue-work", case.protocol_label()),
+        routing_key: None,
+        model_id: model.clone(),
+        priority: 0,
+        input_tokens: 100,
+        embedding_items: 0,
+        embedding_items_observed: false,
+        upstream_status: None,
+        output_messages: 0,
+        output_tokens: 0,
+        output_tokens_explicit: false,
+        output_tokens_from_chunk_usage: false,
+        state: RequestObservationState::UpstreamConnecting,
+        time_to_response_headers: None,
+        time_to_first_output: None,
+        time_to_first_token: None,
+        total_duration: Duration::ZERO,
+    });
+    let success_runtime =
+        PylonRuntimeState::new(InferenceServerStatus::Active, std::slice::from_ref(&model));
+    success_runtime.set_model_stats(
+        model.clone(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 0,
+            ..CurrentModelStats::default()
+        },
+    );
+    let mut reject_reg = InferenceServerRegistrationClient::default();
+    reject_reg
+        .start(reverse_registration_config_for_protocol(
+            grpc_addr,
+            &reject_id,
+            &cluster_id,
+            format!("http://{}", reject_backend.addr),
+            protocol,
+            reject_runtime,
+        ))
+        .expect("queue reject registration failed");
+    let mut success_reg = InferenceServerRegistrationClient::default();
+    success_reg
+        .start(reverse_registration_config_for_protocol(
+            grpc_addr,
+            &success_id,
+            &cluster_id,
+            format!("http://{}", success_backend.addr),
+            protocol,
+            success_runtime,
+        ))
+        .expect("queue success registration failed");
+
+    let target = RoutingTargetKey {
+        routing_key: None,
+        model_id: model.clone(),
+    };
+    wait_until(
+        &format!("reverse {} shared queue candidate", case.protocol_label()),
+        Duration::from_secs(15),
+        Duration::from_millis(50),
+        || {
+            let state = handle.state();
+            let target = target.clone();
+            let cluster_id = cluster_id.clone();
+            async move {
+                let candidates = state.cluster_candidates_for_target(&target).await;
+                if candidates.len() == 1
+                    && candidates[0].cluster_id == cluster_id
+                    && candidates[0].active_backend_count == 2
+                    && candidates[0].stats.queued_input_size == 0
+                {
+                    Ok(())
+                } else {
+                    Err(format!("candidates={candidates:?}"))
+                }
+            }
+        },
+    )
+    .await;
+
+    let before_metrics = metrics_text(handle.metrics().registry());
+    let request_body = Bytes::from(format!(
+        r#"{{"model":"{model}","messages":[{{"role":"user","content":"queue {}"}}],"stream":true}}"#,
+        case.protocol_label()
+    ));
+    let response = with_proxy_headers(
+        reqwest::Client::new().post(format!("http://{http_addr}/v1/chat/completions")),
+        &model,
+        &format!("req-reverse-{}-queue", case.protocol_label()),
+    )
+    .header("content-type", "application/json")
+    .body(request_body.clone())
+    .send()
+    .await
+    .expect("reverse queue mismatch request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-stargate-cluster-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(cluster_id.as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-inference-server-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(success_id.as_str())
+    );
+    let success_body = response.text().await.expect("read success body");
+    assert_sse_done(
+        &parse_sse_events(&success_body).expect("successful retry body should be valid SSE"),
+    );
+    assert_eq!(
+        reject_backend.hits(),
+        0,
+        "queue mismatch must reject before upstream"
+    );
+    assert_eq!(success_backend.hits(), 1);
+    assert_eq!(success_backend.bodies(), vec![request_body]);
+
+    wait_until(
+        &format!(
+            "reverse {} queue reservation release",
+            case.protocol_label()
+        ),
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            let state = handle.state();
+            let target = target.clone();
+            async move {
+                let candidates = state.cluster_candidates_for_target(&target).await;
+                if candidates.len() == 1 && candidates[0].stats.queued_input_size == 0 {
+                    Ok(())
+                } else {
+                    Err(format!("candidates={candidates:?}"))
+                }
+            }
+        },
+    )
+    .await;
+
+    let after_metrics = metrics_text(handle.metrics().registry());
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                &format!(r#"inference_server_id="{reject_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                &format!(r#"inference_server_id="{reject_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                &format!(r#"inference_server_id="{success_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                &format!(r#"inference_server_id="{success_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_proxy_retries_total",
+            &[
+                &format!(r#"model="{model}""#),
+                r#"reason="queue_estimate_mismatch""#
+            ]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_proxy_retries_total",
+            &[
+                &format!(r#"model="{model}""#),
+                r#"reason="queue_estimate_mismatch""#
+            ]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_routing_selections_total",
+            &[&format!(r#"model="{model}""#)]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_routing_selections_total",
+            &[&format!(r#"model="{model}""#)]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_requests_total",
+            &[&format!(r#"model="{model}""#)]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_requests_total",
+            &[&format!(r#"model="{model}""#)]
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_sum_value(
+            &after_metrics,
+            "stargate_requests_total",
+            &[
+                &format!(r#"inference_server_id="{reject_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ) - metric_sum_value(
+            &before_metrics,
+            "stargate_requests_total",
+            &[
+                &format!(r#"inference_server_id="{reject_id}""#),
+                &format!(r#"model="{model}""#)
+            ]
+        ),
+        0.0
+    );
+
+    reject_reg.stop();
+    success_reg.stop();
+    handle.begin_shutdown();
+    assert!(handle.wait_for_shutdown(Duration::from_secs(5)).await);
 }
 
 #[tokio::test]
@@ -394,16 +1349,14 @@ async fn chat_completions_route_proxies_path_query_and_body_through_quic_tunnel(
     let (inst_addr, quic_url, _tunnel) = start_responses_inst("chat-contract-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "chat-contract-inst",
-                quic_url.clone(),
-                format!("http://{inst_addr}"),
-            ),
-            vec!["chat-contract-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "chat-contract-inst",
+            quic_url.clone(),
+            format!("http://{inst_addr}"),
+            "chat-contract-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "chat-contract-model", Duration::from_secs(5)).await;
@@ -453,13 +1406,29 @@ async fn chat_completions_route_proxies_path_query_and_body_through_quic_tunnel(
         "chat-contract-inst"
     );
     let response_text = resp.text().await.expect("response should be text");
-    assert!(response_text.contains(r#""object":"chat.completion.chunk""#));
-    assert!(response_text.contains(r#""model":"chat-contract-model""#));
-    assert!(response_text.contains(r#""path_and_query":"/v1/chat/completions?trace=chat""#));
-    assert!(response_text.contains(r#""content":"contract echo""#));
-    assert!(response_text.contains(r#""content":"contract hello""#));
-    assert!(response_text.contains(r#""stream":true"#));
-    assert!(response_text.contains("[DONE]"));
+    let events = parse_sse_events(&response_text).expect("response should be valid SSE");
+    assert_sse_done(&events);
+    let payloads = json_events(&events);
+    assert!(
+        payloads.iter().any(|payload| {
+            payload["object"] == "chat.completion.chunk"
+                && payload["model"] == "chat-contract-model"
+                && payload["path_and_query"] == "/v1/chat/completions?trace=chat"
+                && payload
+                    .pointer("/choices/0/delta/content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("contract echo")
+                && payload
+                    .pointer("/request/messages/0/content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("contract hello")
+                && payload
+                    .pointer("/request/stream")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        }),
+        "chat SSE payload did not preserve the endpoint contract: {payloads:#?}"
+    );
 
     reg_client.stop();
     handle.begin_shutdown();
@@ -477,16 +1446,14 @@ async fn chat_completions_route_forwards_upstream_error_through_quic_tunnel() {
     let expected_url = quic_url.clone();
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "chat-error-inst",
-                quic_url,
-                format!("http://{inst_addr}"),
-            ),
-            vec!["chat-error-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "chat-error-inst",
+            quic_url,
+            format!("http://{inst_addr}"),
+            "chat-error-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "chat-error-model", Duration::from_secs(5)).await;
@@ -553,16 +1520,14 @@ async fn responses_route_proxies_path_and_query_through_quic_tunnel() {
     let (inst_addr, quic_url, _tunnel) = start_responses_inst("responses-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "responses-inst",
-                quic_url.clone(),
-                format!("http://{inst_addr}"),
-            ),
-            vec!["responses-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "responses-inst",
+            quic_url.clone(),
+            format!("http://{inst_addr}"),
+            "responses-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "responses-model", Duration::from_secs(5)).await;
@@ -613,14 +1578,49 @@ async fn responses_route_proxies_path_and_query_through_quic_tunnel() {
         "responses-inst"
     );
     let response_text = resp.text().await.expect("response should be text");
-    assert!(response_text.contains("event: response.created"));
-    assert!(response_text.contains("event: response.completed"));
-    assert!(response_text.contains(r#""type":"response.completed""#));
-    assert!(response_text.contains(r#""object":"response""#));
-    assert!(response_text.contains(r#""model":"responses-model""#));
-    assert!(response_text.contains(r#""path_and_query":"/v1/responses?trace=1""#));
-    assert!(response_text.contains(r#""input":"hello""#));
-    assert!(response_text.contains(r#""stream":true"#));
+    let events = parse_sse_events(&response_text).expect("response should be valid SSE");
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| event.event_name.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["response.created", "response.completed"]
+    );
+    let payloads = json_events(&events);
+    let completed = payloads
+        .iter()
+        .find(|payload| payload["type"] == "response.completed")
+        .expect("responses stream should include response.completed");
+    assert_eq!(
+        completed
+            .pointer("/response/object")
+            .and_then(serde_json::Value::as_str),
+        Some("response")
+    );
+    assert_eq!(
+        completed
+            .pointer("/response/model")
+            .and_then(serde_json::Value::as_str),
+        Some("responses-model")
+    );
+    assert_eq!(
+        completed
+            .pointer("/response/path_and_query")
+            .and_then(serde_json::Value::as_str),
+        Some("/v1/responses?trace=1")
+    );
+    assert_eq!(
+        completed
+            .pointer("/response/request/input")
+            .and_then(serde_json::Value::as_str),
+        Some("hello")
+    );
+    assert_eq!(
+        completed
+            .pointer("/response/request/stream")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
 
     reg_client.stop();
     handle.begin_shutdown();
@@ -638,16 +1638,14 @@ async fn responses_route_forwards_upstream_error_through_quic_tunnel() {
     let expected_url = quic_url.clone();
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "responses-error-inst",
-                quic_url,
-                format!("http://{inst_addr}"),
-            ),
-            vec!["responses-error-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "responses-error-inst",
+            quic_url,
+            format!("http://{inst_addr}"),
+            "responses-error-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "responses-error-model", Duration::from_secs(5)).await;
@@ -716,16 +1714,14 @@ async fn non_streaming_responses_rejected_by_quic_tunnel() {
     let (inst_addr, quic_url, _tunnel) = start_responses_inst("responses-ns-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "responses-ns-inst",
-                quic_url,
-                format!("http://{inst_addr}"),
-            ),
-            vec!["responses-ns-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "responses-ns-inst",
+            quic_url,
+            format!("http://{inst_addr}"),
+            "responses-ns-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "responses-ns-model", Duration::from_secs(5)).await;
@@ -774,16 +1770,14 @@ async fn embeddings_proxy_forwards_opaque_body() {
     let (inst_addr, quic_url, tunnel, capture) = start_embeddings_inst(embedding_response).await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "embedding-inst",
-                quic_url.clone(),
-                format!("http://{inst_addr}"),
-            ),
-            vec!["embedding-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "embedding-inst",
+            quic_url.clone(),
+            format!("http://{inst_addr}"),
+            "embedding-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "embedding-model", Duration::from_secs(5)).await;
@@ -878,16 +1872,14 @@ async fn embeddings_missing_input_tokens_returns_400_without_upstream() {
     let (inst_addr, quic_url, tunnel, capture) =
         start_embeddings_inst(r#"{"unexpected":true}"#).await;
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "embedding-no-input-inst",
-                quic_url,
-                format!("http://{inst_addr}"),
-            ),
-            vec!["embedding-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "embedding-no-input-inst",
+            quic_url,
+            format!("http://{inst_addr}"),
+            "embedding-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "embedding-model", Duration::from_secs(5)).await;
@@ -928,31 +1920,30 @@ async fn non_streaming_chat_completions_rejected_by_quic_tunnel() {
     let (inst_addr, quic_url, _tunnel) = start_dummy_inst("ns-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "ns-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url,
-                upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["ns-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "ns-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url,
+            upstream_http_base_url: Some(format!("http://{inst_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["ns-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "ns-model", Duration::from_secs(5)).await;
@@ -1021,16 +2012,14 @@ async fn supported_endpoint_required_proxy_headers_are_enforced() {
     let (inst_addr, quic_url, _tunnel) = start_responses_inst("required-header-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "required-header-inst",
-                quic_url,
-                format!("http://{inst_addr}"),
-            ),
-            vec!["required-header-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "required-header-inst",
+            quic_url,
+            format!("http://{inst_addr}"),
+            "required-header-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "required-header-model", Duration::from_secs(5)).await;
@@ -1103,31 +2092,30 @@ async fn response_headers_contain_server_id_and_url() {
     let expected_url = quic_url.clone();
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "hdr-inst".to_string(),
-                cluster_id: "hdr-cluster".to_string(),
-                inference_server_url: quic_url,
-                upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["hdr-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "hdr-inst".to_string(),
+            cluster_id: "hdr-cluster".to_string(),
+            inference_server_url: quic_url,
+            upstream_http_base_url: Some(format!("http://{inst_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["hdr-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "hdr-model", Duration::from_secs(5)).await;
@@ -1188,29 +2176,25 @@ async fn shared_cluster_round_robins_selected_backend_header() {
     let (inst_b_addr, quic_b, tunnel_b) = start_dummy_inst("shared-cluster-model").await;
     let mut reg_a = InferenceServerRegistrationClient::default();
     let mut reg_b = InferenceServerRegistrationClient::default();
-    let _channels_a = reg_a
-        .start(
-            active_registration_config_in_cluster(
-                grpc_addr,
-                "shared-backend-a",
-                "shared-cluster",
-                quic_a,
-                format!("http://{inst_a_addr}"),
-            ),
-            vec!["shared-cluster-model".to_string()],
-        )
+    reg_a
+        .start(active_registration_config_in_cluster(
+            grpc_addr,
+            "shared-backend-a",
+            "shared-cluster",
+            quic_a,
+            format!("http://{inst_a_addr}"),
+            "shared-cluster-model",
+        ))
         .expect("registration a failed");
-    let _channels_b = reg_b
-        .start(
-            active_registration_config_in_cluster(
-                grpc_addr,
-                "shared-backend-b",
-                "shared-cluster",
-                quic_b,
-                format!("http://{inst_b_addr}"),
-            ),
-            vec!["shared-cluster-model".to_string()],
-        )
+    reg_b
+        .start(active_registration_config_in_cluster(
+            grpc_addr,
+            "shared-backend-b",
+            "shared-cluster",
+            quic_b,
+            format!("http://{inst_b_addr}"),
+            "shared-cluster-model",
+        ))
         .expect("registration b failed");
 
     wait_for_routing(http_addr, "shared-cluster-model", Duration::from_secs(5)).await;
@@ -1288,90 +2272,90 @@ async fn transport_local_shared_cluster_failover_stays_within_selected_cluster()
         start_dummy_inst("shared-failover-model").await;
 
     let mut bad_reg = InferenceServerRegistrationClient::default();
-    let bad_channels = bad_reg
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "shared-backend-a-bad".to_string(),
-                cluster_id: "shared-failover-cluster".to_string(),
-                inference_server_url: "quic://127.0.0.1:1".to_string(),
-                upstream_http_base_url: Some("http://127.0.0.1:1".to_string()),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let bad_runtime = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["shared-failover-model".to_string()],
+    );
+    bad_reg
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "shared-backend-a-bad".to_string(),
+            cluster_id: "shared-failover-cluster".to_string(),
+            inference_server_url: "quic://127.0.0.1:1".to_string(),
+            upstream_http_base_url: Some("http://127.0.0.1:1".to_string()),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["shared-failover-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: bad_runtime.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("bad registration failed");
     let mut good_reg = InferenceServerRegistrationClient::default();
-    let good_channels = good_reg
-        .start(
-            active_registration_config_in_cluster(
-                grpc_addr,
-                "shared-backend-b-good",
-                "shared-failover-cluster",
-                good_quic_url,
-                format!("http://{good_addr}"),
-            ),
-            vec!["shared-failover-model".to_string()],
-        )
+    let good_runtime = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["shared-failover-model".to_string()],
+    );
+    let mut good_config = active_registration_config_in_cluster(
+        grpc_addr,
+        "shared-backend-b-good",
+        "shared-failover-cluster",
+        good_quic_url,
+        format!("http://{good_addr}"),
+        "shared-failover-model",
+    );
+    good_config.runtime_state = good_runtime.clone();
+    good_reg
+        .start(good_config)
         .expect("good registration failed");
     let mut other_reg = InferenceServerRegistrationClient::default();
-    let other_channels = other_reg
-        .start(
-            active_registration_config_in_cluster(
-                grpc_addr,
-                "other-cluster-backend",
-                "other-cluster",
-                other_quic_url,
-                format!("http://{other_addr}"),
-            ),
-            vec!["shared-failover-model".to_string()],
-        )
+    let other_runtime = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["shared-failover-model".to_string()],
+    );
+    let mut other_config = active_registration_config_in_cluster(
+        grpc_addr,
+        "other-cluster-backend",
+        "other-cluster",
+        other_quic_url,
+        format!("http://{other_addr}"),
+        "shared-failover-model",
+    );
+    other_config.runtime_state = other_runtime.clone();
+    other_reg
+        .start(other_config)
         .expect("other registration failed");
 
     wait_for_routing(http_addr, "shared-failover-model", Duration::from_secs(5)).await;
 
-    for channels in [&bad_channels, &good_channels] {
-        channels
-            .model_stats
-            .send_async((
-                "shared-failover-model".to_string(),
-                CurrentModelStats {
-                    last_mean_input_tps: 1000.0,
-                    queued_input_size: 0,
-                    ..CurrentModelStats::default()
-                },
-            ))
-            .await
-            .expect("send shared-cluster stats failed");
-    }
-    other_channels
-        .model_stats
-        .send_async((
+    for runtime_state in [&bad_runtime, &good_runtime] {
+        runtime_state.set_model_stats(
             "shared-failover-model".to_string(),
             CurrentModelStats {
                 last_mean_input_tps: 1000.0,
-                queued_input_size: 400,
+                queued_input_size: 0,
                 ..CurrentModelStats::default()
             },
-        ))
-        .await
-        .expect("send other-cluster stats failed");
+        );
+    }
+    other_runtime.set_model_stats(
+        "shared-failover-model".to_string(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 400,
+            ..CurrentModelStats::default()
+        },
+    );
 
     let http_client = reqwest::Client::new();
     let stargate_url = format!("http://{http_addr}/v1/chat/completions");
@@ -1526,91 +2510,79 @@ async fn retryable_upstream_rejection_retries_alternate_backend() {
     let (success_addr, success_quic_url, success_tunnel) = start_dummy_inst("retry-model").await;
 
     let mut reject_reg = InferenceServerRegistrationClient::default();
-    let reject_channels = reject_reg
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "retry-reject".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: reject_quic_url,
-                upstream_http_base_url: Some(format!("http://{reject_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let reject_runtime =
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["retry-model".to_string()]);
+    reject_reg
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "retry-reject".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: reject_quic_url,
+            upstream_http_base_url: Some(format!("http://{reject_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["retry-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: reject_runtime.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("reject registration failed");
 
     let mut success_reg = InferenceServerRegistrationClient::default();
-    let success_channels = success_reg
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "retry-success".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: success_quic_url,
-                upstream_http_base_url: Some(format!("http://{success_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let success_runtime =
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["retry-model".to_string()]);
+    success_reg
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "retry-success".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: success_quic_url,
+            upstream_http_base_url: Some(format!("http://{success_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["retry-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: success_runtime.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("success registration failed");
 
-    reject_channels
-        .model_stats
-        .send_async((
-            "retry-model".to_string(),
-            CurrentModelStats {
-                last_mean_input_tps: 1000.0,
-                queued_input_size: 0,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send reject stats failed");
-    success_channels
-        .model_stats
-        .send_async((
-            "retry-model".to_string(),
-            CurrentModelStats {
-                last_mean_input_tps: 1000.0,
-                queued_input_size: 1,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send success stats failed");
+    reject_runtime.set_model_stats(
+        "retry-model".to_string(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 0,
+            ..CurrentModelStats::default()
+        },
+    );
+    success_runtime.set_model_stats(
+        "retry-model".to_string(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 1,
+            ..CurrentModelStats::default()
+        },
+    );
 
     let http_client = reqwest::Client::new();
     let stargate_url = format!("http://{http_addr}/v1/chat/completions");
@@ -1770,9 +2742,18 @@ async fn queue_estimate_mismatch_retries_alternate_backend_before_upstream() {
         axum::serve(reject_listener, reject_app).await.unwrap();
     });
 
-    let queue_tracker = QueueAdmissionTracker::default();
-    queue_tracker.update_model_throughput("queue-mismatch-model", 100.0);
-    queue_tracker.record_observation(&RequestObservation {
+    let reject_runtime_state = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["queue-mismatch-model".to_string()],
+    );
+    reject_runtime_state.set_model_stats(
+        "queue-mismatch-model",
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            ..CurrentModelStats::default()
+        },
+    );
+    reject_runtime_state.observe_request(RequestObservation {
         endpoint: RequestObservationEndpoint::ChatCompletions,
         request_id: "req-already-queued".to_string(),
         routing_key: None,
@@ -1796,7 +2777,7 @@ async fn queue_estimate_mismatch_retries_alternate_backend_before_upstream() {
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{reject_addr}"),
     );
-    reject_config.queue_tracker = queue_tracker;
+    reject_config.runtime_state = reject_runtime_state.clone();
     let reject_tunnel = start_quic_http_tunnel(reject_config)
         .await
         .expect("queue mismatch tunnel failed to start");
@@ -1806,91 +2787,79 @@ async fn queue_estimate_mismatch_retries_alternate_backend_before_upstream() {
         start_dummy_inst("queue-mismatch-model").await;
 
     let mut reject_reg = InferenceServerRegistrationClient::default();
-    let reject_channels = reject_reg
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "queue-mismatch-reject".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: reject_quic_url,
-                upstream_http_base_url: Some(format!("http://{reject_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    reject_reg
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "queue-mismatch-reject".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: reject_quic_url,
+            upstream_http_base_url: Some(format!("http://{reject_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["queue-mismatch-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: reject_runtime_state.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("reject registration failed");
 
     let mut success_reg = InferenceServerRegistrationClient::default();
-    let success_channels = success_reg
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "queue-mismatch-success".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: success_quic_url,
-                upstream_http_base_url: Some(format!("http://{success_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let success_runtime_state = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["queue-mismatch-model".to_string()],
+    );
+    success_reg
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "queue-mismatch-success".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: success_quic_url,
+            upstream_http_base_url: Some(format!("http://{success_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["queue-mismatch-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: success_runtime_state.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("success registration failed");
 
-    reject_channels
-        .model_stats
-        .send_async((
-            "queue-mismatch-model".to_string(),
-            CurrentModelStats {
-                last_mean_input_tps: 1000.0,
-                queued_input_size: 0,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send reject stats failed");
-    success_channels
-        .model_stats
-        .send_async((
-            "queue-mismatch-model".to_string(),
-            CurrentModelStats {
-                last_mean_input_tps: 1000.0,
-                queued_input_size: 1000,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send success stats failed");
+    reject_runtime_state.set_model_stats(
+        "queue-mismatch-model".to_string(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 0,
+            ..CurrentModelStats::default()
+        },
+    );
+    success_runtime_state.set_model_stats(
+        "queue-mismatch-model".to_string(),
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            queued_input_size: 1000,
+            ..CurrentModelStats::default()
+        },
+    );
     wait_for_routing(http_addr, "queue-mismatch-model", Duration::from_secs(5)).await;
 
     let http_client = reqwest::Client::new();
@@ -2094,9 +3063,18 @@ async fn queue_estimate_mismatch_retries_sibling_in_selected_shared_cluster() {
         axum::serve(reject_listener, reject_app).await.unwrap();
     });
 
-    let queue_tracker = QueueAdmissionTracker::default();
-    queue_tracker.update_model_throughput("queue-mismatch-shared-model", 100.0);
-    queue_tracker.record_observation(&RequestObservation {
+    let reject_runtime_state = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["queue-mismatch-shared-model".to_string()],
+    );
+    reject_runtime_state.set_model_stats(
+        "queue-mismatch-shared-model",
+        CurrentModelStats {
+            last_mean_input_tps: 1000.0,
+            ..CurrentModelStats::default()
+        },
+    );
+    reject_runtime_state.observe_request(RequestObservation {
         endpoint: RequestObservationEndpoint::ChatCompletions,
         request_id: "req-shared-already-queued".to_string(),
         routing_key: None,
@@ -2120,7 +3098,7 @@ async fn queue_estimate_mismatch_retries_sibling_in_selected_shared_cluster() {
         "127.0.0.1:0".parse().unwrap(),
         format!("http://{reject_addr}"),
     );
-    reject_config.queue_tracker = queue_tracker;
+    reject_config.runtime_state = reject_runtime_state.clone();
     let reject_tunnel = start_quic_http_tunnel(reject_config)
         .await
         .expect("queue mismatch tunnel failed to start");
@@ -2128,46 +3106,46 @@ async fn queue_estimate_mismatch_retries_sibling_in_selected_shared_cluster() {
     let (success_addr, success_quic_url, success_tunnel) =
         start_dummy_inst("queue-mismatch-shared-model").await;
 
+    let mut reject_registration_config = active_registration_config_in_cluster(
+        grpc_addr,
+        "queue-mismatch-a-reject",
+        "queue-mismatch-shared-cluster",
+        reject_quic_url,
+        format!("http://{reject_addr}"),
+        "queue-mismatch-shared-model",
+    );
+    reject_registration_config.runtime_state = reject_runtime_state.clone();
     let mut reject_reg = InferenceServerRegistrationClient::default();
-    let reject_channels = reject_reg
-        .start(
-            active_registration_config_in_cluster(
-                grpc_addr,
-                "queue-mismatch-a-reject",
-                "queue-mismatch-shared-cluster",
-                reject_quic_url,
-                format!("http://{reject_addr}"),
-            ),
-            vec!["queue-mismatch-shared-model".to_string()],
-        )
+    reject_reg
+        .start(reject_registration_config)
         .expect("reject registration failed");
     let mut success_reg = InferenceServerRegistrationClient::default();
-    let success_channels = success_reg
-        .start(
-            active_registration_config_in_cluster(
-                grpc_addr,
-                "queue-mismatch-b-success",
-                "queue-mismatch-shared-cluster",
-                success_quic_url,
-                format!("http://{success_addr}"),
-            ),
-            vec!["queue-mismatch-shared-model".to_string()],
-        )
+    let success_runtime_state = PylonRuntimeState::new(
+        InferenceServerStatus::Active,
+        &["queue-mismatch-shared-model".to_string()],
+    );
+    let mut success_registration_config = active_registration_config_in_cluster(
+        grpc_addr,
+        "queue-mismatch-b-success",
+        "queue-mismatch-shared-cluster",
+        success_quic_url,
+        format!("http://{success_addr}"),
+        "queue-mismatch-shared-model",
+    );
+    success_registration_config.runtime_state = success_runtime_state.clone();
+    success_reg
+        .start(success_registration_config)
         .expect("success registration failed");
 
-    for channels in [&reject_channels, &success_channels] {
-        channels
-            .model_stats
-            .send_async((
-                "queue-mismatch-shared-model".to_string(),
-                CurrentModelStats {
-                    last_mean_input_tps: 1000.0,
-                    queued_input_size: 0,
-                    ..CurrentModelStats::default()
-                },
-            ))
-            .await
-            .expect("send shared-cluster stats failed");
+    for runtime_state in [&reject_runtime_state, &success_runtime_state] {
+        runtime_state.set_model_stats(
+            "queue-mismatch-shared-model".to_string(),
+            CurrentModelStats {
+                last_mean_input_tps: 1000.0,
+                queued_input_size: 0,
+                ..CurrentModelStats::default()
+            },
+        );
     }
 
     let target = RoutingTargetKey {
@@ -2190,6 +3168,41 @@ async fn queue_estimate_mismatch_retries_sibling_in_selected_shared_cluster() {
         );
         poll.tick().await;
     }
+
+    let before_metrics = metrics_text(handle.metrics().registry());
+    let before_reject_attempts = metric_sample_value(
+        &before_metrics,
+        "stargate_proxy_attempts_total",
+        &[
+            r#"inference_server_id="queue-mismatch-a-reject""#,
+            r#"model="queue-mismatch-shared-model""#,
+            r#"result="upstream_429""#,
+            r#"routing_key="""#,
+        ],
+    )
+    .unwrap_or_default();
+    let before_success_attempts = metric_sample_value(
+        &before_metrics,
+        "stargate_proxy_attempts_total",
+        &[
+            r#"inference_server_id="queue-mismatch-b-success""#,
+            r#"model="queue-mismatch-shared-model""#,
+            r#"result="upstream_200""#,
+            r#"routing_key="""#,
+        ],
+    )
+    .unwrap_or_default();
+    let before_primary_selections = metric_sample_value(
+        &before_metrics,
+        "stargate_routing_selections_total",
+        &[
+            r#"algorithm="power-of-two""#,
+            r#"model="queue-mismatch-shared-model""#,
+            r#"routing_key="""#,
+            r#"selection="primary""#,
+        ],
+    )
+    .unwrap_or_default();
 
     let http_client = reqwest::Client::new();
     let resp = with_proxy_headers(
@@ -2232,6 +3245,51 @@ async fn queue_estimate_mismatch_retries_sibling_in_selected_shared_cluster() {
         ),
         "missing local mismatch retry counter:\n{metrics}"
     );
+    assert_eq!(
+        metric_sample_value(
+            &metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                r#"inference_server_id="queue-mismatch-a-reject""#,
+                r#"model="queue-mismatch-shared-model""#,
+                r#"result="upstream_429""#,
+                r#"routing_key="""#,
+            ],
+        )
+        .unwrap_or_default(),
+        before_reject_attempts + 1.0,
+        "sibling retry should record the queue-mismatch attempt once:\n{metrics}"
+    );
+    assert_eq!(
+        metric_sample_value(
+            &metrics,
+            "stargate_proxy_attempts_total",
+            &[
+                r#"inference_server_id="queue-mismatch-b-success""#,
+                r#"model="queue-mismatch-shared-model""#,
+                r#"result="upstream_200""#,
+                r#"routing_key="""#,
+            ],
+        )
+        .unwrap_or_default(),
+        before_success_attempts + 1.0,
+        "sibling retry should record the successful attempt once:\n{metrics}"
+    );
+    assert_eq!(
+        metric_sample_value(
+            &metrics,
+            "stargate_routing_selections_total",
+            &[
+                r#"algorithm="power-of-two""#,
+                r#"model="queue-mismatch-shared-model""#,
+                r#"routing_key="""#,
+                r#"selection="primary""#,
+            ],
+        )
+        .unwrap_or_default(),
+        before_primary_selections + 1.0,
+        "retrying a sibling backend must not record a second cluster selection:\n{metrics}"
+    );
 
     reject_reg.stop();
     success_reg.stop();
@@ -2252,34 +3310,14 @@ async fn closed_direct_quic_connection_recovers_on_hot_path() {
     let tunnel_addr = tunnel.listen_addr();
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "reconnect-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url,
-                upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["reconnect-model".to_string()],
-        )
+    reg_client
+        .start(active_stale_connection_registration_config(
+            grpc_addr,
+            "reconnect-inst",
+            quic_url,
+            format!("http://{inst_addr}"),
+            "reconnect-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "reconnect-model", Duration::from_secs(5)).await;
@@ -2396,16 +3434,14 @@ async fn chunked_replay_overflow_records_413_request_metric() {
 
     let (reject_addr, reject_quic_url, reject_tunnel) = start_retryable_rejecting_inst().await;
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "chunk-overflow-reject",
-                reject_quic_url,
-                format!("http://{reject_addr}"),
-            ),
-            vec!["chunk-overflow-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "chunk-overflow-reject",
+            reject_quic_url,
+            format!("http://{reject_addr}"),
+            "chunk-overflow-model",
+        ))
         .expect("registration failed");
 
     let http_client = reqwest::Client::new();
@@ -2465,16 +3501,14 @@ async fn retryable_single_backend_exhausts_eligible_backends() {
 
     let (reject_addr, reject_quic_url, reject_tunnel) = start_retryable_rejecting_inst().await;
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "single-reject",
-                reject_quic_url,
-                format!("http://{reject_addr}"),
-            ),
-            vec!["single-exhaust-model".to_string()],
-        )
+    reg_client
+        .start(active_registration_config(
+            grpc_addr,
+            "single-reject",
+            reject_quic_url,
+            format!("http://{reject_addr}"),
+            "single-exhaust-model",
+        ))
         .expect("registration failed");
 
     let http_client = reqwest::Client::new();
@@ -2545,28 +3579,24 @@ async fn request_retry_limit_returns_last_retryable_rejection() {
         start_retryable_rejecting_inst().await;
 
     let mut reg_a = InferenceServerRegistrationClient::default();
-    let _channels_a = reg_a
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "retry-limit-a",
-                reject_a_quic_url,
-                format!("http://{reject_a_addr}"),
-            ),
-            vec!["retry-limit-model".to_string()],
-        )
+    reg_a
+        .start(active_registration_config(
+            grpc_addr,
+            "retry-limit-a",
+            reject_a_quic_url,
+            format!("http://{reject_a_addr}"),
+            "retry-limit-model",
+        ))
         .expect("registration a failed");
     let mut reg_b = InferenceServerRegistrationClient::default();
-    let _channels_b = reg_b
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "retry-limit-b",
-                reject_b_quic_url,
-                format!("http://{reject_b_addr}"),
-            ),
-            vec!["retry-limit-model".to_string()],
-        )
+    reg_b
+        .start(active_registration_config(
+            grpc_addr,
+            "retry-limit-b",
+            reject_b_quic_url,
+            format!("http://{reject_b_addr}"),
+            "retry-limit-model",
+        ))
         .expect("registration b failed");
 
     let http_client = reqwest::Client::new();
@@ -2632,16 +3662,14 @@ async fn zero_connect_retries_returns_proxy_error_without_reconnect() {
 
     let (inst_addr, quic_url, tunnel) = start_dummy_inst("connect-zero-model").await;
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            active_registration_config(
-                grpc_addr,
-                "connect-zero-inst",
-                quic_url,
-                format!("http://{inst_addr}"),
-            ),
-            vec!["connect-zero-model".to_string()],
-        )
+    reg_client
+        .start(active_stale_connection_registration_config(
+            grpc_addr,
+            "connect-zero-inst",
+            quic_url,
+            format!("http://{inst_addr}"),
+            "connect-zero-model",
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "connect-zero-model", Duration::from_secs(5)).await;
@@ -2727,31 +3755,30 @@ async fn pulsar_missing_cache_affinity_header_returns_400() {
     let (inst_addr, quic_url, _tunnel) = start_dummy_inst("pulsar-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "pulsar-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url,
-                upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["pulsar-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "pulsar-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url,
+            upstream_http_base_url: Some(format!("http://{inst_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["pulsar-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing_with_cache_affinity(
@@ -2816,31 +3843,30 @@ async fn pulsar_missing_input_tokens_header_returns_400() {
     let (inst_addr, quic_url, _tunnel) = start_dummy_inst("pulsar-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "pulsar-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url,
-                upstream_http_base_url: Some(format!("http://{inst_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["pulsar-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "pulsar-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url,
+            upstream_http_base_url: Some(format!("http://{inst_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["pulsar-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing_with_cache_affinity(

@@ -83,127 +83,52 @@ impl<'de> Deserialize<'de> for DegradationActionConfig {
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_map(DegradationActionConfigVisitor)
+        RawDegradationActionConfig::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
-struct DegradationActionConfigVisitor;
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDegradationActionConfig {
+    at_request: usize,
+    backend_index: usize,
+    action: RawDegradationActionName,
+    #[serde(default)]
+    replicas: Option<u32>,
+}
 
-impl<'de> serde::de::Visitor<'de> for DegradationActionConfigVisitor {
-    type Value = DegradationActionConfig;
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawDegradationActionName {
+    DeleteBackendPod,
+    ScaleBackend,
+}
 
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a degradation action")
-    }
+impl TryFrom<RawDegradationActionConfig> for DegradationActionConfig {
+    type Error = &'static str;
 
-    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
-    where
-        M: serde::de::MapAccess<'de>,
-    {
-        let mut at_request = None;
-        let mut backend_index = None;
-        let mut action = None;
-        let mut replicas = None;
-
-        while let Some(field) = map.next_key::<DegradationActionField>()? {
-            match field {
-                DegradationActionField::AtRequest => {
-                    if at_request.replace(map.next_value()?).is_some() {
-                        return Err(serde::de::Error::duplicate_field("at_request"));
-                    }
-                }
-                DegradationActionField::BackendIndex => {
-                    if backend_index.replace(map.next_value()?).is_some() {
-                        return Err(serde::de::Error::duplicate_field("backend_index"));
-                    }
-                }
-                DegradationActionField::Action => {
-                    if action.replace(map.next_value::<String>()?).is_some() {
-                        return Err(serde::de::Error::duplicate_field("action"));
-                    }
-                }
-                DegradationActionField::Replicas => {
-                    if replicas.replace(map.next_value()?).is_some() {
-                        return Err(serde::de::Error::duplicate_field("replicas"));
-                    }
-                }
-            }
-        }
-
-        let at_request = at_request.ok_or_else(|| serde::de::Error::missing_field("at_request"))?;
-        let backend_index =
-            backend_index.ok_or_else(|| serde::de::Error::missing_field("backend_index"))?;
-        let action_name = action.ok_or_else(|| serde::de::Error::missing_field("action"))?;
-        let action = match action_name.as_str() {
-            "delete_backend_pod" => {
-                if replicas.is_some() {
-                    return Err(serde::de::Error::unknown_field(
-                        "replicas",
-                        DEGRADATION_ACTION_FIELDS,
-                    ));
+    fn try_from(raw: RawDegradationActionConfig) -> Result<Self, Self::Error> {
+        let action = match raw.action {
+            RawDegradationActionName::DeleteBackendPod => {
+                if raw.replicas.is_some() {
+                    return Err("replicas is only valid for scale_backend degradation actions");
                 }
                 DegradationActionKind::DeleteBackendPod
             }
-            "scale_backend" => DegradationActionKind::ScaleBackend {
-                replicas: replicas.ok_or_else(|| serde::de::Error::missing_field("replicas"))?,
+            RawDegradationActionName::ScaleBackend => DegradationActionKind::ScaleBackend {
+                replicas: raw
+                    .replicas
+                    .ok_or("scale_backend degradation actions require replicas")?,
             },
-            other => {
-                return Err(serde::de::Error::unknown_variant(
-                    other,
-                    &["delete_backend_pod", "scale_backend"],
-                ));
-            }
         };
 
-        Ok(DegradationActionConfig {
-            at_request,
-            backend_index,
+        Ok(Self {
+            at_request: raw.at_request,
+            backend_index: raw.backend_index,
             action,
         })
-    }
-}
-
-const DEGRADATION_ACTION_FIELDS: &[&str] = &["at_request", "backend_index", "action", "replicas"];
-
-enum DegradationActionField {
-    AtRequest,
-    BackendIndex,
-    Action,
-    Replicas,
-}
-
-impl<'de> Deserialize<'de> for DegradationActionField {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct FieldVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for FieldVisitor {
-            type Value = DegradationActionField;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a degradation action field")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                match value {
-                    "at_request" => Ok(DegradationActionField::AtRequest),
-                    "backend_index" => Ok(DegradationActionField::BackendIndex),
-                    "action" => Ok(DegradationActionField::Action),
-                    "replicas" => Ok(DegradationActionField::Replicas),
-                    other => Err(serde::de::Error::unknown_field(
-                        other,
-                        DEGRADATION_ACTION_FIELDS,
-                    )),
-                }
-            }
-        }
-
-        deserializer.deserialize_identifier(FieldVisitor)
     }
 }
 
@@ -469,9 +394,11 @@ fn validate_traffic_pattern(pattern: &TrafficPatternConfig) -> anyhow::Result<()
             config.cache_affinity_keys > 0,
             "prefix_reuse cache_affinity_keys must be > 0"
         ),
-        TrafficPatternConfig::Uniform(_)
-        | TrafficPatternConfig::ZipfHotset(_)
-        | TrafficPatternConfig::MixedSize(_) => {}
+        TrafficPatternConfig::MixedSize(config) => ensure!(
+            (0.0..=1.0).contains(&config.small_share),
+            "small_share must be in [0, 1]"
+        ),
+        TrafficPatternConfig::Uniform(_) | TrafficPatternConfig::ZipfHotset(_) => {}
     }
     Ok(())
 }
@@ -799,6 +726,63 @@ degradation:
                 },
             ]
         );
+    }
+
+    #[test]
+    fn raw_degradation_action_conversion_preserves_and_rejects_variant_shape() {
+        let raw: RawDegradationActionConfig = serde_yaml_ng::from_str(
+            r#"
+at_request: 5
+backend_index: 1
+action: scale_backend
+replicas: 2
+"#,
+        )
+        .expect("scale action should parse");
+
+        assert_eq!(
+            DegradationActionConfig::try_from(raw).expect("scale action should convert"),
+            DegradationActionConfig {
+                at_request: 5,
+                backend_index: 1,
+                action: DegradationActionKind::ScaleBackend { replicas: 2 },
+            }
+        );
+
+        let missing_replicas: RawDegradationActionConfig = serde_yaml_ng::from_str(
+            r#"
+at_request: 5
+backend_index: 1
+action: scale_backend
+"#,
+        )
+        .expect("raw scale action can parse before variant validation");
+        let missing_replicas = DegradationActionConfig::try_from(missing_replicas)
+            .expect_err("scale action should require replicas");
+        assert!(missing_replicas.to_string().contains("replicas"));
+
+        let delete_with_replicas: RawDegradationActionConfig = serde_yaml_ng::from_str(
+            r#"
+at_request: 5
+backend_index: 1
+action: delete_backend_pod
+replicas: 2
+"#,
+        )
+        .expect("raw delete action can parse before variant validation");
+        let delete_with_replicas = DegradationActionConfig::try_from(delete_with_replicas)
+            .expect_err("delete action should reject replicas");
+        assert!(delete_with_replicas.to_string().contains("replicas"));
+
+        let unknown_action = serde_yaml_ng::from_str::<RawDegradationActionConfig>(
+            r#"
+at_request: 5
+backend_index: 1
+action: pause_backend
+"#,
+        )
+        .expect_err("unknown action should fail");
+        assert!(unknown_action.to_string().contains("pause_backend"));
     }
 
     #[test]

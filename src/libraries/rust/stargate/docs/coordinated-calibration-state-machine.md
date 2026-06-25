@@ -8,8 +8,14 @@ calibration values.
 Scope:
 
 ```text
-(routing_key, cluster_id, model_id) on one Stargate
+registration-cluster generation
+  -> model_id on one Stargate
 ```
+
+Overlapping registrations in one `(routing_key, cluster_id)` scope share the
+same registration-cluster generation. A true zero-registration boundary retires
+that generation; a later registration receives a fresh generation and cannot
+inherit its completed floor.
 
 ## State
 

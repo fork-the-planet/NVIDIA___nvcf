@@ -21,10 +21,10 @@ use stargate_proto::pb::{InferenceServerStatus, ModelStats};
 use super::*;
 use crate::load_balancer::algorithm::MAX_CACHE_AFFINITY_CACHE_KEY_BYTES;
 use crate::load_balancer::groq_multiregion::{
-    GroqMultiregionConfig, GroqMultiregionLoadBalancer, cache_affinity_candidates,
-    cache_affinity_virtual_node_hash,
+    GroqMultiregionConfig, GroqMultiregionLoadBalancer, cache_affinity_candidate_indices,
+    cache_affinity_candidates, cache_affinity_virtual_node_hash, groq_multiregion_ttft_components,
 };
-use crate::load_balancer::pulsar::{PulsarLoadBalancer, pulsar_hash64};
+use crate::load_balancer::pulsar::{PulsarLoadBalancer, pulsar_hash64, pulsar_ranked_indices};
 use crate::routing::{RoutedClusterSnapshot, RoutingTargetKey};
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -111,6 +111,17 @@ fn set_seed_reports_unsupported_algorithms_without_panicking() {
         );
         assert_eq!(config.seed(), None);
     }
+}
+
+#[test]
+fn pulsar_multiregion_seed_has_one_authoritative_owner() {
+    let mut config = LoadBalancerAlgorithmConfig::from(LoadBalancerAlgorithm::PulsarMultiregion);
+    config
+        .multiregion_settings_mut()
+        .expect("pulsar-multiregion should expose multiregion settings")
+        .seed = Some("shared-seed".to_string());
+
+    assert_eq!(config.seed(), Some("shared-seed"));
 }
 
 fn kv_aware_pulsar_algorithm_config(seed: &str) -> LoadBalancerAlgorithmConfig {
@@ -438,6 +449,54 @@ fn algorithm_specific_load_balancer_fields_are_rejected_for_other_algorithms() {
 }
 
 #[test]
+fn detailed_algorithm_configs_preserve_all_variant_identities() {
+    for (raw, expected, expected_seed, considers_kv_free_tokens) in [
+        (
+            r#"{"algorithm":"power-of-two"}"#,
+            LoadBalancerAlgorithm::PowerOfTwo,
+            None,
+            false,
+        ),
+        (
+            r#"{"algorithm":"groq-multiregion","seed":"groq-seed"}"#,
+            LoadBalancerAlgorithm::GroqMultiregion,
+            Some("groq-seed"),
+            false,
+        ),
+        (
+            r#"{"algorithm":"round-robin"}"#,
+            LoadBalancerAlgorithm::RoundRobin,
+            None,
+            false,
+        ),
+        (
+            r#"{"algorithm":"random"}"#,
+            LoadBalancerAlgorithm::Random,
+            None,
+            false,
+        ),
+        (
+            r#"{"algorithm":"pulsar","seed":"pulsar-seed","consider_kv_free_tokens":true}"#,
+            LoadBalancerAlgorithm::Pulsar,
+            Some("pulsar-seed"),
+            true,
+        ),
+        (
+            r#"{"algorithm":"pulsar-multiregion","seed":"hybrid-seed","consider_kv_free_tokens":true}"#,
+            LoadBalancerAlgorithm::PulsarMultiregion,
+            Some("hybrid-seed"),
+            true,
+        ),
+    ] {
+        let config = serde_json::from_str::<LoadBalancerAlgorithmConfig>(raw)
+            .unwrap_or_else(|error| panic!("{expected} config should parse: {error}"));
+        assert_eq!(config.algorithm(), expected);
+        assert_eq!(config.seed(), expected_seed);
+        assert_eq!(config.considers_kv_free_tokens(), considers_kv_free_tokens);
+    }
+}
+
+#[test]
 fn unused_load_balancer_fields_are_rejected() {
     for field in [
         "max_queue_tokens_factor",
@@ -655,16 +714,27 @@ fn request_algorithms_parse_and_override_default_selection() {
     let target = target_with_model("model-a");
     let request = request(&target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
     let algorithm_override = LoadBalancerAlgorithmOverride::parse("round_robin")
         .expect("routing algorithm override should parse");
 
     let first = router
-        .choose_candidate_with_algorithm_override(&request, &candidates, Some(&algorithm_override))
+        .choose_candidate_with_algorithm_override(
+            &target_state,
+            &request,
+            &candidates,
+            Some(&algorithm_override),
+        )
         .expect("routing method should be available")
         .expect("candidate should be selected")
         .choice;
     let second = router
-        .choose_candidate_with_algorithm_override(&request, &candidates, Some(&algorithm_override))
+        .choose_candidate_with_algorithm_override(
+            &target_state,
+            &request,
+            &candidates,
+            Some(&algorithm_override),
+        )
         .expect("routing method should be available")
         .expect("candidate should be selected")
         .choice;
@@ -685,12 +755,13 @@ fn choose_candidate_returns_slice_index_for_selected_cluster() {
     let target = target_with_model("model-a");
     let request = request(&target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
 
     let first = router
-        .choose_candidate(&request, &candidates)
+        .choose_candidate(&target_state, &request, &candidates)
         .expect("candidate should be selected");
     let second = router
-        .choose_candidate(&request, &candidates)
+        .choose_candidate(&target_state, &request, &candidates)
         .expect("candidate should be selected");
 
     assert_eq!(first.candidate_index, 0);
@@ -715,6 +786,7 @@ fn choose_candidate_with_resolution_preserves_algorithm_metadata() {
     let target = target_with_model("model-a");
     let request = request(&target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
     let algorithm_override = LoadBalancerAlgorithmOverride::parse("round_robin")
         .expect("routing algorithm override should parse");
     let resolution = router
@@ -722,7 +794,12 @@ fn choose_candidate_with_resolution_preserves_algorithm_metadata() {
         .expect("routing method should be available");
 
     let selection = router
-        .choose_candidate_with_algorithm_resolution(&request, &candidates, &resolution)
+        .choose_candidate_with_algorithm_resolution(
+            &target_state,
+            &request,
+            &candidates,
+            &resolution,
+        )
         .expect("candidate should be selected");
 
     assert_eq!(selection.choice.candidate_index, 0);
@@ -865,20 +942,22 @@ fn default_round_robin_uses_independent_sequences_per_model() {
         candidate("model-b-1", 1024),
         candidate("model-b-2", 1024),
     ];
+    let model_a_state = LoadBalancerTargetState::default();
+    let model_b_state = LoadBalancerTargetState::default();
     let mut model_a_selected = Vec::new();
     let mut model_b_selected = Vec::new();
 
     for _ in 0..3 {
         model_a_selected.push(
             router
-                .choose_for_test(&model_a_request, &model_a_candidates)
+                .choose_for_test(&model_a_state, &model_a_request, &model_a_candidates)
                 .expect("model-a candidate should be selected")
                 .candidate
                 .cluster_id,
         );
         model_b_selected.push(
             router
-                .choose_for_test(&model_b_request, &model_b_candidates)
+                .choose_for_test(&model_b_state, &model_b_request, &model_b_candidates)
                 .expect("model-b candidate should be selected")
                 .candidate
                 .cluster_id,
@@ -916,20 +995,22 @@ fn default_round_robin_uses_independent_sequences_per_routing_target() {
     let tenant_a_request = request(&tenant_a_target, None, None);
     let tenant_b_request = request(&tenant_b_target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let tenant_a_state = LoadBalancerTargetState::default();
+    let tenant_b_state = LoadBalancerTargetState::default();
     let mut tenant_a_selected = Vec::new();
     let mut tenant_b_selected = Vec::new();
 
     for _ in 0..2 {
         tenant_a_selected.push(
             router
-                .choose_for_test(&tenant_a_request, &candidates)
+                .choose_for_test(&tenant_a_state, &tenant_a_request, &candidates)
                 .expect("tenant-a candidate should be selected")
                 .candidate
                 .cluster_id,
         );
         tenant_b_selected.push(
             router
-                .choose_for_test(&tenant_b_request, &candidates)
+                .choose_for_test(&tenant_b_state, &tenant_b_request, &candidates)
                 .expect("tenant-b candidate should be selected")
                 .candidate
                 .cluster_id,
@@ -944,6 +1025,66 @@ fn default_round_robin_uses_independent_sequences_per_routing_target() {
         tenant_b_selected,
         vec!["cluster-0".to_string(), "cluster-1".to_string()]
     );
+}
+
+#[test]
+fn replacing_target_state_starts_fresh_round_robin_sequence() {
+    let config = LoadBalancerConfig {
+        default: LoadBalancerAlgorithm::RoundRobin,
+        request_algorithms: HashMap::new(),
+        models: HashMap::new(),
+    };
+    let router = LoadBalancerRouter::from_config(&config).expect("router config should parse");
+    let target = target_with_model("model-a");
+    let request = request(&target, None, None);
+    let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
+
+    let first = router
+        .choose_for_test(&target_state, &request, &candidates)
+        .expect("first candidate should be selected");
+    let second = router
+        .choose_for_test(&target_state, &request, &candidates)
+        .expect("second candidate should be selected");
+    let replacement_target_state = LoadBalancerTargetState::default();
+    let replacement_first = router
+        .choose_for_test(&replacement_target_state, &request, &candidates)
+        .expect("replacement target should select a candidate");
+
+    assert_eq!(first.candidate.cluster_id, "cluster-0");
+    assert_eq!(second.candidate.cluster_id, "cluster-1");
+    assert_eq!(replacement_first.candidate.cluster_id, "cluster-0");
+}
+
+#[test]
+fn target_state_distinguishes_independent_router_definitions() {
+    let config = LoadBalancerConfig {
+        default: LoadBalancerAlgorithm::RoundRobin,
+        request_algorithms: HashMap::new(),
+        models: HashMap::new(),
+    };
+    let first_router =
+        LoadBalancerRouter::from_config(&config).expect("first router config should parse");
+    let second_router =
+        LoadBalancerRouter::from_config(&config).expect("second router config should parse");
+    let target = target_with_model("model-a");
+    let request = request(&target, None, None);
+    let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
+
+    let first_router_first = first_router
+        .choose_for_test(&target_state, &request, &candidates)
+        .expect("first router should select a candidate");
+    let second_router_first = second_router
+        .choose_for_test(&target_state, &request, &candidates)
+        .expect("second router should select a candidate");
+    let first_router_second = first_router
+        .choose_for_test(&target_state, &request, &candidates)
+        .expect("first router should advance its sequence");
+
+    assert_eq!(first_router_first.candidate.cluster_id, "cluster-0");
+    assert_eq!(second_router_first.candidate.cluster_id, "cluster-0");
+    assert_eq!(first_router_second.candidate.cluster_id, "cluster-1");
 }
 
 #[test]
@@ -964,20 +1105,22 @@ fn configured_round_robin_uses_independent_sequences_per_routing_target() {
     let tenant_a_request = request(&tenant_a_target, None, None);
     let tenant_b_request = request(&tenant_b_target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let tenant_a_state = LoadBalancerTargetState::default();
+    let tenant_b_state = LoadBalancerTargetState::default();
     let mut tenant_a_selected = Vec::new();
     let mut tenant_b_selected = Vec::new();
 
     for _ in 0..2 {
         tenant_a_selected.push(
             router
-                .choose_for_test(&tenant_a_request, &candidates)
+                .choose_for_test(&tenant_a_state, &tenant_a_request, &candidates)
                 .expect("tenant-a candidate should be selected")
                 .candidate
                 .cluster_id,
         );
         tenant_b_selected.push(
             router
-                .choose_for_test(&tenant_b_request, &candidates)
+                .choose_for_test(&tenant_b_state, &tenant_b_request, &candidates)
                 .expect("tenant-b candidate should be selected")
                 .candidate
                 .cluster_id,
@@ -1005,13 +1148,14 @@ fn choose_with_no_candidates_does_not_cache_default_lb_for_target() {
     let target = target_with_model("unknown-model");
     let request = request(&target, None, None);
     let empty_candidates: Vec<RoutedClusterSnapshot> = Vec::new();
+    let target_state = LoadBalancerTargetState::default();
 
     assert!(
         router
-            .choose_for_test(&request, &empty_candidates)
+            .choose_for_test(&target_state, &request, &empty_candidates)
             .is_none()
     );
-    assert_eq!(router.default_per_target_count(), 0);
+    assert_eq!(target_state.instance_count(), 0);
 }
 
 #[test]
@@ -1025,6 +1169,7 @@ fn request_round_robin_override_uses_stable_per_target_sequence() {
     let target = target_with_model("model-a");
     let request = request(&target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
     let algorithm_override = LoadBalancerAlgorithmOverride::parse("round-robin")
         .expect("routing algorithm override should parse");
     let mut selected = Vec::new();
@@ -1033,6 +1178,7 @@ fn request_round_robin_override_uses_stable_per_target_sequence() {
         selected.push(
             router
                 .choose_candidate_with_algorithm_override(
+                    &target_state,
                     &request,
                     &candidates,
                     Some(&algorithm_override),
@@ -1054,11 +1200,11 @@ fn request_round_robin_override_uses_stable_per_target_sequence() {
             "cluster-0".to_string()
         ]
     );
-    assert_eq!(router.request_per_target_count(), 1);
+    assert_eq!(target_state.instance_count(), 1);
 }
 
 #[test]
-fn configured_request_override_caches_per_target_balancer() {
+fn configured_request_override_creates_target_local_balancer() {
     let config = LoadBalancerConfig {
         default: LoadBalancerAlgorithm::RoundRobin,
         request_algorithms: request_algorithm_map(&[LoadBalancerAlgorithm::PowerOfTwo]),
@@ -1068,11 +1214,17 @@ fn configured_request_override_caches_per_target_balancer() {
     let target = target_with_model("model-a");
     let request = request(&target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
     let algorithm_override = LoadBalancerAlgorithmOverride::parse("power-of-two")
         .expect("routing algorithm override should parse");
 
     let selection = router
-        .choose_candidate_with_algorithm_override(&request, &candidates, Some(&algorithm_override))
+        .choose_candidate_with_algorithm_override(
+            &target_state,
+            &request,
+            &candidates,
+            Some(&algorithm_override),
+        )
         .expect("routing method should be available")
         .expect("candidate should be selected");
 
@@ -1080,7 +1232,7 @@ fn configured_request_override_caches_per_target_balancer() {
         selection.effective_algorithm,
         LoadBalancerAlgorithm::PowerOfTwo
     );
-    assert_eq!(router.request_per_target_count(), 1);
+    assert_eq!(target_state.instance_count(), 1);
 }
 
 #[test]
@@ -1094,21 +1246,27 @@ fn matching_round_robin_override_reuses_configured_target_sequence() {
     let target = target_with_model("model-a");
     let request = request(&target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
     let algorithm_override = LoadBalancerAlgorithmOverride::parse("round-robin")
         .expect("routing algorithm override should parse");
 
     let without_header = router
-        .choose_for_test(&request, &candidates)
+        .choose_for_test(&target_state, &request, &candidates)
         .expect("candidate should be selected")
         .candidate
         .cluster_id;
     let with_header = router
-        .choose_candidate_with_algorithm_override(&request, &candidates, Some(&algorithm_override))
+        .choose_candidate_with_algorithm_override(
+            &target_state,
+            &request,
+            &candidates,
+            Some(&algorithm_override),
+        )
         .expect("routing method should be available")
         .expect("candidate should be selected")
         .choice;
     let without_header_again = router
-        .choose_for_test(&request, &candidates)
+        .choose_for_test(&target_state, &request, &candidates)
         .expect("candidate should be selected")
         .candidate
         .cluster_id;
@@ -1131,11 +1289,14 @@ fn request_round_robin_override_keeps_routing_targets_isolated() {
     let request_a = request(&target_a, None, None);
     let request_b = request(&target_b, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_a_state = LoadBalancerTargetState::default();
+    let target_b_state = LoadBalancerTargetState::default();
     let algorithm_override = LoadBalancerAlgorithmOverride::parse("round-robin")
         .expect("routing algorithm override should parse");
 
     let first_a = router
         .choose_candidate_with_algorithm_override(
+            &target_a_state,
             &request_a,
             &candidates,
             Some(&algorithm_override),
@@ -1145,6 +1306,7 @@ fn request_round_robin_override_keeps_routing_targets_isolated() {
         .choice;
     let first_b = router
         .choose_candidate_with_algorithm_override(
+            &target_b_state,
             &request_b,
             &candidates,
             Some(&algorithm_override),
@@ -1154,6 +1316,7 @@ fn request_round_robin_override_keeps_routing_targets_isolated() {
         .choice;
     let second_a = router
         .choose_candidate_with_algorithm_override(
+            &target_a_state,
             &request_a,
             &candidates,
             Some(&algorithm_override),
@@ -1163,6 +1326,7 @@ fn request_round_robin_override_keeps_routing_targets_isolated() {
         .choice;
     let second_b = router
         .choose_candidate_with_algorithm_override(
+            &target_b_state,
             &request_b,
             &candidates,
             Some(&algorithm_override),
@@ -1193,11 +1357,17 @@ fn request_override_beats_configured_model_algorithm() {
     let target = target_with_model("shared-model");
     let request = request(&target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
     let algorithm_override = LoadBalancerAlgorithmOverride::parse("power_of_two")
         .expect("routing algorithm override should parse");
 
     let selection = router
-        .choose_candidate_with_algorithm_override(&request, &candidates, Some(&algorithm_override))
+        .choose_candidate_with_algorithm_override(
+            &target_state,
+            &request,
+            &candidates,
+            Some(&algorithm_override),
+        )
         .expect("routing method should be available")
         .expect("candidate should be selected");
 
@@ -1274,11 +1444,17 @@ fn known_unavailable_request_override_returns_error() {
     let target = target_with_model("shared-model");
     let request = request(&target, None, None);
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
     let algorithm_override = LoadBalancerAlgorithmOverride::parse("pulsar")
         .expect("routing algorithm override should parse");
 
     let error = router
-        .choose_candidate_with_algorithm_override(&request, &candidates, Some(&algorithm_override))
+        .choose_candidate_with_algorithm_override(
+            &target_state,
+            &request,
+            &candidates,
+            Some(&algorithm_override),
+        )
         .expect_err("unconfigured routing method should fail");
     assert_eq!(
         error,
@@ -1320,9 +1496,10 @@ fn request_excluded_clusters_are_not_selected() {
         ..request(&target, None, None)
     };
     let candidates = vec![candidate("cluster-0", 1024), candidate("cluster-1", 1024)];
+    let target_state = LoadBalancerTargetState::default();
 
     let chosen = router
-        .choose_for_test(&request, &candidates)
+        .choose_for_test(&target_state, &request, &candidates)
         .expect("non-excluded candidate should be selected");
 
     assert_eq!(chosen.candidate.cluster_id, "cluster-1");
@@ -1459,6 +1636,49 @@ fn groq_multiregion_cache_affinity_retry_skips_excluded_primary() {
     }
 
     panic!("expected to find an affinity key with a distinct excluded primary and successor");
+}
+
+#[test]
+fn groq_multiregion_cache_affinity_retry_returns_candidate_slice_indices() {
+    let config = multiregion_runtime_config(groq_multiregion_algorithm_config(|settings| {
+        settings.seed = Some("seed-1".to_string());
+        settings.cache_affinity_virtual_nodes = Some(32);
+        settings.cache_affinity_backend_selection_count = Some(1);
+    }));
+    let target = target();
+    let mut excluded_primary = candidate("excluded-primary", 1024);
+    excluded_primary.rtt = Duration::from_millis(5);
+    let mut affinity_successor = candidate("affinity-successor", 1024);
+    affinity_successor.rtt = Duration::from_millis(100);
+    let mut global_fast = candidate("global-fast", 1024);
+    global_fast.rtt = Duration::from_millis(1);
+    let candidates = vec![excluded_primary, affinity_successor, global_fast];
+    let excluded = HashSet::from(["excluded-primary".to_string()]);
+
+    for idx in 0..8192 {
+        let key = format!("retry-prefix-{idx}");
+        let base_request = request(&target, Some(&key), Some(1));
+        let primary_indices = cache_affinity_candidate_indices(&config, &base_request, &candidates)
+            .expect("cache affinity should select a backend");
+        if candidates[primary_indices[0]].cluster_id != "excluded-primary" {
+            continue;
+        }
+
+        let retry_request = LoadBalancerRequest {
+            excluded_cluster_ids: Some(&excluded),
+            ..base_request
+        };
+        let retry_indices = cache_affinity_candidate_indices(&config, &retry_request, &candidates)
+            .expect("retry should select an affinity successor index");
+        if candidates[retry_indices[0]].cluster_id != "affinity-successor" {
+            continue;
+        }
+
+        assert_eq!(retry_indices, vec![1]);
+        return;
+    }
+
+    panic!("expected to find an affinity key with an excluded primary and successor index");
 }
 
 #[test]
@@ -2468,6 +2688,27 @@ fn groq_multiregion_uses_priority_queue_time_estimate() {
 }
 
 #[test]
+fn groq_multiregion_ttft_estimator_uses_priority_queue_and_ignore_flags() {
+    let mut candidate = candidate("estimated", 1024);
+    candidate.rtt = Duration::from_millis(7);
+    candidate.stats.last_mean_input_tps = 100.0;
+    candidate.stats.queued_input_size = 999;
+    candidate.stats.queue_time_estimate_ms_by_priority = HashMap::from([(4, 25)]);
+
+    let full = groq_multiregion_ttft_components(&candidate, Some(200), 4, false, false);
+    assert_eq!(full.queue_ms, 25.0);
+    assert_eq!(full.ttft_ms, 2032.0);
+
+    let ignore_queue = groq_multiregion_ttft_components(&candidate, Some(200), 4, true, false);
+    assert_eq!(ignore_queue.queue_ms, 25.0);
+    assert_eq!(ignore_queue.ttft_ms, 2007.0);
+
+    let ignore_prefill = groq_multiregion_ttft_components(&candidate, Some(200), 4, false, true);
+    assert_eq!(ignore_prefill.queue_ms, 25.0);
+    assert_eq!(ignore_prefill.ttft_ms, 32.0);
+}
+
+#[test]
 fn groq_multiregion_clamps_priority_to_max_known_queue_time_priority() {
     let lb = create_load_balancer_with_config(&groq_multiregion_algorithm_config(|settings| {
         settings.n = Some(2);
@@ -2571,6 +2812,28 @@ fn pulsar_different_affinity_keys_reach_multiple_backends() {
     assert!(
         seen.len() >= 2,
         "expected at least two different backends across affinity keys, saw {seen:?}"
+    );
+}
+
+#[test]
+fn pulsar_ranking_returns_candidate_slice_indices() {
+    let config = seeded_pulsar_algorithm_config("seed-1");
+    let target = target();
+    let request = request(&target, Some("ranked-prefix"), Some(128));
+    let mut invalid = candidate("invalid", 1024);
+    invalid.stats.last_mean_input_tps = 0.0;
+    let mut slow = candidate("slow", 1024);
+    slow.stats.last_mean_input_tps = 1.0;
+    let mut fast = candidate("fast", 1024);
+    fast.stats.last_mean_input_tps = 10.0;
+    let candidates = vec![invalid, slow, fast];
+
+    let ranking = pulsar_ranked_indices(config.seed(), &request, &candidates);
+
+    assert_eq!(ranking.len(), 2);
+    assert_eq!(
+        ranking.iter().copied().collect::<HashSet<_>>(),
+        HashSet::from([1, 2])
     );
 }
 

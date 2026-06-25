@@ -18,15 +18,12 @@ Use these docs for externally consumed contracts and operator workflows.
 - [Tunnel transport selection](../tunnel-transports.md): deployment-level
   backend tunnel choice and load-balancer requirements.
 - [Release Please layout](../release-please.md): repo-wide release track,
-  generated files, GitHub workflow, and Buildkite tag behavior.
+  generated files, and Buildkite release/tag behavior.
 
 ## Runbooks
 
 - [Troubleshooting](troubleshooting.md): symptom-to-layer map for proxy,
   routing, tunnel, calibration, and stats failures.
-- [StatefulSet pod management policy migration](change-control/statefulset-pod-management-policy.md):
-  one-time migration runbook for immutable Kubernetes StatefulSet policy
-  changes.
 
 ## Related Context
 

@@ -50,6 +50,32 @@ impl SseMessageBuffer {
     fn push_bytes(&mut self, chunk: &[u8]) {
         self.buffer.extend_from_slice(chunk);
     }
+
+    fn push_bytes_limited(
+        &mut self,
+        chunk: &[u8],
+        max_buffer_bytes: usize,
+    ) -> Result<(), SseMessageBufferLimitExceeded> {
+        self.push_bytes(chunk);
+        let buffered_bytes = self.unterminated_event_bytes();
+        if buffered_bytes > max_buffer_bytes {
+            return Err(SseMessageBufferLimitExceeded { buffered_bytes });
+        }
+        Ok(())
+    }
+
+    fn unterminated_event_bytes(&self) -> usize {
+        let mut remaining = self.buffer.as_ref();
+        while let Some(event_end) = find_sse_event_end(remaining) {
+            remaining = &remaining[event_end..];
+        }
+        remaining.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SseMessageBufferLimitExceeded {
+    buffered_bytes: usize,
 }
 
 impl Iterator for SseMessageBuffer {
@@ -76,6 +102,13 @@ pub(crate) enum SseReadTimeoutPhase {
 pub(crate) enum UpstreamSseReadError {
     #[error("timed out waiting for {0:?} SSE message")]
     Timeout(SseReadTimeoutPhase),
+    #[error(
+        "upstream SSE buffer exceeded {max_buffer_bytes} bytes while waiting for an event boundary"
+    )]
+    BufferLimitExceeded {
+        max_buffer_bytes: usize,
+        buffered_bytes: usize,
+    },
     #[error("failed to read upstream SSE bytes: {0}")]
     Upstream(#[source] anyhow::Error),
 }
@@ -87,6 +120,7 @@ pub(crate) fn upstream_sse_message_stream<S>(
     mut byte_stream: S,
     first_output_timeout: Duration,
     output_chunk_timeout: Duration,
+    max_buffer_bytes: usize,
 ) -> UpstreamSseMessageStream
 where
     S: Stream<Item = reqwest::Result<bytes::Bytes>> + Send + Unpin + 'static,
@@ -115,7 +149,14 @@ where
                     if chunk.is_empty() {
                         continue;
                     }
-                    sse_messages.push_bytes(chunk.as_ref());
+                    if let Err(error) =
+                        sse_messages.push_bytes_limited(chunk.as_ref(), max_buffer_bytes)
+                    {
+                        Err(UpstreamSseReadError::BufferLimitExceeded {
+                            max_buffer_bytes,
+                            buffered_bytes: error.buffered_bytes,
+                        })?;
+                    }
                 }
                 Ok(Some(Err(error))) => {
                     Err(UpstreamSseReadError::Upstream(anyhow::Error::new(error)))?;
@@ -214,7 +255,6 @@ fn extract_sse_fields(event_bytes: &[u8]) -> ExtractedSseFields {
 mod tests {
     use super::*;
     use std::hint::black_box;
-    use std::time::Instant;
 
     use crate::output_token_parser::OutputTokenParser;
     use crate::request_quality_monitor::{RequestOutputTokenProgress, RequestQualityRecorder};
@@ -321,9 +361,80 @@ mod tests {
         assert!(delta.message.counts_as_output());
     }
 
+    #[tokio::test]
+    async fn rejects_an_unterminated_event_that_exceeds_the_buffer_limit() {
+        let byte_stream = futures::stream::iter([
+            Ok::<_, reqwest::Error>(Bytes::from_static(b"data: 1234")),
+            Ok::<_, reqwest::Error>(Bytes::from_static(b"5678")),
+        ]);
+        let mut messages = upstream_sse_message_stream(
+            byte_stream,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            11,
+        );
+
+        match messages.next().await {
+            Some(Err(UpstreamSseReadError::BufferLimitExceeded {
+                max_buffer_bytes,
+                buffered_bytes,
+            })) => {
+                assert_eq!(max_buffer_bytes, 11);
+                assert_eq!(buffered_bytes, 14);
+            }
+            unexpected => panic!(
+                "an upstream peer must not keep an unterminated SSE event buffered indefinitely: {unexpected:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_a_large_chunk_when_it_contains_complete_small_events() {
+        let byte_stream = futures::stream::iter([Ok::<_, reqwest::Error>(Bytes::from_static(
+            b"data: one\n\ndata: two\n\n",
+        ))]);
+        let mut messages = upstream_sse_message_stream(
+            byte_stream,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            11,
+        );
+
+        assert_eq!(
+            messages
+                .next()
+                .await
+                .expect("first complete SSE event should be emitted")
+                .expect("first complete SSE event should not fail"),
+            ParsedSseMessage {
+                message: SseMessage::ChatCompletionChunk {
+                    raw_data: "one".to_string(),
+                },
+                raw_event: Bytes::from_static(b"data: one\n\n"),
+            }
+        );
+        assert_eq!(
+            messages
+                .next()
+                .await
+                .expect("second complete SSE event should be emitted")
+                .expect("second complete SSE event should not fail"),
+            ParsedSseMessage {
+                message: SseMessage::ChatCompletionChunk {
+                    raw_data: "two".to_string(),
+                },
+                raw_event: Bytes::from_static(b"data: two\n\n"),
+            }
+        );
+        assert!(
+            messages.next().await.is_none(),
+            "the byte stream should be exhausted after both events"
+        );
+    }
+
     #[test]
     fn sse_peeking_helpers_preserve_token_and_forwarding_accounting() {
-        let input = SseBenchmarkInput::new(8, 37);
+        let input = SseFixture::new(8, 37);
 
         let raw_bytes = raw_forward_only(&input.chunks, 1);
         let peeked = peek_sse_events(&input.chunks, 1);
@@ -339,156 +450,18 @@ mod tests {
         assert_eq!(quality_fallback.output_tokens, input.output_events as u64);
         assert_eq!(fallback.forwarded_bytes, input.total_bytes);
         assert_eq!(quality_fallback.forwarded_bytes, input.total_bytes);
-
-        print_sse_measurement(
-            "tiny_sse_peek_fixture",
-            Duration::from_micros(1),
-            input.total_events,
-            input.total_bytes,
-        );
-        print_sse_improvement(
-            "tiny_sse_peek_fixture",
-            Duration::ZERO,
-            Duration::from_micros(1),
-        );
-        print_sse_improvement(
-            "tiny_sse_peek_fixture",
-            Duration::from_micros(2),
-            Duration::from_micros(1),
-        );
-    }
-
-    #[test]
-    fn sse_peeking_overhead_report_runs_on_tiny_fixture() {
-        run_sse_peeking_overhead(SseBenchmarkInput::new(8, 37), 1);
-    }
-
-    #[test]
-    #[ignore = "benchmark helper; run with --release -- --ignored --nocapture"]
-    fn bench_sse_peeking_overhead() {
-        run_sse_peeking_overhead(SseBenchmarkInput::new(256, 37), 8_192);
-    }
-
-    fn run_sse_peeking_overhead(input: SseBenchmarkInput, repetitions: usize) {
-        let total_events = input.total_events * repetitions;
-        let total_output_events = input.output_events * repetitions;
-        let total_bytes = input.total_bytes * repetitions;
-
-        let raw_started = Instant::now();
-        let raw_bytes = raw_forward_only(&input.chunks, repetitions);
-        let raw_elapsed = raw_started.elapsed();
-
-        let peek_started = Instant::now();
-        let peeked = peek_sse_events(&input.chunks, repetitions);
-        let peek_elapsed = peek_started.elapsed();
-
-        assert_eq!(raw_bytes, total_bytes);
-        assert_eq!(peeked.output_messages, total_output_events);
-        assert_eq!(peeked.output_tokens, total_output_events as u64);
-
-        let fallback_baseline_started = Instant::now();
-        let fallback_baseline = fallback_sse_events(&input.chunks, repetitions, false);
-        let fallback_baseline_elapsed = fallback_baseline_started.elapsed();
-
-        let fallback_optimized_started = Instant::now();
-        let fallback_optimized = fallback_sse_events(&input.chunks, repetitions, false);
-        let fallback_optimized_elapsed = fallback_optimized_started.elapsed();
-
-        assert_eq!(fallback_baseline.output_messages, total_output_events);
-        assert_eq!(fallback_optimized.output_messages, total_output_events);
-        assert_eq!(fallback_baseline.output_tokens, total_output_events as u64);
-        assert_eq!(fallback_optimized.output_tokens, total_output_events as u64);
-        assert_eq!(fallback_baseline.forwarded_bytes, total_bytes);
-        assert_eq!(fallback_optimized.forwarded_bytes, total_bytes);
-
-        let quality_baseline_started = Instant::now();
-        let quality_baseline = fallback_sse_events(&input.chunks, repetitions, true);
-        let quality_baseline_elapsed = quality_baseline_started.elapsed();
-
-        let quality_optimized_started = Instant::now();
-        let quality_optimized = fallback_sse_events(&input.chunks, repetitions, true);
-        let quality_optimized_elapsed = quality_optimized_started.elapsed();
-
-        assert_eq!(quality_baseline.output_messages, total_output_events);
-        assert_eq!(quality_optimized.output_messages, total_output_events);
-        assert_eq!(quality_baseline.output_tokens, total_output_events as u64);
-        assert_eq!(quality_optimized.output_tokens, total_output_events as u64);
-        assert_eq!(quality_baseline.forwarded_bytes, total_bytes);
-        assert_eq!(quality_optimized.forwarded_bytes, total_bytes);
-
-        let raw_ns_per_event = raw_elapsed.as_nanos() as f64 / total_events as f64;
-        let peek_ns_per_event = peek_elapsed.as_nanos() as f64 / total_events as f64;
-        let overhead_ns_per_event = peek_ns_per_event - raw_ns_per_event;
-        let overhead_ratio = peek_elapsed.as_secs_f64() / raw_elapsed.as_secs_f64();
-        let mib = total_bytes as f64 / 1024.0 / 1024.0;
-
-        println!(
-            "sse_peek_bench repetitions={repetitions} events={total_events} bytes={total_bytes}"
-        );
-        println!(
-            "raw_forward_only: {:.3?}, {:.1} ns/event, {:.1} MiB/s",
-            raw_elapsed,
-            raw_ns_per_event,
-            mib / raw_elapsed.as_secs_f64()
-        );
-        println!(
-            "peek_sse_events:  {:.3?}, {:.1} ns/event, {:.1} MiB/s",
-            peek_elapsed,
-            peek_ns_per_event,
-            mib / peek_elapsed.as_secs_f64()
-        );
-        println!(
-            "peek_overhead:    {:.1} ns/event, {:.2}x raw baseline",
-            overhead_ns_per_event, overhead_ratio
-        );
-        print_sse_measurement(
-            "fallback_token_parser_baseline",
-            fallback_baseline_elapsed,
-            total_events,
-            total_bytes,
-        );
-        print_sse_measurement(
-            "fallback_token_parser_optimized",
-            fallback_optimized_elapsed,
-            total_events,
-            total_bytes,
-        );
-        print_sse_improvement(
-            "fallback_token_parser",
-            fallback_baseline_elapsed,
-            fallback_optimized_elapsed,
-        );
-        print_sse_measurement(
-            "quality_enabled_baseline",
-            quality_baseline_elapsed,
-            total_events,
-            total_bytes,
-        );
-        print_sse_measurement(
-            "quality_enabled_optimized",
-            quality_optimized_elapsed,
-            total_events,
-            total_bytes,
-        );
-        print_sse_improvement(
-            "quality_enabled",
-            quality_baseline_elapsed,
-            quality_optimized_elapsed,
-        );
     }
 
     #[derive(Debug)]
-    struct SseBenchmarkInput {
+    struct SseFixture {
         chunks: Vec<Bytes>,
         output_events: usize,
-        total_events: usize,
         total_bytes: usize,
     }
 
-    impl SseBenchmarkInput {
+    impl SseFixture {
         fn new(output_events: usize, fragment_size: usize) -> Self {
             let mut body = Vec::new();
-            let mut total_events = 0usize;
             for index in 1..=output_events {
                 body.extend_from_slice(
                     format!(
@@ -496,16 +469,11 @@ mod tests {
                     )
                     .as_bytes(),
                 );
-                total_events += 1;
-
                 if index % 8 == 0 {
                     body.extend_from_slice(b": keepalive\n\n");
-                    total_events += 1;
                 }
             }
             body.extend_from_slice(b"data: [DONE]\n\n");
-            total_events += 1;
-
             let total_bytes = body.len();
             let chunks = body
                 .chunks(fragment_size)
@@ -515,7 +483,6 @@ mod tests {
             Self {
                 chunks,
                 output_events,
-                total_events,
                 total_bytes,
             }
         }
@@ -595,34 +562,5 @@ mod tests {
             }
         }
         black_box(peeked)
-    }
-
-    fn print_sse_measurement(
-        label: &str,
-        elapsed: std::time::Duration,
-        total_events: usize,
-        total_bytes: usize,
-    ) {
-        let ns_per_event = elapsed.as_nanos() as f64 / total_events as f64;
-        let mib = total_bytes as f64 / 1024.0 / 1024.0;
-        println!(
-            "{label}: {:.3?}, {:.1} ns/event, {:.1} MiB/s",
-            elapsed,
-            ns_per_event,
-            mib / elapsed.as_secs_f64()
-        );
-    }
-
-    fn print_sse_improvement(
-        label: &str,
-        baseline: std::time::Duration,
-        optimized: std::time::Duration,
-    ) {
-        let improvement = if baseline.is_zero() {
-            0.0
-        } else {
-            ((baseline.as_secs_f64() - optimized.as_secs_f64()) / baseline.as_secs_f64()) * 100.0
-        };
-        println!("{label}_improvement: {improvement:.2}%");
     }
 }

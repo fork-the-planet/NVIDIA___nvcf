@@ -26,7 +26,7 @@ use crate::common::{
 };
 use pylon_lib::{
     AuthTokenProvider, BringupConfig, CurrentModelStats, InferenceServerRegistrationClient,
-    InferenceServerRegistrationConfig, OutputTokenParserFactory,
+    InferenceServerRegistrationConfig, OutputTokenParserFactory, PylonRuntimeState,
 };
 use stargate_proto::pb::stargate_control_plane_client::StargateControlPlaneClient;
 use stargate_proto::pb::stargate_model_discovery_client::StargateModelDiscoveryClient;
@@ -34,7 +34,7 @@ use stargate_proto::pb::{InferenceServerStatus, ListModelsRequest, WatchStargate
 use tonic::transport::Channel;
 
 #[tokio::test]
-async fn stats_update_via_channel_propagates() {
+async fn stats_update_via_runtime_state_propagates() {
     init_crypto();
 
     let (grpc_addr, http_addr, runtime) = make_stargate_runtime("test-sg-stats");
@@ -44,111 +44,99 @@ async fn stats_update_via_channel_propagates() {
     let (inst_addr_b, quic_url_b, _tunnel_b) = start_dummy_inst("stats-model").await;
 
     let mut reg_a = InferenceServerRegistrationClient::default();
-    let channels_a = reg_a
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "stats-inst-a".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url_a,
-                upstream_http_base_url: Some(format!("http://{inst_addr_a}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                // Skip calibration so both backends advertise Active immediately;
-                // this test only exercises stats propagation, not bringup.
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let runtime_a =
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["stats-model".to_string()]);
+    reg_a
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "stats-inst-a".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url_a,
+            upstream_http_base_url: Some(format!("http://{inst_addr_a}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            // Skip calibration so both backends advertise Active immediately;
+            // this test only exercises stats propagation, not bringup.
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["stats-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: runtime_a.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     let mut reg_b = InferenceServerRegistrationClient::default();
-    let channels_b = reg_b
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "stats-inst-b".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url_b,
-                upstream_http_base_url: Some(format!("http://{inst_addr_b}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                // Skip calibration so both backends advertise Active immediately;
-                // this test only exercises stats propagation, not bringup.
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    let runtime_b =
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["stats-model".to_string()]);
+    reg_b
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "stats-inst-b".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url_b,
+            upstream_http_base_url: Some(format!("http://{inst_addr_b}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            // Skip calibration so both backends advertise Active immediately;
+            // this test only exercises stats propagation, not bringup.
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["stats-model".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: runtime_b.clone(),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "stats-model", Duration::from_secs(5)).await;
 
     // Give instance A more pending prompt work so p2c prefers B.
-    channels_a
-        .model_stats
-        .send_async((
-            "stats-model".to_string(),
-            CurrentModelStats {
-                output_tps: 50.0,
-                last_mean_input_tps: 1000.0,
-                max_output_tps: 100.0,
-                queue_size: 0,
-                queued_input_size: 1_000,
-                kv_cache_capacity_tokens: 0,
-                kv_cache_used_tokens: 0,
-                kv_cache_free_tokens: 0,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send stats failed");
+    runtime_a.set_model_stats(
+        "stats-model".to_string(),
+        CurrentModelStats {
+            output_tps: 50.0,
+            last_mean_input_tps: 1000.0,
+            max_output_tps: 100.0,
+            queue_size: 0,
+            queued_input_size: 1_000,
+            kv_cache_capacity_tokens: 0,
+            kv_cache_used_tokens: 0,
+            kv_cache_free_tokens: 0,
+            ..CurrentModelStats::default()
+        },
+    );
 
-    channels_b
-        .model_stats
-        .send_async((
-            "stats-model".to_string(),
-            CurrentModelStats {
-                output_tps: 50.0,
-                last_mean_input_tps: 1000.0,
-                max_output_tps: 100.0,
-                queue_size: 0,
-                queued_input_size: 0,
-                kv_cache_capacity_tokens: 0,
-                kv_cache_used_tokens: 0,
-                kv_cache_free_tokens: 0,
-                ..CurrentModelStats::default()
-            },
-        ))
-        .await
-        .expect("send stats for B failed");
+    runtime_b.set_model_stats(
+        "stats-model".to_string(),
+        CurrentModelStats {
+            output_tps: 50.0,
+            last_mean_input_tps: 1000.0,
+            max_output_tps: 100.0,
+            queue_size: 0,
+            queued_input_size: 0,
+            kv_cache_capacity_tokens: 0,
+            kv_cache_used_tokens: 0,
+            kv_cache_free_tokens: 0,
+            ..CurrentModelStats::default()
+        },
+    );
 
     wait_for_all_probes_routed_to(
         http_addr,
@@ -646,72 +634,70 @@ async fn list_models_filters_by_routing_key() {
 
     let (inst_addr_a, quic_url_a, _tunnel_a) = start_dummy_inst("list-rk-model-a").await;
     let mut reg_a = InferenceServerRegistrationClient::default();
-    let _channels_a = reg_a
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: seeds.clone(),
-                inference_server_id: "list-rk-backend-a".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url_a,
-                upstream_http_base_url: Some(format!("http://{inst_addr_a}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                // Skip calibration so the test only exercises discovery scope.
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: Some(Arc::new(AuthTokenProvider::Static(
-                    "list-token-a".to_string(),
-                ))),
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    reg_a
+        .start(InferenceServerRegistrationConfig {
+            seeds: seeds.clone(),
+            inference_server_id: "list-rk-backend-a".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url_a,
+            upstream_http_base_url: Some(format!("http://{inst_addr_a}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            // Skip calibration so the test only exercises discovery scope.
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["list-rk-model-a".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["list-rk-model-a".to_string()],
+            ),
+            auth_token_provider: Some(Arc::new(AuthTokenProvider::Static(
+                "list-token-a".to_string(),
+            ))),
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     let (inst_addr_b, quic_url_b, _tunnel_b) = start_dummy_inst("list-rk-model-b").await;
     let mut reg_b = InferenceServerRegistrationClient::default();
-    let _channels_b = reg_b
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds,
-                inference_server_id: "list-rk-backend-b".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: quic_url_b,
-                upstream_http_base_url: Some(format!("http://{inst_addr_b}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: false,
-                // Skip calibration so the test only exercises discovery scope.
-                bringup: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: Some(Arc::new(AuthTokenProvider::Static(
-                    "list-token-b".to_string(),
-                ))),
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
+    reg_b
+        .start(InferenceServerRegistrationConfig {
+            seeds,
+            inference_server_id: "list-rk-backend-b".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: quic_url_b,
+            upstream_http_base_url: Some(format!("http://{inst_addr_b}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: false,
+            // Skip calibration so the test only exercises discovery scope.
+            bringup: BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
             },
-            vec!["list-rk-model-b".to_string()],
-        )
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["list-rk-model-b".to_string()],
+            ),
+            auth_token_provider: Some(Arc::new(AuthTokenProvider::Static(
+                "list-token-b".to_string(),
+            ))),
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing_with_rk(

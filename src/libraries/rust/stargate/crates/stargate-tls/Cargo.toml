@@ -31,3 +31,4 @@ anyhow = { workspace = true }
 quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
+rustls-pemfile = { workspace = true }

@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use stargate_auth::AuthTokenProvider;
@@ -30,16 +29,15 @@ use crate::quic_http_tunnel::{
     ReverseQuicTunnelConfig, ReverseQuicTunnelHandle, TunnelError, TunnelForwardingConfig,
     start_reverse_quic_tunnel,
 };
+use stargate_runtime::{OwnedTask, TASK_SHUTDOWN_TIMEOUT};
 
-use super::{
-    NamedJoinHandle, REGISTRATION_TASK_SHUTDOWN_TIMEOUT, REVERSE_TUNNEL_CONNECT_TIMEOUT,
-    await_named_join_handle, registration_should_stop, sleep_until_registration_stop,
-};
+use super::REVERSE_TUNNEL_CONNECT_TIMEOUT;
 
 #[derive(Debug, Clone)]
 pub(super) struct ReverseTunnelLoopConfig {
     pub(super) router_addr: String,
     pub(super) inference_server_id: String,
+    pub(super) tls_cert_pem: Option<Vec<u8>>,
     pub(super) quic_insecure: bool,
     pub(super) tunnel_protocol: TunnelTransportProtocol,
     pub(super) forwarding: TunnelForwardingConfig,
@@ -53,10 +51,62 @@ pub(super) struct ReverseTunnelEndpoint {
     pub(super) sni_override: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) enum ReverseTunnelState {
+    #[default]
+    AwaitingEndpoint,
+    Disconnected(ReverseTunnelEndpoint),
+    Connected(ReverseTunnelEndpoint),
+}
+
+impl ReverseTunnelState {
+    pub(super) fn endpoint(&self) -> Option<&ReverseTunnelEndpoint> {
+        match self {
+            Self::AwaitingEndpoint => None,
+            Self::Disconnected(endpoint) | Self::Connected(endpoint) => Some(endpoint),
+        }
+    }
+
+    pub(super) fn is_connected(&self) -> bool {
+        matches!(self, Self::Connected(_))
+    }
+
+    pub(super) fn replace_endpoint(&mut self, endpoint: Option<ReverseTunnelEndpoint>) -> bool {
+        if self.endpoint() == endpoint.as_ref() {
+            return false;
+        }
+        *self = endpoint.map_or(Self::AwaitingEndpoint, Self::Disconnected);
+        true
+    }
+
+    pub(super) fn mark_connected(&mut self, endpoint: &ReverseTunnelEndpoint) -> bool {
+        let Self::Disconnected(current) = self else {
+            return false;
+        };
+        if current != endpoint {
+            return false;
+        }
+        *self = Self::Connected(current.clone());
+        true
+    }
+
+    fn mark_disconnected(&mut self, endpoint: &ReverseTunnelEndpoint) -> bool {
+        let Self::Connected(current) = self else {
+            return false;
+        };
+        if current != endpoint {
+            return false;
+        }
+        *self = Self::Disconnected(current.clone());
+        true
+    }
+}
+
 pub(super) struct ReverseQuicTunnelConfigParams {
     pub(super) dial_addr: String,
     pub(super) sni_override: Option<String>,
     pub(super) inference_server_id: String,
+    pub(super) tls_cert_pem: Option<Vec<u8>>,
     pub(super) quic_insecure: bool,
     pub(super) tunnel_protocol: TunnelTransportProtocol,
     pub(super) forwarding: TunnelForwardingConfig,
@@ -72,18 +122,19 @@ pub(super) fn build_reverse_quic_tunnel_config(
         params.inference_server_id,
         forwarding.upstream_http_base_url.clone(),
     );
+    tunnel_config.tls_cert_pem = params.tls_cert_pem;
     tunnel_config.quic_insecure = params.quic_insecure;
     tunnel_config.tunnel_protocol = params.tunnel_protocol;
     tunnel_config.sni_override = params.sni_override;
     tunnel_config.max_request_body_bytes = forwarding.max_request_body_bytes;
+    tunnel_config.max_sse_buffer_bytes = forwarding.max_sse_buffer_bytes;
     tunnel_config.first_output_timeout = forwarding.first_output_timeout;
     tunnel_config.output_chunk_timeout = forwarding.output_chunk_timeout;
     tunnel_config.output_token_parser_factory = forwarding.output_token_parser_factory;
-    tunnel_config.request_observation_tx = forwarding.request_observation_tx;
+    tunnel_config.runtime_state = forwarding.runtime_state;
     tunnel_config.request_quality_monitor = forwarding.request_quality_monitor;
     tunnel_config.retry = forwarding.retry;
     tunnel_config.queue_mismatch_retry = forwarding.queue_mismatch_retry;
-    tunnel_config.queue_tracker = forwarding.queue_tracker;
     tunnel_config.metrics = forwarding.metrics;
     #[cfg(test)]
     {
@@ -94,16 +145,8 @@ pub(super) fn build_reverse_quic_tunnel_config(
     tunnel_config
 }
 
-pub(super) async fn stop_reverse_tunnel_task(
-    cancel_token: CancellationToken,
-    task: JoinHandle<()>,
-) {
-    cancel_token.cancel();
-    await_named_join_handle(
-        NamedJoinHandle::new("reverse tunnel registration worker", task),
-        REGISTRATION_TASK_SHUTDOWN_TIMEOUT,
-    )
-    .await;
+pub(super) async fn stop_reverse_tunnel_task(task: OwnedTask) {
+    task.shutdown(TASK_SHUTDOWN_TIMEOUT).await;
 }
 
 pub(super) fn reverse_tunnel_endpoint_from_ack(
@@ -162,58 +205,37 @@ where
 /// Maintains a single reverse QUIC tunnel connection to a stargate router.
 pub(super) async fn run_reverse_tunnel_loop(
     config: ReverseTunnelLoopConfig,
-    endpoint_rx: watch::Receiver<Option<ReverseTunnelEndpoint>>,
-    connected_tx: watch::Sender<bool>,
-    parent_stop_rx: watch::Receiver<bool>,
-    local_stop_rx: watch::Receiver<bool>,
-    cancel_token: CancellationToken,
+    state_tx: watch::Sender<ReverseTunnelState>,
+    stop: CancellationToken,
 ) {
     let ReverseTunnelLoopConfig {
         router_addr,
         inference_server_id,
+        tls_cert_pem,
         quic_insecure,
         tunnel_protocol,
         forwarding,
         auth_token_provider,
     } = config;
     let reverse_tunnel_connect_timeout = REVERSE_TUNNEL_CONNECT_TIMEOUT;
-    let mut endpoint_rx = endpoint_rx;
-    let mut parent_stop_rx = parent_stop_rx;
-    let mut local_stop_rx = local_stop_rx;
+    let mut state_rx = state_tx.subscribe();
     let mut backoff = Duration::from_secs(1);
     const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
     loop {
-        if registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token) {
-            let _ = connected_tx.send(false);
+        if stop.is_cancelled() {
             return;
         }
 
-        let endpoint = endpoint_rx.borrow().clone();
+        let endpoint = state_rx.borrow_and_update().endpoint().cloned();
         let Some(endpoint) = endpoint else {
-            let _ = connected_tx.send(false);
             tokio::select! {
-                _ = cancel_token.cancelled() => return,
-                changed = parent_stop_rx.changed() => {
-                    if changed.is_err()
-                        || registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token)
-                    {
-                        return;
-                    }
-                }
-                changed = local_stop_rx.changed() => {
-                    if changed.is_err()
-                        || registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token)
-                    {
-                        return;
-                    }
-                }
-                changed = endpoint_rx.changed() => {
+                _ = stop.cancelled() => return,
+                changed = state_rx.changed() => {
                     if changed.is_err() {
                         return;
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
             }
             continue;
         };
@@ -222,32 +244,19 @@ pub(super) async fn run_reverse_tunnel_loop(
             dial_addr: endpoint.pylon_dial_addr.clone(),
             sni_override: endpoint.sni_override.clone(),
             inference_server_id: inference_server_id.clone(),
+            tls_cert_pem: tls_cert_pem.clone(),
             quic_insecure,
             tunnel_protocol,
             forwarding: forwarding.clone(),
             auth_token_provider: auth_token_provider.clone(),
         });
         let connect_result = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                let _ = connected_tx.send(false);
-                return;
-            }
-            changed = parent_stop_rx.changed() => {
-                if changed.is_err()
-                    || registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token)
-                {
-                    let _ = connected_tx.send(false);
+            _ = stop.cancelled() => return,
+            changed = state_rx.changed() => {
+                if changed.is_err() {
                     return;
                 }
-                continue;
-            }
-            changed = local_stop_rx.changed() => {
-                if changed.is_err()
-                    || registration_should_stop(&parent_stop_rx, &local_stop_rx, &cancel_token)
-                {
-                    let _ = connected_tx.send(false);
-                    return;
-                }
+                backoff = Duration::from_secs(1);
                 continue;
             }
             result = reverse_tunnel_connect_with_timeout(
@@ -257,6 +266,20 @@ pub(super) async fn run_reverse_tunnel_loop(
         };
         match connect_result {
             Ok(handle) => {
+                if !state_tx.send_if_modified(|state| state.mark_connected(&endpoint)) {
+                    handle.shutdown().await;
+                    backoff = Duration::from_secs(1);
+                    continue;
+                }
+                let committed = state_rx.borrow_and_update().clone();
+                if !matches!(
+                    committed,
+                    ReverseTunnelState::Connected(ref current) if current == &endpoint
+                ) {
+                    handle.shutdown().await;
+                    backoff = Duration::from_secs(1);
+                    continue;
+                }
                 tracing::info!(
                     router_addr = %router_addr,
                     dial_addr = %endpoint.pylon_dial_addr,
@@ -264,28 +287,24 @@ pub(super) async fn run_reverse_tunnel_loop(
                     inference_server_id = %inference_server_id,
                     "reverse tunnel connected"
                 );
-                let _ = connected_tx.send(true);
                 let connected_at = tokio::time::Instant::now();
 
                 tokio::select! {
-                    _ = cancel_token.cancelled() => {
+                    _ = stop.cancelled() => {
                         handle.shutdown().await;
-                        let _ = connected_tx.send(false);
+                        state_tx.send_if_modified(|state| {
+                            state.mark_disconnected(&endpoint)
+                        });
                         return;
                     }
-                    _ = parent_stop_rx.changed() => {
+                    changed = state_rx.changed() => {
                         handle.shutdown().await;
-                        let _ = connected_tx.send(false);
-                        return;
-                    }
-                    _ = local_stop_rx.changed() => {
-                        handle.shutdown().await;
-                        let _ = connected_tx.send(false);
-                        return;
-                    }
-                    _ = endpoint_rx.changed() => {
-                        handle.shutdown().await;
-                        let _ = connected_tx.send(false);
+                        if changed.is_err() {
+                            return;
+                        }
+                        state_tx.send_if_modified(|state| {
+                            state.mark_disconnected(&endpoint)
+                        });
                         backoff = Duration::from_secs(1);
                     }
                     _ = handle.closed() => {
@@ -297,21 +316,30 @@ pub(super) async fn run_reverse_tunnel_loop(
                             backoff_ms = backoff.as_millis(),
                             "reverse tunnel connection dropped, reconnecting"
                         );
-                        let _ = connected_tx.send(false);
+                        let disconnected = state_tx.send_if_modified(|state| {
+                            state.mark_disconnected(&endpoint)
+                        });
+                        if disconnected
+                            && state_rx.borrow_and_update().endpoint() != Some(&endpoint)
+                        {
+                            backoff = Duration::from_secs(1);
+                            continue;
+                        }
                         if connected_at.elapsed() > Duration::from_secs(60) {
                             backoff = Duration::from_secs(1);
                         }
-                        if sleep_until_registration_stop(
-                            &mut parent_stop_rx,
-                            &mut local_stop_rx,
-                            &cancel_token,
-                            backoff,
-                        )
-                        .await
-                        {
-                            return;
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            changed = state_rx.changed() => {
+                                if changed.is_err() {
+                                    return;
+                                }
+                                backoff = Duration::from_secs(1);
+                            }
+                            _ = tokio::time::sleep(backoff) => {
+                                backoff = (backoff * 2).min(BACKOFF_MAX);
+                            }
                         }
-                        backoff = (backoff * 2).min(BACKOFF_MAX);
                     }
                 }
             }
@@ -325,18 +353,18 @@ pub(super) async fn run_reverse_tunnel_loop(
                     backoff_ms = backoff.as_millis(),
                     "reverse tunnel connect failed, retrying"
                 );
-                let _ = connected_tx.send(false);
-                if sleep_until_registration_stop(
-                    &mut parent_stop_rx,
-                    &mut local_stop_rx,
-                    &cancel_token,
-                    backoff,
-                )
-                .await
-                {
-                    return;
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    changed = state_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        backoff = Duration::from_secs(1);
+                    }
+                    _ = tokio::time::sleep(backoff) => {
+                        backoff = (backoff * 2).min(BACKOFF_MAX);
+                    }
                 }
-                backoff = (backoff * 2).min(BACKOFF_MAX);
             }
         }
     }

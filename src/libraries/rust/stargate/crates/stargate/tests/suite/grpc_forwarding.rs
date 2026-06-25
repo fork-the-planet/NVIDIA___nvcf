@@ -130,7 +130,8 @@ impl TwoStargates {
     }
 }
 
-/// Spins up two stargates (A and B) with SharedDiscovery and gRPC forwarding.
+/// Spins up two stargates (A and B) with SharedDiscovery and the
+/// development-only gRPC peer relay.
 ///
 /// Each stargate has a MapResolver that recognises incoming `:authority`
 /// headers belonging to the other stargate and resolves them to that
@@ -321,9 +322,9 @@ async fn register_forwarded_to_correct_peer() {
     sg.shutdown().await;
 }
 
-/// ListModels is local-only; a peer authority on A must not return B's snapshot.
+/// ListModels is local-only; a peer authority on A must not return B's routing state.
 #[tokio::test]
-async fn list_models_with_peer_authority_serves_local_snapshot() {
+async fn list_models_with_peer_authority_serves_local_routing_state() {
     init_crypto();
     let sg = start_two_stargates().await;
 
@@ -375,7 +376,7 @@ async fn list_models_with_peer_authority_serves_local_snapshot() {
         .into_inner();
     assert!(
         response.model_ids.is_empty(),
-        "ListModels must serve the receiving pod's local snapshot, got {:?}",
+        "ListModels must serve the receiving pod's local routing state, got {:?}",
         response.model_ids
     );
 
@@ -567,10 +568,10 @@ async fn forwarded_registration_propagates_status_updates() {
     sg.shutdown().await;
 }
 
-/// Forwarded lifecycle status updates must refresh the target peer's local
-/// ListModels snapshot as well as proxy routing.
+/// Forwarded lifecycle status updates must change the target peer's local
+/// ListModels routing state as well as proxy routing.
 #[tokio::test]
-async fn forwarded_registration_status_updates_refresh_list_models_on_target_peer() {
+async fn forwarded_registration_status_updates_list_models_on_target_peer() {
     init_crypto();
     let sg = start_two_stargates().await;
 

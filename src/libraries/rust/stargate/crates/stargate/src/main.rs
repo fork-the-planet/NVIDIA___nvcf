@@ -13,22 +13,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use std::net::SocketAddr;
-use std::time::Duration;
 
-use anyhow::{Context, Result};
-use stargate::discovery::{
-    Discovery, DnsDiscovery, HeadlessDnsDiscovery, HeadlessDnsDiscoveryConfig, SelfOnlyDiscovery,
-};
-use stargate::proxy::{ProxyRetryConfig, ProxyTransportConfig};
+use anyhow::Result;
 use stargate::registration::{
     DEFAULT_REGISTRATION_UPDATE_IDLE_TIMEOUT, DEFAULT_REGISTRATION_UPDATE_MAX_IDLE_TIMEOUT,
 };
-use stargate::runtime::{StargateRuntime, StargateRuntimeConfig};
-use stargate_forwarding::{ForwardingResolver, HeadlessDnsResolver};
 use stargate_protocol::TunnelTransportProtocol;
-use stargate_tls::ServerTlsIdentity;
-use tracing::info;
+use stargate_runtime::wait_for_termination_signal;
+use tracing::{error, info};
+
+#[path = "main/startup.rs"]
+mod startup;
+
+mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
 
 const DEFAULT_PROXY_MAX_REPLAY_BODY_BYTES: usize = 64 * 1024 * 1024;
 
@@ -83,7 +84,8 @@ struct Args {
     /// DNS name used for Stargate peer discovery.
     ///
     /// In Kubernetes this should be the headless Service so EndpointSlice
-    /// readiness controls peer visibility and forwarding targets.
+    /// readiness controls peer visibility and, when explicitly enabled,
+    /// development-only relay targets.
     #[arg(long, value_name = "DNS_NAME")]
     stargate_discovery_dns_name: String,
 
@@ -99,7 +101,7 @@ struct Args {
     )]
     remote_stargate_url: Vec<String>,
 
-    /// Optional pylon dial address for backend-facing gRPC registration/watch.
+    /// Optional pylon dial address for backend-facing Stargate gRPC.
     ///
     /// Stargate still advertises per-pod addresses as gRPC authority/SNI
     /// identity, and sends this address separately so pylons can connect
@@ -126,6 +128,13 @@ struct Args {
     /// Publish only this Stargate in WatchStargates instead of DNS-discovered peers.
     #[arg(long, default_value_t = false)]
     disable_dns_discovery: bool,
+
+    /// Enable development-only peer relaying for backend gRPC and reverse QUIC traffic.
+    ///
+    /// Requires Kubernetes pod identity and DNS discovery. This relay must not run in
+    /// production; use `stargate-k8s-router` or a supported load-balancer topology instead.
+    #[arg(long, default_value_t = false)]
+    enable_dev_peer_forwarding: bool,
 
     /// Interval for refreshing DNS-discovered Stargate peers.
     #[arg(long, default_value_t = 1000, value_parser = parse_nonzero_millis, value_name = "MS")]
@@ -161,7 +170,8 @@ struct Args {
     #[arg(long, default_value_t = 30000, value_name = "MS")]
     shutdown_drain_timeout_ms: u64,
 
-    /// Timeout for establishing outbound direct QUIC connections and peer relays.
+    /// Timeout for establishing outbound direct QUIC connections and
+    /// development-only peer relays.
     #[arg(long, default_value_t = 2000, value_name = "MS")]
     quic_connect_timeout_ms: u64,
 
@@ -287,95 +297,12 @@ struct Args {
     /// Dot-separated JSON path to the auth token inside the secrets file.
     #[arg(long, env = "SECRETS_JSON_PATH", value_name = "PATH")]
     secrets_json_path: Option<String>,
-}
 
-struct DiscoveryAndForwarding {
-    discovery: Box<dyn Discovery>,
-    forwarding: Option<std::sync::Arc<dyn ForwardingResolver>>,
-}
-
-async fn make_discovery(args: &Args) -> Result<DiscoveryAndForwarding> {
-    let http_listen_addr: SocketAddr = args.http_listen_addr.parse()?;
-    let http_port = http_listen_addr.port();
-
-    if args.disable_dns_discovery {
-        return Ok(DiscoveryAndForwarding {
-            discovery: Box::new(SelfOnlyDiscovery::new(
-                args.advertise_addr,
-                args.stargate_id.clone(),
-                http_port,
-            )) as Box<dyn Discovery>,
-            forwarding: None,
-        });
-    }
-
-    if let (Some(pod_name), Some(pod_namespace)) = (&args.pod_name, &args.pod_namespace) {
-        let dns_resolver_ttl = Duration::from_millis(args.dns_resolver_ttl_ms);
-        let resolver = make_resolver(dns_resolver_ttl)?;
-        let template = args
-            .advertised_hostname_template
-            .clone()
-            .unwrap_or_else(|| "{pod_name}.stargate.external".to_string());
-        let discovery = Box::new(HeadlessDnsDiscovery::new(HeadlessDnsDiscoveryConfig {
-            self_pod_name: pod_name.clone(),
-            pod_namespace: pod_namespace.clone(),
-            advertised_hostname_template: template.clone(),
-            discovery_dns_name: args.stargate_discovery_dns_name.clone(),
-            resolver,
-            grpc_port: args.advertise_addr.port(),
-        })) as Box<dyn Discovery>;
-        let forwarding = std::sync::Arc::new(HeadlessDnsResolver {
-            self_pod_name: pod_name.clone(),
-            advertised_hostname_template: template,
-            namespace: pod_namespace.clone(),
-            headless_dns_suffix: args.stargate_discovery_dns_name.clone(),
-        }) as std::sync::Arc<dyn ForwardingResolver>;
-        Ok(DiscoveryAndForwarding {
-            discovery,
-            forwarding: Some(forwarding),
-        })
-    } else {
-        let dns_resolver_ttl = Duration::from_millis(args.dns_resolver_ttl_ms);
-        let resolver = make_resolver(dns_resolver_ttl)?;
-        Ok(DiscoveryAndForwarding {
-            discovery: Box::new(DnsDiscovery::new(
-                args.advertise_addr,
-                args.stargate_id.clone(),
-                args.stargate_discovery_dns_name.clone(),
-                resolver,
-                http_port,
-            )) as Box<dyn Discovery>,
-            forwarding: None,
-        })
-    }
-}
-
-fn proxy_retry_config_from_args(args: &Args) -> Result<ProxyRetryConfig> {
-    let request_retry_budget_ms_header = match args.proxy_retry_budget_header.trim() {
-        "" => None,
-        header => Some(
-            http::HeaderName::from_bytes(header.as_bytes())
-                .with_context(|| format!("invalid proxy retry budget header: {header}"))?,
-        ),
-    };
-    Ok(ProxyRetryConfig {
-        max_connect_retries: args.proxy_max_connect_retries,
-        max_request_retries: args.proxy_max_request_retries,
-        max_replay_body_bytes: args.proxy_max_replay_body_bytes,
-        require_pylon_retry_signal: args.proxy_require_pylon_retry_signal,
-        request_retry_budget_ms_header,
-        ..ProxyRetryConfig::default()
-    })
-}
-
-fn make_resolver(ttl: Duration) -> Result<hickory_resolver::TokioAsyncResolver> {
-    let (config, mut options) = hickory_resolver::system_conf::read_system_conf()
-        .context("failed to read system resolver config")?;
-    options.timeout = Duration::from_secs(1);
-    options.attempts = 1;
-    options.negative_max_ttl = Some(Duration::from_secs(0));
-    options.positive_max_ttl = Some(ttl);
-    Ok(hickory_resolver::TokioAsyncResolver::tokio(config, options))
+    /// OAuth2 provider host for client-credentials worker auth. When set, the
+    /// worker-auth client mints tokens at `<host>/token` using the id/secret
+    /// from the secrets file instead of reading a static bearer token.
+    #[arg(long, env = "OAUTH2_PROVIDER_HOST", value_name = "URL")]
+    oauth2_provider_host: Option<String>,
 }
 
 #[tokio::main]
@@ -391,195 +318,146 @@ async fn run(args: Args) -> Result<()> {
         args.otel_endpoint.as_deref(),
         &args.otel_service_name,
     )?;
-    let listen_addr: SocketAddr = args.listen_addr.parse()?;
-    let model_discovery_listen_addr: SocketAddr = args.model_discovery_listen_addr.parse()?;
-    let http_listen_addr: SocketAddr = args.http_listen_addr.parse()?;
-    info!(
-        stargate_id = %args.stargate_id,
-        listen_addr = %args.listen_addr,
-        model_discovery_listen_addr = %args.model_discovery_listen_addr,
-        http_listen_addr = %args.http_listen_addr,
-        advertise_addr = %args.advertise_addr,
-        discovery_dns_name = %args.stargate_discovery_dns_name,
-        remote_stargate_urls = ?args.remote_stargate_url,
-        grpc_pylon_dial_addr = ?args.grpc_pylon_dial_addr,
-        advertised_hostname_template = ?args.advertised_hostname_template,
-        disable_dns_discovery = args.disable_dns_discovery,
-        dns_poll_ms = args.dns_poll_ms,
-        dns_resolver_ttl_ms = args.dns_resolver_ttl_ms,
-        watch_heartbeat_ms = args.watch_heartbeat_ms,
-        registration_update_idle_timeout_ms = args.registration_update_idle_timeout_ms,
-        registration_update_max_idle_timeout_ms = args.registration_update_max_idle_timeout_ms,
-        shutdown_drain_timeout_ms = args.shutdown_drain_timeout_ms,
-        quic_connect_timeout_ms = args.quic_connect_timeout_ms,
-        quic_request_timeout_ms = args.quic_request_timeout_ms,
-        direct_quic_connections = args.direct_quic_connections,
-        otel_service_name = %args.otel_service_name,
-        metrics_prefix = %args.metrics_prefix,
-        reverse_tunnel_pylon_dial_addr = ?args.reverse_tunnel_pylon_dial_addr,
-        "starting stargate"
-    );
+    log_startup(&args);
 
-    let tls_cert_pem = args.tls_cert_path.as_ref().map(std::fs::read).transpose()?;
-    let tls_key_pem = args.tls_key_path.as_ref().map(std::fs::read).transpose()?;
-    let reverse_tunnel_listen_addr: Option<SocketAddr> = args
-        .reverse_tunnel_listen_addr
-        .as_deref()
-        .map(|s| s.parse())
-        .transpose()?;
-    let server_tls_identity = server_tls_identity_for_reverse_listener(
-        reverse_tunnel_listen_addr.is_some(),
-        tls_cert_pem.clone(),
-        tls_key_pem,
-    )?;
-
-    let DiscoveryAndForwarding {
-        discovery,
-        forwarding,
-    } = make_discovery(&args).await?;
-    let proxy_retry_config = proxy_retry_config_from_args(&args)?;
-
-    let mut runtime = StargateRuntime::new(
-        StargateRuntimeConfig {
-            stargate_id: args.stargate_id,
-            grpc_listen_addr: listen_addr,
-            model_discovery_listen_addr,
-            http_listen_addr,
-            advertise_addr: args.advertise_addr,
-            stargate_discovery_dns_name: args.stargate_discovery_dns_name,
-            remote_watch_stargate_urls: args.remote_stargate_url,
-            grpc_pylon_dial_addr: args.grpc_pylon_dial_addr,
-            advertised_hostname_template: args.advertised_hostname_template,
-            pod_name: args.pod_name,
-            pod_namespace: args.pod_namespace,
-            dns_poll_interval: std::time::Duration::from_millis(args.dns_poll_ms),
-            watch_heartbeat_interval: std::time::Duration::from_millis(args.watch_heartbeat_ms),
-            registration_update_idle_timeout: std::time::Duration::from_millis(
-                args.registration_update_idle_timeout_ms,
-            ),
-            registration_update_max_idle_timeout: std::time::Duration::from_millis(
-                args.registration_update_max_idle_timeout_ms,
-            ),
-            proxy_transport: ProxyTransportConfig {
-                quic_connect_timeout: std::time::Duration::from_millis(
-                    args.quic_connect_timeout_ms,
-                ),
-                quic_request_timeout: std::time::Duration::from_millis(
-                    args.quic_request_timeout_ms,
-                ),
-                tls_cert_pem,
-                server_tls_identity,
-                quic_insecure: args.quic_insecure,
-                tunnel_protocol: args.tunnel_protocol,
-                direct_quic_connections: args.direct_quic_connections,
-                retry: proxy_retry_config,
-            },
-            lb_config_path: args.lb_config_path,
-            metrics_prefix: args.metrics_prefix,
-            reverse_tunnel_listen_addr,
-            reverse_tunnel_pylon_dial_addr: args.reverse_tunnel_pylon_dial_addr,
-            reverse_tunnel_connect_timeout: std::time::Duration::from_millis(
-                args.reverse_tunnel_connect_timeout_ms,
-            ),
-        },
-        discovery,
-    );
-    if let Some(fwd) = forwarding {
-        runtime = runtime.with_forwarding(fwd);
-    }
-    if let Some(auth_endpoint) = args.worker_auth_endpoint {
-        let token_provider = args.secrets_path.map(|p| {
-            // parse a JSON path
-            let key: Vec<String> = args
-                .secrets_json_path
-                .unwrap_or_else(|| "authToken".to_string())
-                .split('.')
-                .map(String::from)
-                .collect();
-            stargate_auth::AuthTokenProvider::JsonFile {
-                path: std::path::PathBuf::from(p),
-                key,
-            }
-        });
-        let authenticator =
-            stargate::auth::GrpcWorkerAuthenticator::connect(&auth_endpoint, token_provider)
-                .await
-                .context("failed to connect to worker auth endpoint")?;
-        runtime = runtime.with_authenticator(std::sync::Arc::new(authenticator));
-    }
+    let startup::RuntimeStartup {
+        runtime,
+        shutdown_drain_timeout,
+    } = startup::runtime_from_args(args).await?;
 
     let handle = runtime.start().await?;
 
-    let metrics_addr: SocketAddr = format!("0.0.0.0:{}", args.metrics_port).parse()?;
-    let metrics_registry = handle.metrics().registry();
-    tokio::spawn(async move {
-        if let Err(e) =
-            stargate::metrics::start_metrics_server(metrics_addr, metrics_registry).await
-        {
-            tracing::error!(error = %e, "metrics server failed");
+    let shutdown_error = match wait_for_runtime_shutdown_trigger(
+        wait_for_termination_signal(),
+        handle.wait_for_critical_failure(),
+    )
+    .await
+    {
+        RuntimeShutdownTrigger::Signal(Ok(first_signal)) => {
+            info!(
+                signal = first_signal,
+                "received termination signal, beginning graceful shutdown"
+            );
+            None
         }
-    });
-
-    let first_signal = wait_for_termination_signal().await;
-    info!(
-        signal = first_signal,
-        "received termination signal, beginning graceful shutdown"
-    );
+        RuntimeShutdownTrigger::Signal(Err(error)) => {
+            let error =
+                anyhow::Error::new(error).context("failed to receive stargate termination signal");
+            error!(error = %error, "termination signal handler failed, beginning graceful shutdown");
+            Some(error)
+        }
+        RuntimeShutdownTrigger::Critical(failure) => {
+            error!(error = %failure, "critical stargate task failed, beginning graceful shutdown");
+            Some(failure.into())
+        }
+    };
     handle.begin_shutdown();
 
-    let drain_timeout = std::time::Duration::from_millis(args.shutdown_drain_timeout_ms);
     tokio::select! {
-        completed = handle.wait_for_shutdown(drain_timeout) => {
+        completed = handle.wait_for_shutdown(shutdown_drain_timeout) => {
             if completed {
                 info!("graceful shutdown complete");
             } else {
-                info!(timeout_ms = args.shutdown_drain_timeout_ms, "graceful shutdown timed out; forcing exit");
+                info!(timeout_ms = shutdown_drain_timeout.as_millis(), "graceful shutdown timed out; forcing exit");
                 std::process::exit(1);
             }
         }
         second_signal = wait_for_termination_signal() => {
-            info!(signal = second_signal, "received second termination signal; forcing immediate exit");
+            match second_signal {
+                Ok(signal) => info!(signal, "received second termination signal; forcing immediate exit"),
+                Err(error) => error!(error = %error, "termination signal handler failed during shutdown; forcing immediate exit"),
+            }
             std::process::exit(1);
         }
     };
 
-    info!("stargate stopped cleanly");
-    Ok(())
-}
-
-fn server_tls_identity_for_reverse_listener(
-    reverse_tunnel_enabled: bool,
-    cert_pem: Option<Vec<u8>>,
-    key_pem: Option<Vec<u8>>,
-) -> Result<ServerTlsIdentity, anyhow::Error> {
-    if reverse_tunnel_enabled {
-        return ServerTlsIdentity::from_optional_pem(cert_pem, key_pem);
-    }
-    Ok(ServerTlsIdentity::SelfSigned)
-}
-
-async fn wait_for_termination_signal() -> &'static str {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => "SIGINT",
-            _ = sigterm.recv() => "SIGTERM",
+    match shutdown_error {
+        Some(error) => {
+            info!("stargate shutdown complete after process failure");
+            Err(error)
+        }
+        None => {
+            info!("stargate stopped cleanly");
+            Ok(())
         }
     }
+}
 
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        "CTRL_C"
+fn log_startup(args: &Args) {
+    info!(
+        version = built_info::PKG_VERSION,
+        commit_short_sha = built_info::GIT_COMMIT_HASH_SHORT.unwrap_or("unknown"),
+        config = ?args,
+        "starting stargate"
+    );
+}
+
+enum RuntimeShutdownTrigger<Signal, Failure> {
+    Signal(Signal),
+    Critical(Failure),
+}
+
+async fn wait_for_runtime_shutdown_trigger<Signal, Failure, SignalOutput, FailureOutput>(
+    signal: Signal,
+    failure: Failure,
+) -> RuntimeShutdownTrigger<SignalOutput, FailureOutput>
+where
+    Signal: Future<Output = SignalOutput>,
+    Failure: Future<Output = FailureOutput>,
+{
+    tokio::select! {
+        signal = signal => RuntimeShutdownTrigger::Signal(signal),
+        failure = failure => RuntimeShutdownTrigger::Critical(failure),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
     use super::*;
+
+    #[derive(Clone)]
+    struct TestLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("test log writer lock should not be poisoned")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_startup_log(args: &Args) -> String {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer_output = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || TestLogWriter(Arc::clone(&writer_output)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || log_startup(args));
+
+        String::from_utf8(
+            output
+                .lock()
+                .expect("test log output lock should not be poisoned")
+                .clone(),
+        )
+        .expect("startup log output should be UTF-8")
+    }
 
     fn try_parse_args(extra: &[&str]) -> std::result::Result<Args, clap::Error> {
         let mut args = vec![
@@ -600,6 +478,59 @@ mod tests {
     }
 
     #[test]
+    fn startup_log_includes_build_identity_and_complete_args() {
+        let args = parse_args(&[
+            "--proxy-max-connect-retries",
+            "7",
+            "--worker-auth-endpoint",
+            "http://worker-auth.example.test:50051",
+            "--secrets-path",
+            "/var/run/secrets/worker-auth.json",
+            "--secrets-json-path",
+            "auth.token",
+        ]);
+
+        let output = capture_startup_log(&args);
+        let expected_commit = built_info::GIT_COMMIT_HASH_SHORT.unwrap_or("unknown");
+
+        assert!(
+            output.contains(&format!("version=\"{}\"", built_info::PKG_VERSION)),
+            "startup log: {output}"
+        );
+        assert!(
+            output.contains(&format!("commit_short_sha=\"{expected_commit}\"")),
+            "startup log: {output}"
+        );
+        assert!(
+            output.contains(&format!("config={args:?}")),
+            "startup log: {output}"
+        );
+    }
+
+    #[test]
+    fn build_identity_matches_checked_out_commit() {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git should be available when running repository tests");
+        assert!(
+            output.status.success(),
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let expected_commit = String::from_utf8(output.stdout)
+            .expect("git commit should be UTF-8")
+            .trim()
+            .to_owned();
+        assert_eq!(
+            built_info::GIT_COMMIT_HASH,
+            Some(expected_commit.as_str()),
+            "generated build identity should match the checked-out commit"
+        );
+    }
+
+    #[test]
     fn dns_poll_ms_zero_is_rejected() {
         let error =
             try_parse_args(&["--dns-poll-ms", "0"]).expect_err("zero dns poll should be rejected");
@@ -607,25 +538,6 @@ mod tests {
         assert!(
             error.to_string().contains("greater than 0"),
             "unexpected clap error: {error}"
-        );
-    }
-
-    #[test]
-    fn proxy_retry_cli_defaults_match_runtime_defaults() {
-        let args = parse_args(&[]);
-        let retry = proxy_retry_config_from_args(&args).expect("retry config should parse");
-        let defaults = ProxyRetryConfig::default();
-
-        assert_eq!(retry.max_connect_retries, defaults.max_connect_retries);
-        assert_eq!(retry.max_request_retries, defaults.max_request_retries);
-        assert_eq!(retry.max_replay_body_bytes, defaults.max_replay_body_bytes);
-        assert_eq!(
-            retry.require_pylon_retry_signal,
-            defaults.require_pylon_retry_signal
-        );
-        assert_eq!(
-            retry.request_retry_budget_ms_header,
-            defaults.request_retry_budget_ms_header
         );
     }
 
@@ -664,6 +576,15 @@ mod tests {
     }
 
     #[test]
+    fn dev_peer_forwarding_defaults_to_false_and_requires_explicit_opt_in() {
+        let defaults = parse_args(&[]);
+        assert!(!defaults.enable_dev_peer_forwarding);
+
+        let opted_in = parse_args(&["--enable-dev-peer-forwarding"]);
+        assert!(opted_in.enable_dev_peer_forwarding);
+    }
+
+    #[test]
     fn model_discovery_listen_addr_default_and_override_parse() {
         let defaults = parse_args(&[]);
         assert_eq!(defaults.model_discovery_listen_addr, "0.0.0.0:50073");
@@ -691,6 +612,31 @@ mod tests {
         assert_eq!(overridden.metrics_prefix, "llm_request_router_");
     }
 
+    #[tokio::test]
+    async fn runtime_shutdown_trigger_reports_signal() {
+        let trigger = wait_for_runtime_shutdown_trigger(
+            async { "SIGTERM" },
+            std::future::pending::<&'static str>(),
+        )
+        .await;
+
+        assert!(matches!(trigger, RuntimeShutdownTrigger::Signal("SIGTERM")));
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_trigger_reports_critical_failure() {
+        let trigger =
+            wait_for_runtime_shutdown_trigger(std::future::pending::<&'static str>(), async {
+                "HTTP proxy server"
+            })
+            .await;
+
+        assert!(matches!(
+            trigger,
+            RuntimeShutdownTrigger::Critical("HTTP proxy server")
+        ));
+    }
+
     #[test]
     fn otel_endpoint_help_matches_grpc_exporter_transport() {
         let mut command = <Args as clap::CommandFactory>::command();
@@ -702,26 +648,6 @@ mod tests {
 
         assert!(help.contains("OTLP/gRPC trace export endpoint"));
         assert!(!help.contains("OTLP/HTTP/protobuf trace export endpoint"));
-    }
-
-    #[test]
-    fn direct_quic_tls_trust_cert_does_not_require_server_key() {
-        let identity =
-            server_tls_identity_for_reverse_listener(false, Some(b"cert".to_vec()), None)
-                .expect("cert-only direct trust should not require a server key");
-
-        assert_eq!(identity, ServerTlsIdentity::SelfSigned);
-    }
-
-    #[test]
-    fn reverse_listener_tls_cert_still_requires_server_key() {
-        let err = server_tls_identity_for_reverse_listener(true, Some(b"cert".to_vec()), None)
-            .expect_err("reverse listener server TLS still needs a complete PEM pair");
-
-        assert!(
-            err.to_string().contains("TLS key PEM is required"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -748,39 +674,6 @@ mod tests {
 
         assert_eq!(args.registration_update_idle_timeout_ms, 0);
         assert_eq!(args.registration_update_max_idle_timeout_ms, 0);
-    }
-
-    #[test]
-    fn proxy_retry_cli_overrides_are_applied() {
-        let args = parse_args(&[
-            "--proxy-max-connect-retries",
-            "7",
-            "--proxy-max-request-retries",
-            "9",
-            "--proxy-max-replay-body-bytes",
-            "12345",
-            "--proxy-require-pylon-retry-signal=false",
-            "--proxy-retry-budget-header",
-            "x-test-budget-ms",
-        ]);
-        let retry = proxy_retry_config_from_args(&args).expect("retry config should parse");
-
-        assert_eq!(retry.max_connect_retries, 7);
-        assert_eq!(retry.max_request_retries, 9);
-        assert_eq!(retry.max_replay_body_bytes, 12345);
-        assert!(!retry.require_pylon_retry_signal);
-        assert_eq!(
-            retry.request_retry_budget_ms_header,
-            Some(http::HeaderName::from_static("x-test-budget-ms"))
-        );
-    }
-
-    #[test]
-    fn empty_proxy_retry_budget_header_disables_budget_header() {
-        let args = parse_args(&["--proxy-retry-budget-header", ""]);
-        let retry = proxy_retry_config_from_args(&args).expect("retry config should parse");
-
-        assert_eq!(retry.request_retry_budget_ms_header, None);
     }
 
     #[test]

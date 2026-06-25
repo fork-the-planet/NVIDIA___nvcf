@@ -26,6 +26,7 @@ use tracing::info;
 use crate::AppState;
 use crate::kv_cache::{KvCacheAccess, KvCacheStats, insert_kv_cache_headers};
 use crate::stats_stream::emit_request_stats_event;
+use crate::test_control::{TestEndpoint, request_class};
 use crate::timing::{
     embedding_item_count, jitter_ms, non_streaming_delay, optional_header, prefill_delay,
     request_embedding_tokens, request_input_tokens, request_output_tokens, response_input_tokens,
@@ -250,10 +251,29 @@ pub(crate) async fn chat_completions(
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Response {
+    let model = req.model.clone().unwrap_or(state.model_name.clone());
+    state
+        .test_control
+        .record_request(
+            TestEndpoint::ChatCompletions,
+            &model,
+            request_class(&headers),
+        )
+        .await;
+    if state.test_control.chat_failure_enabled(&model).await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!("mock chat failure enabled for model {model}"),
+                },
+            })),
+        )
+            .into_response();
+    }
     let request_slot = acquire_request_slot(&state).await;
     let input_tokens = request_input_tokens(&headers, &req);
     let output_tokens = request_output_tokens(&headers, &req, state.num_tokens);
-    let model = req.model.clone().unwrap_or(state.model_name.clone());
     let stream = req.stream == Some(true);
     let id = format!("chatcmpl-mock-{}", rand_id());
     info!(id = %id, model = %model, stream = stream, "received chat/completions request");
@@ -354,10 +374,14 @@ pub(crate) async fn responses(
             .into_response();
     }
 
+    let model = req.model.clone().unwrap_or(state.model_name.clone());
+    state
+        .test_control
+        .record_request(TestEndpoint::Responses, &model, request_class(&headers))
+        .await;
     let request_slot = acquire_request_slot(&state).await;
     let input_tokens = response_input_tokens(&headers, &req);
     let output_tokens = response_output_tokens(&headers, &req, state.num_tokens);
-    let model = req.model.clone().unwrap_or(state.model_name.clone());
     let id = format!("resp-mock-{}", rand_id());
     info!(id = %id, model = %model, "received responses request");
     let request_id = headers
@@ -503,10 +527,14 @@ pub(crate) async fn embeddings(
     headers: HeaderMap,
     Json(req): Json<EmbeddingsRequest>,
 ) -> Response {
+    let model = req.model.clone().unwrap_or(state.model_name.clone());
+    state
+        .test_control
+        .record_request(TestEndpoint::Embeddings, &model, request_class(&headers))
+        .await;
     let _request_slot = acquire_request_slot(&state).await;
     let item_count = embedding_item_count(&req.input);
     let prompt_tokens = request_embedding_tokens(&headers, &req.input);
-    let model = req.model.clone().unwrap_or(state.model_name.clone());
     let encoding_format = req
         .encoding_format
         .unwrap_or(EmbeddingEncodingFormat::Float);

@@ -13,41 +13,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+mod ranking;
+
 use std::fmt;
 use std::sync::Arc;
 
-use parking_lot::RwLock;
-use xxhash_rust::xxh3::xxh3_64;
-
 use super::{
     LoadBalancer, LoadBalancerAlgorithmConfig, LoadBalancerCandidateChoice, LoadBalancerRequest,
-    cache_affinity_key_is_cacheable,
 };
-use crate::routing_state::{RoutedClusterSnapshot, RoutingTargetKey};
+use crate::routing_state::RoutedClusterSnapshot;
+use ranking::{
+    PulsarRankingLookup, PulsarRankingStore, PulsarScorer, ScoredCandidate,
+    compare_ranked_candidate, has_valid_input_capacity,
+};
 
-const RANKING_CACHE_LIMIT: usize = 4096;
-const RANKING_CACHE_PROBATION_LIMIT: usize = 4096;
+#[cfg(test)]
+pub(super) use ranking::{pulsar_hash64, pulsar_ranked_indices};
 
 pub(super) struct PulsarLoadBalancer {
     config: LoadBalancerAlgorithmConfig,
-    ranking_cache: RwLock<PulsarRankingCache>,
+    rankings: PulsarRankingStore,
 }
 
 impl PulsarLoadBalancer {
     pub(super) fn new(config: LoadBalancerAlgorithmConfig) -> Self {
         Self {
             config,
-            ranking_cache: RwLock::new(PulsarRankingCache::default()),
+            rankings: PulsarRankingStore::default(),
         }
     }
 
     #[cfg(test)]
     pub(super) fn cached_affinity_key_bytes(&self) -> usize {
-        let cache = self.ranking_cache.read();
-        cache.rankings.keys().map(String::len).sum::<usize>()
-            + cache.probation.iter().map(String::len).sum::<usize>()
+        self.rankings.cached_key_bytes()
     }
 }
 
@@ -72,160 +70,19 @@ impl LoadBalancer for PulsarLoadBalancer {
                     return None;
                 }
                 let choice = self.choose_from_ranked_indices(request, candidates, &ranking);
-                let cache_affinity_key = request.cache_affinity_key.unwrap_or("");
-                let mut cache = self.ranking_cache.write();
-                cache.refresh_if_needed(request.routing_target, candidates);
-                if let Some(cached) = cache.get_ref(cache_affinity_key) {
-                    return self.choose_from_ranked_indices(request, candidates, cached);
+                if let Some(cached_choice) = self.rankings.insert_or_choose_existing(
+                    request,
+                    candidates,
+                    ranking,
+                    |cached| self.choose_from_ranked_indices(request, candidates, cached),
+                ) {
+                    return Some(cached_choice);
                 }
-                cache.insert(cache_affinity_key.to_string(), ranking);
                 choice
             }
             PulsarRankingLookup::MissBypass => self.choose_by_score_scan(request, candidates),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct PulsarCandidateSignature {
-    cluster_id: String,
-    last_mean_input_tps_bits: u64,
-}
-
-#[derive(Debug, Default)]
-struct PulsarRankingCache {
-    target: Option<RoutingTargetKey>,
-    candidate_signature: Vec<PulsarCandidateSignature>,
-    rankings: HashMap<String, Arc<Vec<usize>>>,
-    ranking_order: VecDeque<String>,
-    probation: HashSet<String>,
-    probation_order: VecDeque<String>,
-}
-
-impl PulsarRankingCache {
-    fn refresh_if_needed(
-        &mut self,
-        target: &RoutingTargetKey,
-        candidates: &[RoutedClusterSnapshot],
-    ) {
-        if self.matches(target, candidates) {
-            return;
-        }
-
-        self.target = Some(target.clone());
-        self.candidate_signature = candidates
-            .iter()
-            .map(|candidate| PulsarCandidateSignature {
-                cluster_id: candidate.cluster_id.clone(),
-                last_mean_input_tps_bits: candidate.stats.last_mean_input_tps.to_bits(),
-            })
-            .collect();
-        self.rankings.clear();
-        self.ranking_order.clear();
-        self.probation.clear();
-        self.probation_order.clear();
-    }
-
-    fn matches(&self, target: &RoutingTargetKey, candidates: &[RoutedClusterSnapshot]) -> bool {
-        self.target.as_ref() == Some(target)
-            && self.candidate_signature.len() == candidates.len()
-            && self
-                .candidate_signature
-                .iter()
-                .zip(candidates)
-                .all(|(cached, candidate)| {
-                    cached.cluster_id == candidate.cluster_id
-                        && cached.last_mean_input_tps_bits
-                            == candidate.stats.last_mean_input_tps.to_bits()
-                })
-    }
-
-    fn get_ref(&self, cache_affinity_key: &str) -> Option<&[usize]> {
-        self.rankings
-            .get(cache_affinity_key)
-            .map(|ranking| ranking.as_slice())
-    }
-
-    fn has_room(&self) -> bool {
-        self.rankings.len() < RANKING_CACHE_LIMIT
-    }
-
-    fn miss_lookup(&mut self, cache_affinity_key: &str) -> PulsarRankingLookup {
-        if self.has_room() || self.remove_probation(cache_affinity_key) {
-            return PulsarRankingLookup::MissCacheable;
-        }
-
-        // Avoid full-ranking work for one-off cold keys once the cache is full,
-        // but admit the key if it misses again and proves it is not one-off.
-        self.insert_probation(cache_affinity_key.to_string());
-        PulsarRankingLookup::MissBypass
-    }
-
-    fn insert(&mut self, cache_affinity_key: String, ranking: Arc<Vec<usize>>) {
-        if let Some(existing) = self.rankings.get_mut(&cache_affinity_key) {
-            *existing = ranking;
-            return;
-        }
-
-        while self.rankings.len() >= RANKING_CACHE_LIMIT {
-            let Some(oldest) = self.ranking_order.pop_front() else {
-                break;
-            };
-            self.rankings.remove(&oldest);
-        }
-        self.remove_probation(&cache_affinity_key);
-        self.ranking_order.push_back(cache_affinity_key.clone());
-        self.rankings.insert(cache_affinity_key, ranking);
-    }
-
-    fn insert_probation(&mut self, cache_affinity_key: String) {
-        if !self.probation.insert(cache_affinity_key.clone()) {
-            return;
-        }
-        self.probation_order.push_back(cache_affinity_key);
-        while self.probation_order.len() > RANKING_CACHE_PROBATION_LIMIT {
-            let Some(oldest) = self.probation_order.pop_front() else {
-                break;
-            };
-            self.probation.remove(&oldest);
-        }
-    }
-
-    fn remove_probation(&mut self, cache_affinity_key: &str) -> bool {
-        if !self.probation.remove(cache_affinity_key) {
-            return false;
-        }
-        if let Some(position) = self
-            .probation_order
-            .iter()
-            .position(|cached| cached == cache_affinity_key)
-        {
-            self.probation_order.remove(position);
-        }
-        true
-    }
-}
-
-enum PulsarRankingLookup {
-    Hit,
-    MissCacheable,
-    MissBypass,
-}
-
-struct ScoredCandidate {
-    score: f64,
-    candidate_index: usize,
-}
-
-fn compare_ranked_candidate(
-    score_a: f64,
-    candidate_a: &RoutedClusterSnapshot,
-    score_b: f64,
-    candidate_b: &RoutedClusterSnapshot,
-) -> Ordering {
-    score_b
-        .total_cmp(&score_a)
-        .then_with(|| candidate_a.cluster_id.cmp(&candidate_b.cluster_id))
 }
 
 impl PulsarLoadBalancer {
@@ -324,23 +181,6 @@ impl PulsarLoadBalancer {
              v
            none feasible --> proxy service-unavailable response
     */
-    fn score(
-        &self,
-        hash_bytes: &mut Vec<u8>,
-        prefix_len: usize,
-        candidate: &RoutedClusterSnapshot,
-    ) -> Option<f64> {
-        let weight = self.weight(candidate)?;
-
-        let u = hash_to_unit_interval(hash_bytes, prefix_len, candidate);
-        let e = -u.ln();
-        if e.is_finite() && e > 0.0 {
-            Some(weight / e)
-        } else {
-            None
-        }
-    }
-
     fn choose_from_ranked_indices(
         &self,
         request: &LoadBalancerRequest<'_>,
@@ -373,39 +213,9 @@ impl PulsarLoadBalancer {
         request: &LoadBalancerRequest<'_>,
         candidates: &[RoutedClusterSnapshot],
     ) -> Option<(PulsarRankingLookup, Option<LoadBalancerCandidateChoice>)> {
-        if candidates.is_empty() {
-            return None;
-        }
-
-        let cache_affinity_key = request.cache_affinity_key.unwrap_or("");
-        if !cache_affinity_key_is_cacheable(cache_affinity_key) {
-            return Some((PulsarRankingLookup::MissBypass, None));
-        }
-
-        {
-            let cache = self.ranking_cache.read();
-            if cache.matches(request.routing_target, candidates)
-                && let Some(ranking) = cache.get_ref(cache_affinity_key)
-            {
-                // Keep the cached ranking borrowed only while the cache guard is
-                // alive, then return the already-materialized choice. This avoids
-                // cloning the Arc on the PULSAR cache-hit path without letting a
-                // borrowed ranking escape the lock guard's lifetime.
-                let choice = self.choose_from_ranked_indices(request, candidates, ranking);
-                return Some((PulsarRankingLookup::Hit, choice));
-            }
-        }
-
-        let mut cache = self.ranking_cache.write();
-        cache.refresh_if_needed(request.routing_target, candidates);
-        if let Some(ranking) = cache.get_ref(cache_affinity_key) {
-            // Another thread may have populated the ranking after the read miss.
-            // Choose while the write guard owns the borrowed slice for the same
-            // reason as the read-hit fast path above.
-            let choice = self.choose_from_ranked_indices(request, candidates, ranking);
-            return Some((PulsarRankingLookup::Hit, choice));
-        }
-        Some((cache.miss_lookup(cache_affinity_key), None))
+        self.rankings.lookup_choice(request, candidates, |ranking| {
+            self.choose_from_ranked_indices(request, candidates, ranking)
+        })
     }
 
     pub(super) fn compute_ranking(
@@ -413,35 +223,7 @@ impl PulsarLoadBalancer {
         request: &LoadBalancerRequest<'_>,
         candidates: &[RoutedClusterSnapshot],
     ) -> Vec<usize> {
-        let mut hash_bytes = pulsar_hash_prefix(
-            self.config.seed(),
-            &request.routing_target.routing_key,
-            &request.routing_target.model_id,
-            request.cache_affinity_key,
-        );
-        let hash_prefix_len = hash_bytes.len();
-        let mut scored = Vec::with_capacity(candidates.len());
-        for (candidate_index, candidate) in candidates.iter().enumerate() {
-            if let Some(score) = self.score(&mut hash_bytes, hash_prefix_len, candidate) {
-                scored.push(ScoredCandidate {
-                    score,
-                    candidate_index,
-                });
-            }
-        }
-
-        scored.sort_unstable_by(|a, b| {
-            compare_ranked_candidate(
-                a.score,
-                &candidates[a.candidate_index],
-                b.score,
-                &candidates[b.candidate_index],
-            )
-        });
-        scored
-            .into_iter()
-            .map(|candidate| candidate.candidate_index)
-            .collect()
+        ranking::pulsar_ranked_indices(self.config.seed(), request, candidates)
     }
 
     fn choose_by_score_scan(
@@ -449,17 +231,11 @@ impl PulsarLoadBalancer {
         request: &LoadBalancerRequest<'_>,
         candidates: &[RoutedClusterSnapshot],
     ) -> Option<LoadBalancerCandidateChoice> {
-        let mut hash_bytes = pulsar_hash_prefix(
-            self.config.seed(),
-            &request.routing_target.routing_key,
-            &request.routing_target.model_id,
-            request.cache_affinity_key,
-        );
-        let hash_prefix_len = hash_bytes.len();
+        let mut scorer = PulsarScorer::new(self.config.seed(), request);
         let mut best_overall = None;
         let mut best_feasible = None;
         for (candidate_index, candidate) in candidates.iter().enumerate() {
-            let Some(score) = self.score(&mut hash_bytes, hash_prefix_len, candidate) else {
+            let Some(score) = scorer.score(candidate) else {
                 continue;
             };
             let is_best_overall = best_overall.as_ref().is_none_or(|best: &ScoredCandidate| {
@@ -525,15 +301,9 @@ impl PulsarLoadBalancer {
         chosen: &RoutedClusterSnapshot,
         chosen_score: f64,
     ) -> bool {
-        let mut hash_bytes = pulsar_hash_prefix(
-            self.config.seed(),
-            &request.routing_target.routing_key,
-            &request.routing_target.model_id,
-            request.cache_affinity_key,
-        );
-        let hash_prefix_len = hash_bytes.len();
+        let mut scorer = PulsarScorer::new(self.config.seed(), request);
         candidates.iter().any(|candidate| {
-            let Some(score) = self.score(&mut hash_bytes, hash_prefix_len, candidate) else {
+            let Some(score) = scorer.score(candidate) else {
                 return false;
             };
             compare_ranked_candidate(score, candidate, chosen_score, chosen).is_lt()
@@ -550,16 +320,10 @@ impl PulsarLoadBalancer {
         chosen: &RoutedClusterSnapshot,
         chosen_score: f64,
     ) -> usize {
-        let mut hash_bytes = pulsar_hash_prefix(
-            self.config.seed(),
-            &request.routing_target.routing_key,
-            &request.routing_target.model_id,
-            request.cache_affinity_key,
-        );
-        let hash_prefix_len = hash_bytes.len();
+        let mut scorer = PulsarScorer::new(self.config.seed(), request);
         let mut rank_depth = 1;
         for candidate in candidates {
-            let Some(score) = self.score(&mut hash_bytes, hash_prefix_len, candidate) else {
+            let Some(score) = scorer.score(candidate) else {
                 continue;
             };
             if compare_ranked_candidate(score, candidate, chosen_score, chosen).is_lt() {
@@ -569,18 +333,9 @@ impl PulsarLoadBalancer {
         rank_depth
     }
 
+    #[cfg(test)]
     pub(super) fn weight(&self, candidate: &RoutedClusterSnapshot) -> Option<f64> {
-        // Default to a stable capacity signal rather than live load. PULSAR needs a
-        // deterministic per-key ranking for cache affinity; if ranking follows transient
-        // load, hot prefixes flap between backends and destroy locality. Relative load
-        // belongs in feasibility gates, not in the base rendezvous weight. `last_mean_input_tps`
-        // is the built-in stable capacity proxy we already have, and for PULSAR it is
-        // required: a backend without valid capacity metadata does not participate.
-        if has_valid_input_capacity(candidate) {
-            return Some(candidate.stats.last_mean_input_tps);
-        }
-
-        None
+        ranking::pulsar_weight(candidate)
     }
 
     pub(super) fn feasibility(
@@ -599,10 +354,6 @@ pub(super) fn input_work_admission_candidate(
 ) -> bool {
     has_valid_input_capacity(candidate)
         && candidate_feasibility(config, request, candidate).is_eligible()
-}
-
-fn has_valid_input_capacity(candidate: &RoutedClusterSnapshot) -> bool {
-    candidate.stats.last_mean_input_tps > 0.0 && candidate.stats.last_mean_input_tps.is_finite()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -657,62 +408,4 @@ fn has_kv_free_token_metrics(candidate: &RoutedClusterSnapshot) -> bool {
     candidate.stats.kv_cache_capacity_tokens > 0
         || candidate.stats.kv_cache_used_tokens > 0
         || candidate.stats.kv_cache_free_tokens > 0
-}
-
-const PULSAR_HASH_VERSION: u8 = 1;
-
-#[cfg(test)]
-pub(super) fn pulsar_hash64(
-    seed: Option<&str>,
-    routing_key: &Option<String>,
-    model_id: &str,
-    cache_affinity_key: Option<&str>,
-    affinity_target_id: &str,
-) -> u64 {
-    let mut bytes = pulsar_hash_prefix(seed, routing_key, model_id, cache_affinity_key);
-    append_tagged_bytes(&mut bytes, b"cluster_id", affinity_target_id.as_bytes());
-    xxh3_64(&bytes)
-}
-
-fn pulsar_hash_prefix(
-    seed: Option<&str>,
-    routing_key: &Option<String>,
-    model_id: &str,
-    cache_affinity_key: Option<&str>,
-) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(256);
-    bytes.push(PULSAR_HASH_VERSION);
-    append_tagged_bytes(&mut bytes, b"seed", seed.unwrap_or("").as_bytes());
-    append_tagged_bytes(
-        &mut bytes,
-        b"routing_key",
-        routing_key.as_deref().unwrap_or("").as_bytes(),
-    );
-    append_tagged_bytes(&mut bytes, b"model_id", model_id.as_bytes());
-    append_tagged_bytes(
-        &mut bytes,
-        b"cache_affinity_key",
-        cache_affinity_key.unwrap_or("").as_bytes(),
-    );
-    bytes
-}
-
-fn hash_to_unit_interval(
-    bytes: &mut Vec<u8>,
-    prefix_len: usize,
-    candidate: &RoutedClusterSnapshot,
-) -> f64 {
-    bytes.truncate(prefix_len);
-    append_tagged_bytes(bytes, b"cluster_id", candidate.cluster_id.as_bytes());
-    let hash = xxh3_64(bytes);
-    let numerator = (hash as f64) + 1.0;
-    let denominator = (u64::MAX as f64) + 2.0;
-    numerator / denominator
-}
-
-fn append_tagged_bytes(bytes: &mut Vec<u8>, tag: &[u8], value: &[u8]) {
-    bytes.extend_from_slice(tag);
-    bytes.push(0xff);
-    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(value);
 }

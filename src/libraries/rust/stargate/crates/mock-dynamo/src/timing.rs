@@ -128,17 +128,19 @@ fn estimate_response_input_tokens(input: Option<&serde_json::Value>) -> usize {
 fn estimate_embedding_tokens(input: &serde_json::Value) -> usize {
     match input {
         serde_json::Value::String(value) => value.len(),
-        serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_number) => {
-            items.len()
-        }
-        serde_json::Value::Array(items) => items
-            .iter()
-            .map(|item| match item {
-                serde_json::Value::String(value) => value.len(),
-                serde_json::Value::Array(values) => values.len(),
-                _ => 1,
-            })
-            .sum(),
+        serde_json::Value::Array(items) => estimate_embedding_array_tokens(items),
+        _ => 1,
+    }
+}
+
+fn estimate_embedding_array_tokens(items: &[serde_json::Value]) -> usize {
+    items.iter().map(estimate_embedding_item_tokens).sum()
+}
+
+fn estimate_embedding_item_tokens(item: &serde_json::Value) -> usize {
+    match item {
+        serde_json::Value::String(value) => at_least_one_token(value.len()),
+        serde_json::Value::Array(values) => at_least_one_token(values.len()),
         _ => 1,
     }
 }

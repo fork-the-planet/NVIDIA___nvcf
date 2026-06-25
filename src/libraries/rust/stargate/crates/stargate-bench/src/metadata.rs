@@ -63,7 +63,8 @@ pub struct RunMetadata {
     pub host: HostMetadata,
     pub kubernetes: KubernetesMetadata,
     pub preflight: PreflightReport,
-    pub local_todos: Vec<String>,
+    #[serde(alias = "local_todos")]
+    pub known_limitations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -162,7 +163,7 @@ pub fn collect_run_metadata(
     let preflight = classify_preflight(benchmark_tier, reliability_mode, &rust, &host, &kubernetes);
 
     RunMetadata {
-        schema_version: 2,
+        schema_version: 3,
         benchmark_tier,
         reliability_mode,
         driver_mode,
@@ -178,7 +179,7 @@ pub fn collect_run_metadata(
         host,
         kubernetes,
         preflight,
-        local_todos: local_todos(),
+        known_limitations: known_limitations(),
     }
 }
 
@@ -472,12 +473,40 @@ fn available_parallelism() -> Option<usize> {
 }
 
 fn infer_target_profile(exe: &str) -> Option<String> {
-    if exe.contains("/target/release/") || exe.contains("\\target\\release\\") {
-        Some("release".to_string())
-    } else if exe.contains("/target/debug/") || exe.contains("\\target\\debug\\") {
-        Some("debug".to_string())
-    } else {
+    TargetProfile::from_exe_path(exe).map(|profile| profile.as_str().to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetProfile {
+    Release,
+    Debug,
+}
+
+impl TargetProfile {
+    fn from_exe_path(exe: &str) -> Option<Self> {
+        let mut previous_was_target = false;
+        for segment in exe.split(['/', '\\']) {
+            if previous_was_target && let Some(profile) = Self::from_segment(segment) {
+                return Some(profile);
+            }
+            previous_was_target = segment == "target";
+        }
         None
+    }
+
+    fn from_segment(segment: &str) -> Option<Self> {
+        match segment {
+            "release" => Some(Self::Release),
+            "debug" => Some(Self::Debug),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Debug => "debug",
+        }
     }
 }
 
@@ -499,14 +528,14 @@ fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn local_todos() -> Vec<String> {
+fn known_limitations() -> Vec<String> {
     vec![
-        "TODO(LINF-135): implement in-cluster driver mode after it can be run against a local or dedicated Kubernetes benchmark cluster.".to_string(),
-        "TODO(LINF-135): implement repeated-trial orchestration for Kubernetes benchmarks after the run lifecycle can be validated end-to-end on a cluster.".to_string(),
-        "TODO(LINF-135): implement privileged network shaping and calibration only in an environment where tc/netem setup can be validated end-to-end.".to_string(),
-        "TODO(LINF-135): implement host CPU/governor/turbo mutation wrapper after reversible setup and restore can be tested on benchmark hardware.".to_string(),
-        "TODO(LINF-135): implement representative multi-node benchmark tier on dedicated benchmark infrastructure, not in local Kind smoke mode.".to_string(),
-        "TODO(LINF-135): promote reliable Kubernetes scenario configs after in-cluster drivers and network profiles are implemented.".to_string(),
+        "LINF-135: in-cluster driver mode is not supported until it can be validated against a local or dedicated Kubernetes benchmark cluster.".to_string(),
+        "LINF-135: repeated-trial orchestration is not supported for Kubernetes benchmarks until the run lifecycle can be validated end-to-end on a cluster.".to_string(),
+        "LINF-135: privileged network shaping and calibration require an environment where tc/netem setup can be validated end-to-end.".to_string(),
+        "LINF-135: host CPU/governor/turbo mutation is not automated until reversible setup and restore can be tested on benchmark hardware.".to_string(),
+        "LINF-135: the representative multi-node benchmark tier requires dedicated benchmark infrastructure and is not part of local Kind smoke mode.".to_string(),
+        "LINF-135: reliable Kubernetes scenario configs depend on validated in-cluster drivers and network profiles.".to_string(),
     ]
 }
 
@@ -616,6 +645,88 @@ mod tests {
                 .iter()
                 .all(|check| check.name != "kubernetes_context")
         );
+    }
+
+    #[test]
+    fn target_profile_infers_target_segments_across_separators() {
+        assert_eq!(
+            infer_target_profile("/repo/target/release/stargate-bench").as_deref(),
+            Some("release")
+        );
+        assert_eq!(
+            infer_target_profile("/repo/target/debug/deps/stargate_bench").as_deref(),
+            Some("debug")
+        );
+        assert_eq!(
+            infer_target_profile(r"C:\repo\target\release\stargate-bench.exe").as_deref(),
+            Some("release")
+        );
+        assert_eq!(
+            infer_target_profile(r"C:\repo/target\debug/deps\stargate_bench.exe").as_deref(),
+            Some("debug")
+        );
+    }
+
+    #[test]
+    fn target_profile_ignores_partial_or_unrelated_segments() {
+        assert_eq!(
+            infer_target_profile("/repo/not-target/release/stargate-bench"),
+            None
+        );
+        assert_eq!(
+            infer_target_profile("/repo/target/release-candidate/stargate-bench"),
+            None
+        );
+        assert_eq!(
+            infer_target_profile("/repo/target/profile/stargate-bench"),
+            None
+        );
+    }
+
+    #[test]
+    fn run_metadata_records_known_limitations_without_todo_backlog() {
+        let metadata = collect_run_metadata(
+            BenchmarkTier::TransportLoopback,
+            ReliabilityMode::Smoke,
+            DriverMode::LocalProcess,
+        );
+        let value = serde_json::to_value(metadata).expect("metadata should serialize");
+
+        assert_eq!(value["schema_version"], 3);
+        assert!(value.get("local_todos").is_none());
+        let limitations = value["known_limitations"]
+            .as_array()
+            .expect("known_limitations should be an array");
+        assert_eq!(limitations.len(), 6);
+        assert!(limitations.iter().all(|limitation| {
+            limitation
+                .as_str()
+                .is_some_and(|text| text.starts_with("LINF-135:") && !text.contains("TODO"))
+        }));
+    }
+
+    #[test]
+    fn run_metadata_reads_schema_v2_local_todos_as_known_limitations() {
+        let metadata = collect_run_metadata(
+            BenchmarkTier::TransportLoopback,
+            ReliabilityMode::Smoke,
+            DriverMode::LocalProcess,
+        );
+        let mut value = serde_json::to_value(metadata).expect("metadata should serialize");
+        value["schema_version"] = 2.into();
+        let object = value
+            .as_object_mut()
+            .expect("serialized metadata should be an object");
+        let limitations = object
+            .remove("known_limitations")
+            .expect("known limitations should be present");
+        object.insert("local_todos".to_string(), limitations);
+
+        let decoded =
+            serde_json::from_value::<RunMetadata>(value).expect("schema v2 metadata should decode");
+
+        assert_eq!(decoded.schema_version, 2);
+        assert_eq!(decoded.known_limitations.len(), 6);
     }
 
     #[test]

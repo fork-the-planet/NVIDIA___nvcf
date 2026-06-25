@@ -13,9 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -23,7 +22,7 @@ use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use prometheus::core::{AtomicU64, GenericCounter};
+use prometheus::core::{AtomicU64, Collector, GenericCounter};
 use prometheus::{
     Encoder, GaugeVec, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder,
 };
@@ -32,501 +31,118 @@ use tracing::{error, info};
 
 use stargate_proto::pb::InferenceServerStatus;
 
+use crate::queue_admission::ObservedRequestState;
 use crate::{CurrentModelStats, RequestObservation, RequestObservationState};
+use stargate_runtime::{OwnedTask, TASK_SHUTDOWN_TIMEOUT};
 
 const PREFIX: &str = "pylon_";
 
-#[derive(Debug, Clone)]
-struct TrackedRequest {
-    model_id: String,
-    state: &'static str,
-    input_tokens: i64,
+#[derive(Debug)]
+struct ProcessMetrics {
+    target_info: IntGaugeVec,
+    registration_stream_connected: IntGaugeVec,
+    reverse_tunnel_connected: IntGaugeVec,
+}
+
+#[derive(Debug)]
+struct RequestMetrics {
+    inflight: IntGaugeVec,
+    state: IntGaugeVec,
+    state_input_tokens: IntGaugeVec,
+    total: IntCounterVec,
+    time_to_response_headers_seconds: HistogramVec,
+    time_to_first_output_seconds: HistogramVec,
+    time_to_first_token_seconds: HistogramVec,
+    duration_seconds: HistogramVec,
+    input_tokens: IntCounterVec,
+    output_tokens: IntCounterVec,
+    stats_sources_total: IntCounterVec,
+    input_tokens_histogram: HistogramVec,
+    output_tokens_histogram: HistogramVec,
+}
+
+#[derive(Debug)]
+struct EngineStatsMetrics {
+    stream_events_total: IntCounterVec,
+    stream_invalid_events_total: IntCounterVec,
+    stream_reconnects_total: IntCounterVec,
+    stream_connected: IntGaugeVec,
+    live_requests: IntGaugeVec,
+    model_states: IntGaugeVec,
+    stale_cleanups_total: IntCounterVec,
+    dirty_snapshots_total: IntCounterVec,
+    source_transitions_total: IntCounterVec,
+}
+
+#[derive(Debug)]
+struct ModelMetrics {
+    output_tps: GaugeVec,
+    embedding_item_tps: GaugeVec,
+    last_mean_input_tps: GaugeVec,
+    max_output_tps: GaugeVec,
+    max_embedding_item_tps: GaugeVec,
+    queue_size: GaugeVec,
+    queued_input_tokens: GaugeVec,
+    kv_cache_capacity_tokens: GaugeVec,
+    kv_cache_used_tokens: GaugeVec,
+    kv_cache_free_tokens: GaugeVec,
+    stats_capability: IntGaugeVec,
+    stats_source: IntGaugeVec,
+    advertised_status: IntGaugeVec,
+    calibration_duration_ms: HistogramVec,
+}
+
+#[derive(Debug)]
+struct RetryMetrics {
+    retryable_responses_total: IntCounterVec,
+    nonretryable_failures_total: IntCounterVec,
+}
+
+#[derive(Debug)]
+struct QueueAdmissionMetrics {
+    decisions_total: IntCounterVec,
+    expected_ms: HistogramVec,
+    actual_ms: HistogramVec,
+}
+
+#[derive(Debug)]
+struct QualityMetrics {
+    checks_total: IntCounterVec,
+    threshold_matches_total: IntCounterVec,
 }
 
 /// Prometheus metrics for one pylon process.
 #[derive(Debug)]
 pub struct PylonMetrics {
     registry: Arc<Registry>,
-    target_info: IntGaugeVec,
-    requests_inflight: IntGaugeVec,
-    requests_state: IntGaugeVec,
-    requests_state_input_tokens: IntGaugeVec,
-    requests_total: IntCounterVec,
-    request_time_to_response_headers_seconds: HistogramVec,
-    request_time_to_first_output_seconds: HistogramVec,
-    request_time_to_first_token_seconds: HistogramVec,
-    request_duration_seconds: HistogramVec,
-    request_input_tokens: IntCounterVec,
-    request_output_tokens: IntCounterVec,
-    request_stats_sources_total: IntCounterVec,
-    engine_stats_stream_events_total: IntCounterVec,
-    engine_stats_stream_invalid_events_total: IntCounterVec,
-    engine_stats_stream_reconnects_total: IntCounterVec,
-    engine_stats_stream_connected: IntGaugeVec,
-    engine_stats_live_requests: IntGaugeVec,
-    engine_stats_model_states: IntGaugeVec,
-    engine_stats_stale_cleanups_total: IntCounterVec,
-    engine_stats_dirty_snapshots_total: IntCounterVec,
-    engine_stats_source_transitions_total: IntCounterVec,
-    request_input_tokens_histogram: HistogramVec,
-    request_output_tokens_histogram: HistogramVec,
-    registration_stream_connected: IntGaugeVec,
-    reverse_tunnel_connected: IntGaugeVec,
-    model_output_tps: GaugeVec,
-    model_embedding_item_tps: GaugeVec,
-    model_last_mean_input_tps: GaugeVec,
-    model_max_output_tps: GaugeVec,
-    model_max_embedding_item_tps: GaugeVec,
-    model_queue_size: GaugeVec,
-    model_queued_input_tokens: GaugeVec,
-    model_kv_cache_capacity_tokens: GaugeVec,
-    model_kv_cache_used_tokens: GaugeVec,
-    model_kv_cache_free_tokens: GaugeVec,
-    model_stats_capability: IntGaugeVec,
-    model_stats_source: IntGaugeVec,
-    model_advertised_status: IntGaugeVec,
-    model_calibration_duration_ms: HistogramVec,
-    retryable_responses_total: IntCounterVec,
-    nonretryable_failures_total: IntCounterVec,
-    queue_admission_decisions_total: IntCounterVec,
-    queue_admission_expected_ms: HistogramVec,
-    queue_admission_actual_ms: HistogramVec,
-    quality_checks_total: IntCounterVec,
-    quality_threshold_matches_total: IntCounterVec,
-    tracked_requests: Mutex<HashMap<String, TrackedRequest>>,
+    process: ProcessMetrics,
+    request: RequestMetrics,
+    engine_stats: EngineStatsMetrics,
+    model: ModelMetrics,
+    retry: RetryMetrics,
+    queue_admission: QueueAdmissionMetrics,
+    quality: QualityMetrics,
 }
 
 impl PylonMetrics {
     pub fn new() -> anyhow::Result<Arc<Self>> {
         let registry = Arc::new(Registry::new());
-
-        let target_info = IntGaugeVec::new(
-            Opts::new("target_info", "Target metadata"),
-            &["service_version", "service_name", "commit"],
-        )?;
-        registry.register(Box::new(target_info.clone()))?;
-
-        let requests_inflight = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}requests_inflight"),
-                "Current number of proxied requests in flight",
-            ),
-            &["model"],
-        )?;
-        registry.register(Box::new(requests_inflight.clone()))?;
-
-        let requests_state = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}requests_state"),
-                "Current number of proxied requests by client-side lifecycle state",
-            ),
-            &["model", "state"],
-        )?;
-        registry.register(Box::new(requests_state.clone()))?;
-
-        let requests_state_input_tokens = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}requests_state_input_tokens"),
-                "Current input tokens for proxied requests by client-side lifecycle state",
-            ),
-            &["model", "state"],
-        )?;
-        registry.register(Box::new(requests_state_input_tokens.clone()))?;
-
-        let requests_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}requests_total"),
-                "Total number of terminal proxied requests observed by pylon",
-            ),
-            &["model", "routing_key", "status"],
-        )?;
-        registry.register(Box::new(requests_total.clone()))?;
-
-        let request_time_to_response_headers_seconds = HistogramVec::new(
-            duration_histogram_opts(
-                "request_time_to_response_headers_seconds",
-                "Time from request start to upstream response headers",
-            ),
-            &["model", "routing_key"],
-        )?;
-        registry.register(Box::new(request_time_to_response_headers_seconds.clone()))?;
-
-        let request_time_to_first_output_seconds = HistogramVec::new(
-            duration_histogram_opts(
-                "request_time_to_first_output_seconds",
-                "Time from request start to first observed output message",
-            ),
-            &["model", "routing_key"],
-        )?;
-        registry.register(Box::new(request_time_to_first_output_seconds.clone()))?;
-
-        let request_time_to_first_token_seconds = HistogramVec::new(
-            duration_histogram_opts(
-                "request_time_to_first_token_seconds",
-                "Time from request start to first observed output token",
-            ),
-            &["model", "routing_key"],
-        )?;
-        registry.register(Box::new(request_time_to_first_token_seconds.clone()))?;
-
-        let request_duration_seconds = HistogramVec::new(
-            prometheus::HistogramOpts::new(
-                format!("{PREFIX}request_duration_seconds"),
-                "Total observed duration for terminal proxied requests",
-            )
-            .buckets(vec![
-                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
-            ]),
-            &["model", "routing_key", "status"],
-        )?;
-        registry.register(Box::new(request_duration_seconds.clone()))?;
-
-        let request_input_tokens = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}request_input_tokens_total"),
-                "Total input tokens observed on terminal proxied requests",
-            ),
-            &["model", "routing_key", "status"],
-        )?;
-        registry.register(Box::new(request_input_tokens.clone()))?;
-
-        let request_output_tokens = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}request_output_tokens_total"),
-                "Total output tokens observed on terminal proxied requests",
-            ),
-            &["model", "routing_key", "status"],
-        )?;
-        registry.register(Box::new(request_output_tokens.clone()))?;
-
-        let request_stats_sources_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}request_stats_sources_total"),
-                "Total terminal proxied requests by stats source observed by pylon",
-            ),
-            &["model", "routing_key", "status", "source"],
-        )?;
-        registry.register(Box::new(request_stats_sources_total.clone()))?;
-
-        let engine_stats_stream_events_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_stream_events_total"),
-                "Total engine stats stream events ingested by type",
-            ),
-            &["type"],
-        )?;
-        registry.register(Box::new(engine_stats_stream_events_total.clone()))?;
-
-        let engine_stats_stream_invalid_events_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_stream_invalid_events_total"),
-                "Total invalid engine stats stream events by reason",
-            ),
-            &["reason"],
-        )?;
-        registry.register(Box::new(engine_stats_stream_invalid_events_total.clone()))?;
-
-        let engine_stats_stream_reconnects_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_stream_reconnects_total"),
-                "Total engine stats stream reconnect attempts by reason",
-            ),
-            &["reason"],
-        )?;
-        registry.register(Box::new(engine_stats_stream_reconnects_total.clone()))?;
-
-        let engine_stats_stream_connected = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_stream_connected"),
-                "Binary gauge: 1 when the engine stats stream is connected",
-            ),
-            &["mode"],
-        )?;
-        registry.register(Box::new(engine_stats_stream_connected.clone()))?;
-
-        let engine_stats_live_requests = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_live_requests"),
-                "Current live request stats entries by source",
-            ),
-            &["source"],
-        )?;
-        registry.register(Box::new(engine_stats_live_requests.clone()))?;
-
-        let engine_stats_model_states = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_model_states"),
-                "Current engine stats aggregate model states by source",
-            ),
-            &["source"],
-        )?;
-        registry.register(Box::new(engine_stats_model_states.clone()))?;
-
-        let engine_stats_stale_cleanups_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_stale_cleanups_total"),
-                "Total stale engine stats cleanups by kind and source",
-            ),
-            &["kind", "source"],
-        )?;
-        registry.register(Box::new(engine_stats_stale_cleanups_total.clone()))?;
-
-        let engine_stats_dirty_snapshots_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_dirty_snapshots_total"),
-                "Total engine stats model snapshots marked dirty by source and reason",
-            ),
-            &["source", "reason"],
-        )?;
-        registry.register(Box::new(engine_stats_dirty_snapshots_total.clone()))?;
-
-        let engine_stats_source_transitions_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}engine_stats_source_transitions_total"),
-                "Total engine stats source-selection transitions",
-            ),
-            &["from", "to", "reason"],
-        )?;
-        registry.register(Box::new(engine_stats_source_transitions_total.clone()))?;
-
-        let request_input_tokens_histogram = HistogramVec::new(
-            token_histogram_opts(
-                "request_input_tokens",
-                "Input tokens per terminal proxied request",
-            ),
-            &["model", "routing_key", "status"],
-        )?;
-        registry.register(Box::new(request_input_tokens_histogram.clone()))?;
-
-        let request_output_tokens_histogram = HistogramVec::new(
-            token_histogram_opts(
-                "request_output_tokens",
-                "Output tokens per terminal proxied request",
-            ),
-            &["model", "routing_key", "status"],
-        )?;
-        registry.register(Box::new(request_output_tokens_histogram.clone()))?;
-
-        let registration_stream_connected = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}registration_stream_connected"),
-                "Binary gauge: 1 when a stargate registration stream is connected",
-            ),
-            &["router"],
-        )?;
-        registry.register(Box::new(registration_stream_connected.clone()))?;
-
-        let reverse_tunnel_connected = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}reverse_tunnel_connected"),
-                "Binary gauge: 1 when a reverse QUIC tunnel is connected to a stargate router",
-            ),
-            &["router"],
-        )?;
-        registry.register(Box::new(reverse_tunnel_connected.clone()))?;
-
-        let model_output_tps = gauge_vec("model_output_tps", "Current output TPS by model")?;
-        registry.register(Box::new(model_output_tps.clone()))?;
-        let model_embedding_item_tps = gauge_vec(
-            "model_embedding_item_tps",
-            "Current embeddings item throughput by model",
-        )?;
-        registry.register(Box::new(model_embedding_item_tps.clone()))?;
-        let model_last_mean_input_tps = gauge_vec(
-            "model_last_mean_input_tps",
-            "Last valid mean input TPS by model",
-        )?;
-        registry.register(Box::new(model_last_mean_input_tps.clone()))?;
-        let model_max_output_tps =
-            gauge_vec("model_max_output_tps", "Observed max output TPS by model")?;
-        registry.register(Box::new(model_max_output_tps.clone()))?;
-        let model_max_embedding_item_tps = gauge_vec(
-            "model_max_embedding_item_tps",
-            "Observed max embeddings item throughput by model",
-        )?;
-        registry.register(Box::new(model_max_embedding_item_tps.clone()))?;
-        let model_queue_size =
-            gauge_vec("model_queue_size", "Current queued request count by model")?;
-        registry.register(Box::new(model_queue_size.clone()))?;
-        let model_queued_input_tokens = gauge_vec(
-            "model_queued_input_tokens",
-            "Current queued input tokens by model",
-        )?;
-        registry.register(Box::new(model_queued_input_tokens.clone()))?;
-        let model_kv_cache_capacity_tokens = gauge_vec(
-            "model_kv_cache_capacity_tokens",
-            "Current KV cache capacity tokens by model",
-        )?;
-        registry.register(Box::new(model_kv_cache_capacity_tokens.clone()))?;
-        let model_kv_cache_used_tokens = gauge_vec(
-            "model_kv_cache_used_tokens",
-            "Current KV cache used tokens by model",
-        )?;
-        registry.register(Box::new(model_kv_cache_used_tokens.clone()))?;
-        let model_kv_cache_free_tokens = gauge_vec(
-            "model_kv_cache_free_tokens",
-            "Current KV cache free tokens by model",
-        )?;
-        registry.register(Box::new(model_kv_cache_free_tokens.clone()))?;
-        let model_stats_capability = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}model_stats_capability"),
-                "Binary gauge for observed stats capability labels by model",
-            ),
-            &["model", "capability"],
-        )?;
-        registry.register(Box::new(model_stats_capability.clone()))?;
-        let model_stats_source = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}model_stats_source"),
-                "Binary gauge for observed stats source labels by model",
-            ),
-            &["model", "source"],
-        )?;
-        registry.register(Box::new(model_stats_source.clone()))?;
-
-        let model_advertised_status = IntGaugeVec::new(
-            Opts::new(
-                format!("{PREFIX}model_advertised_status"),
-                "Current model status advertised to each stargate router; the active status label is 1 and other status labels are 0",
-            ),
-            &["router", "model", "status"],
-        )?;
-        registry.register(Box::new(model_advertised_status.clone()))?;
-
-        let model_calibration_duration_ms = HistogramVec::new(
-            prometheus::HistogramOpts::new(
-                format!("{PREFIX}model_calibration_duration_ms"),
-                "Local bringup calibration duration in milliseconds by model and outcome",
-            )
-            .buckets(vec![
-                10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0, 10_000.0,
-                30_000.0, 60_000.0, 120_000.0, 300_000.0, 600_000.0,
-            ]),
-            &["model", "outcome"],
-        )?;
-        registry.register(Box::new(model_calibration_duration_ms.clone()))?;
-
-        let retryable_responses_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}retryable_responses_total"),
-                "Total number of retryable responses emitted or relayed by pylon",
-            ),
-            &["inference_server_id", "reason", "status"],
-        )?;
-        registry.register(Box::new(retryable_responses_total.clone()))?;
-
-        let nonretryable_failures_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}nonretryable_failures_total"),
-                "Total number of upstream failures not marked retryable by pylon",
-            ),
-            &["inference_server_id", "reason"],
-        )?;
-        registry.register(Box::new(nonretryable_failures_total.clone()))?;
-
-        let queue_admission_decisions_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}queue_admission_decisions_total"),
-                "Total number of local queue mismatch admission decisions",
-            ),
-            &["inference_server_id", "model_id", "result"],
-        )?;
-        registry.register(Box::new(queue_admission_decisions_total.clone()))?;
-
-        let queue_admission_expected_ms = HistogramVec::new(
-            prometheus::HistogramOpts::new(
-                format!("{PREFIX}queue_admission_expected_ms"),
-                "Expected queue milliseconds received from Stargate for local queue admission",
-            )
-            .buckets(vec![
-                0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0,
-                10_000.0, 30_000.0, 60_000.0,
-            ]),
-            &["inference_server_id", "model_id"],
-        )?;
-        registry.register(Box::new(queue_admission_expected_ms.clone()))?;
-
-        let queue_admission_actual_ms = HistogramVec::new(
-            prometheus::HistogramOpts::new(
-                format!("{PREFIX}queue_admission_actual_ms"),
-                "Actual local queue milliseconds used for queue mismatch admission",
-            )
-            .buckets(vec![
-                0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0,
-                10_000.0, 30_000.0, 60_000.0,
-            ]),
-            &["inference_server_id", "model_id"],
-        )?;
-        registry.register(Box::new(queue_admission_actual_ms.clone()))?;
-
-        let quality_checks_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}quality_checks_total"),
-                "Total number of quality checks by result",
-            ),
-            &["model", "result"],
-        )?;
-        registry.register(Box::new(quality_checks_total.clone()))?;
-
-        let quality_threshold_matches_total = IntCounterVec::new(
-            Opts::new(
-                format!("{PREFIX}quality_threshold_matches_total"),
-                "Total number of requests that matched a quality threshold",
-            ),
-            &["model", "reason"],
-        )?;
-        registry.register(Box::new(quality_threshold_matches_total.clone()))?;
-
+        let process = ProcessMetrics::register(&registry)?;
+        let request = RequestMetrics::register(&registry)?;
+        let engine_stats = EngineStatsMetrics::register(&registry)?;
+        let model = ModelMetrics::register(&registry)?;
+        let retry = RetryMetrics::register(&registry)?;
+        let queue_admission = QueueAdmissionMetrics::register(&registry)?;
+        let quality = QualityMetrics::register(&registry)?;
         Ok(Arc::new(Self {
             registry,
-            target_info,
-            requests_inflight,
-            requests_state,
-            requests_state_input_tokens,
-            requests_total,
-            request_time_to_response_headers_seconds,
-            request_time_to_first_output_seconds,
-            request_time_to_first_token_seconds,
-            request_duration_seconds,
-            request_input_tokens,
-            request_output_tokens,
-            request_stats_sources_total,
-            engine_stats_stream_events_total,
-            engine_stats_stream_invalid_events_total,
-            engine_stats_stream_reconnects_total,
-            engine_stats_stream_connected,
-            engine_stats_live_requests,
-            engine_stats_model_states,
-            engine_stats_stale_cleanups_total,
-            engine_stats_dirty_snapshots_total,
-            engine_stats_source_transitions_total,
-            request_input_tokens_histogram,
-            request_output_tokens_histogram,
-            registration_stream_connected,
-            reverse_tunnel_connected,
-            model_output_tps,
-            model_embedding_item_tps,
-            model_last_mean_input_tps,
-            model_max_output_tps,
-            model_max_embedding_item_tps,
-            model_queue_size,
-            model_queued_input_tokens,
-            model_kv_cache_capacity_tokens,
-            model_kv_cache_used_tokens,
-            model_kv_cache_free_tokens,
-            model_stats_capability,
-            model_stats_source,
-            model_advertised_status,
-            model_calibration_duration_ms,
-            retryable_responses_total,
-            nonretryable_failures_total,
-            queue_admission_decisions_total,
-            queue_admission_expected_ms,
-            queue_admission_actual_ms,
-            quality_checks_total,
-            quality_threshold_matches_total,
-            tracked_requests: Mutex::new(HashMap::new()),
+            process,
+            request,
+            engine_stats,
+            model,
+            retry,
+            queue_admission,
+            quality,
         }))
     }
 
@@ -543,90 +159,94 @@ impl PylonMetrics {
     }
 
     pub fn observe_target_info(&self, service_version: &str, service_name: &str, commit: &str) {
-        self.target_info
+        self.process
+            .target_info
             .with_label_values(&[service_version, service_name, commit])
             .set(1);
     }
 
-    pub fn observe_request_observation(&self, observation: &RequestObservation) {
-        let state = request_state_label(observation.state);
-        let input_tokens = saturating_i64(observation.input_tokens);
-        let mut tracked_requests = self
-            .tracked_requests
-            .lock()
-            .expect("pylon metrics request tracker mutex poisoned");
-
-        if let Some(prior) = tracked_requests.remove(&observation.request_id) {
-            self.decrement_tracked_request(&prior);
+    pub(crate) fn observe_request_transition(
+        &self,
+        observation: &RequestObservation,
+        prior: Option<&ObservedRequestState>,
+        current: Option<&ObservedRequestState>,
+    ) {
+        if let Some(prior) = prior {
+            self.decrement_observed_request(prior);
         }
-
         if observation.is_terminal() {
-            self.record_terminal_observation(observation, state);
-        } else {
-            self.requests_inflight
-                .with_label_values(&[&observation.model_id])
+            self.record_terminal_observation(observation, request_state_label(observation.state));
+        }
+        if let Some(current) = current {
+            let state = request_state_label(current.state);
+            let input_tokens = saturating_i64(current.input_tokens);
+            self.request
+                .inflight
+                .with_label_values(&[&current.model_id])
                 .inc();
-            self.requests_state
-                .with_label_values(&[&observation.model_id, state])
+            self.request
+                .state
+                .with_label_values(&[&current.model_id, state])
                 .inc();
-            self.requests_state_input_tokens
-                .with_label_values(&[&observation.model_id, state])
+            self.request
+                .state_input_tokens
+                .with_label_values(&[&current.model_id, state])
                 .add(input_tokens);
-            tracked_requests.insert(
-                observation.request_id.clone(),
-                TrackedRequest {
-                    model_id: observation.model_id.clone(),
-                    state,
-                    input_tokens,
-                },
-            );
         }
     }
 
     pub fn observe_engine_stats_stream_event(&self, event_type: &'static str) {
-        self.engine_stats_stream_events_total
+        self.engine_stats
+            .stream_events_total
             .with_label_values(&[event_type])
             .inc();
     }
 
     pub fn observe_engine_stats_invalid_event(&self, reason: &'static str) {
-        self.engine_stats_stream_invalid_events_total
+        self.engine_stats
+            .stream_invalid_events_total
             .with_label_values(&[reason])
             .inc();
     }
 
     pub fn observe_engine_stats_reconnect(&self, reason: &'static str) {
-        self.engine_stats_stream_reconnects_total
+        self.engine_stats
+            .stream_reconnects_total
             .with_label_values(&[reason])
             .inc();
     }
 
     pub fn observe_engine_stats_stream_connected(&self, mode: &'static str, connected: bool) {
-        self.engine_stats_stream_connected
+        self.engine_stats
+            .stream_connected
             .with_label_values(&[mode])
             .set(i64::from(connected));
     }
 
     pub fn observe_engine_stats_live_requests(&self, source: &'static str, count: usize) {
-        self.engine_stats_live_requests
+        self.engine_stats
+            .live_requests
             .with_label_values(&[source])
             .set(saturating_i64(count as u64));
     }
 
     pub fn observe_engine_stats_model_states(&self, source: &'static str, count: usize) {
-        self.engine_stats_model_states
+        self.engine_stats
+            .model_states
             .with_label_values(&[source])
             .set(saturating_i64(count as u64));
     }
 
     pub fn observe_engine_stats_stale_cleanup(&self, kind: &'static str, source: &'static str) {
-        self.engine_stats_stale_cleanups_total
+        self.engine_stats
+            .stale_cleanups_total
             .with_label_values(&[kind, source])
             .inc();
     }
 
     pub fn observe_engine_stats_dirty_snapshot(&self, source: &'static str, reason: &'static str) {
-        self.engine_stats_dirty_snapshots_total
+        self.engine_stats
+            .dirty_snapshots_total
             .with_label_values(&[source, reason])
             .inc();
     }
@@ -637,49 +257,62 @@ impl PylonMetrics {
         to: &'static str,
         reason: &'static str,
     ) {
-        self.engine_stats_source_transitions_total
+        self.engine_stats
+            .source_transitions_total
             .with_label_values(&[from, to, reason])
             .inc();
     }
 
     pub fn observe_model_stats(&self, model_id: &str, stats: &CurrentModelStats) {
-        self.model_output_tps
+        self.model
+            .output_tps
             .with_label_values(&[model_id])
             .set(stats.output_tps);
-        self.model_embedding_item_tps
+        self.model
+            .embedding_item_tps
             .with_label_values(&[model_id])
             .set(stats.embedding_item_tps);
-        self.model_last_mean_input_tps
+        self.model
+            .last_mean_input_tps
             .with_label_values(&[model_id])
             .set(stats.last_mean_input_tps);
-        self.model_max_output_tps
+        self.model
+            .max_output_tps
             .with_label_values(&[model_id])
             .set(stats.max_output_tps);
-        self.model_max_embedding_item_tps
+        self.model
+            .max_embedding_item_tps
             .with_label_values(&[model_id])
             .set(stats.max_embedding_item_tps);
-        self.model_queue_size
+        self.model
+            .queue_size
             .with_label_values(&[model_id])
             .set(stats.queue_size as f64);
-        self.model_queued_input_tokens
+        self.model
+            .queued_input_tokens
             .with_label_values(&[model_id])
             .set(stats.queued_input_size as f64);
-        self.model_kv_cache_capacity_tokens
+        self.model
+            .kv_cache_capacity_tokens
             .with_label_values(&[model_id])
             .set(stats.kv_cache_capacity_tokens as f64);
-        self.model_kv_cache_used_tokens
+        self.model
+            .kv_cache_used_tokens
             .with_label_values(&[model_id])
             .set(stats.kv_cache_used_tokens as f64);
-        self.model_kv_cache_free_tokens
+        self.model
+            .kv_cache_free_tokens
             .with_label_values(&[model_id])
             .set(stats.kv_cache_free_tokens as f64);
         for capability in &stats.stats_capabilities {
-            self.model_stats_capability
+            self.model
+                .stats_capability
                 .with_label_values(&[model_id, capability])
                 .set(1);
         }
         for source in &stats.stats_sources {
-            self.model_stats_source
+            self.model
+                .stats_source
                 .with_label_values(&[model_id, source])
                 .set(1);
         }
@@ -697,7 +330,8 @@ impl PylonMetrics {
             InferenceServerStatus::Unknown,
         ] {
             let value = i64::from(status == known_status);
-            self.model_advertised_status
+            self.model
+                .advertised_status
                 .with_label_values(&[router_addr, model_id, status_label(known_status)])
                 .set(value);
         }
@@ -710,19 +344,22 @@ impl PylonMetrics {
         success: bool,
     ) {
         let outcome = if success { "success" } else { "failure" };
-        self.model_calibration_duration_ms
+        self.model
+            .calibration_duration_ms
             .with_label_values(&[model_id, outcome])
             .observe(duration.as_secs_f64() * 1_000.0);
     }
 
     pub fn observe_registration_stream_connected(&self, router_addr: &str, connected: bool) {
-        self.registration_stream_connected
+        self.process
+            .registration_stream_connected
             .with_label_values(&[router_addr])
             .set(i64::from(connected));
     }
 
     pub fn observe_reverse_tunnel_connected(&self, router_addr: &str, connected: bool) {
-        self.reverse_tunnel_connected
+        self.process
+            .reverse_tunnel_connected
             .with_label_values(&[router_addr])
             .set(i64::from(connected));
     }
@@ -734,8 +371,11 @@ impl PylonMetrics {
         reason: &str,
         status: &str,
     ) -> GenericCounter<AtomicU64> {
-        self.retryable_responses_total
-            .with_label_values(&[inference_server_id, reason, status])
+        self.retry.retryable_responses_total.with_label_values(&[
+            inference_server_id,
+            reason,
+            status,
+        ])
     }
 
     #[inline]
@@ -744,7 +384,8 @@ impl PylonMetrics {
         inference_server_id: &str,
         reason: &str,
     ) -> GenericCounter<AtomicU64> {
-        self.nonretryable_failures_total
+        self.retry
+            .nonretryable_failures_total
             .with_label_values(&[inference_server_id, reason])
     }
 
@@ -756,86 +397,559 @@ impl PylonMetrics {
         expected_ms: Option<u64>,
         actual_ms: Option<u64>,
     ) {
-        self.queue_admission_decisions_total
+        self.queue_admission
+            .decisions_total
             .with_label_values(&[inference_server_id, model_id, result])
             .inc();
         if let Some(expected_ms) = expected_ms {
-            self.queue_admission_expected_ms
+            self.queue_admission
+                .expected_ms
                 .with_label_values(&[inference_server_id, model_id])
                 .observe(expected_ms as f64);
         }
         if let Some(actual_ms) = actual_ms {
-            self.queue_admission_actual_ms
+            self.queue_admission
+                .actual_ms
                 .with_label_values(&[inference_server_id, model_id])
                 .observe(actual_ms as f64);
         }
     }
 
     pub fn observe_quality_check_result(&self, model_id: &str, result: &str) {
-        self.quality_checks_total
+        self.quality
+            .checks_total
             .with_label_values(&[model_id, result])
             .inc();
     }
 
     pub fn observe_quality_threshold_match(&self, model_id: &str, reason: &str) {
-        self.quality_threshold_matches_total
+        self.quality
+            .threshold_matches_total
             .with_label_values(&[model_id, reason])
             .inc();
     }
 
-    fn decrement_tracked_request(&self, request: &TrackedRequest) {
-        self.requests_inflight
+    fn decrement_observed_request(&self, request: &ObservedRequestState) {
+        let state = request_state_label(request.state);
+        let input_tokens = saturating_i64(request.input_tokens);
+        self.request
+            .inflight
             .with_label_values(&[&request.model_id])
             .dec();
-        self.requests_state
-            .with_label_values(&[&request.model_id, request.state])
+        self.request
+            .state
+            .with_label_values(&[&request.model_id, state])
             .dec();
-        self.requests_state_input_tokens
-            .with_label_values(&[&request.model_id, request.state])
-            .sub(request.input_tokens);
+        self.request
+            .state_input_tokens
+            .with_label_values(&[&request.model_id, state])
+            .sub(input_tokens);
     }
 
     fn record_terminal_observation(&self, observation: &RequestObservation, state: &'static str) {
         let routing_key = observation.routing_key.as_deref().unwrap_or("");
-        self.requests_total
+        self.request
+            .total
             .with_label_values(&[&observation.model_id, routing_key, state])
             .inc();
         if let Some(time_to_response_headers) = observation.time_to_response_headers {
-            self.request_time_to_response_headers_seconds
+            self.request
+                .time_to_response_headers_seconds
                 .with_label_values(&[&observation.model_id, routing_key])
                 .observe(time_to_response_headers.as_secs_f64());
         }
         if let Some(time_to_first_output) = observation.time_to_first_output {
-            self.request_time_to_first_output_seconds
+            self.request
+                .time_to_first_output_seconds
                 .with_label_values(&[&observation.model_id, routing_key])
                 .observe(time_to_first_output.as_secs_f64());
         }
         if let Some(time_to_first_token) = observation.time_to_first_token {
-            self.request_time_to_first_token_seconds
+            self.request
+                .time_to_first_token_seconds
                 .with_label_values(&[&observation.model_id, routing_key])
                 .observe(time_to_first_token.as_secs_f64());
         }
-        self.request_duration_seconds
+        self.request
+            .duration_seconds
             .with_label_values(&[&observation.model_id, routing_key, state])
             .observe(observation.total_duration.as_secs_f64());
-        self.request_input_tokens
+        self.request
+            .input_tokens
             .with_label_values(&[&observation.model_id, routing_key, state])
             .inc_by(observation.input_tokens);
-        self.request_output_tokens
+        self.request
+            .output_tokens
             .with_label_values(&[&observation.model_id, routing_key, state])
             .inc_by(observation.output_tokens);
         if observation.output_tokens_from_chunk_usage {
-            self.request_stats_sources_total
+            self.request
+                .stats_sources_total
                 .with_label_values(&[&observation.model_id, routing_key, state, "chunk_usage"])
                 .inc();
         }
-        self.request_input_tokens_histogram
+        self.request
+            .input_tokens_histogram
             .with_label_values(&[&observation.model_id, routing_key, state])
             .observe(observation.input_tokens as f64);
-        self.request_output_tokens_histogram
+        self.request
+            .output_tokens_histogram
             .with_label_values(&[&observation.model_id, routing_key, state])
             .observe(observation.output_tokens as f64);
     }
+}
+
+impl ProcessMetrics {
+    fn register(registry: &Registry) -> prometheus::Result<Self> {
+        Ok(Self {
+            target_info: register_int_gauge_vec(
+                registry,
+                Opts::new("target_info", "Target metadata"),
+                &["service_version", "service_name", "commit"],
+            )?,
+            registration_stream_connected: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "registration_stream_connected",
+                    "Binary gauge: 1 when a stargate registration stream is connected",
+                ),
+                &["router"],
+            )?,
+            reverse_tunnel_connected: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "reverse_tunnel_connected",
+                    "Binary gauge: 1 when a reverse QUIC tunnel is connected to a stargate router",
+                ),
+                &["router"],
+            )?,
+        })
+    }
+}
+
+impl RequestMetrics {
+    fn register(registry: &Registry) -> prometheus::Result<Self> {
+        Ok(Self {
+            inflight: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "requests_inflight",
+                    "Current number of proxied requests in flight",
+                ),
+                &["model"],
+            )?,
+            state: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "requests_state",
+                    "Current number of proxied requests by client-side lifecycle state",
+                ),
+                &["model", "state"],
+            )?,
+            state_input_tokens: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "requests_state_input_tokens",
+                    "Current input tokens for proxied requests by client-side lifecycle state",
+                ),
+                &["model", "state"],
+            )?,
+            total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "requests_total",
+                    "Total number of terminal proxied requests observed by pylon",
+                ),
+                &["model", "routing_key", "status"],
+            )?,
+            time_to_response_headers_seconds: register_histogram_vec(
+                registry,
+                duration_histogram_opts(
+                    "request_time_to_response_headers_seconds",
+                    "Time from request start to upstream response headers",
+                ),
+                &["model", "routing_key"],
+            )?,
+            time_to_first_output_seconds: register_histogram_vec(
+                registry,
+                duration_histogram_opts(
+                    "request_time_to_first_output_seconds",
+                    "Time from request start to first observed output message",
+                ),
+                &["model", "routing_key"],
+            )?,
+            time_to_first_token_seconds: register_histogram_vec(
+                registry,
+                duration_histogram_opts(
+                    "request_time_to_first_token_seconds",
+                    "Time from request start to first observed output token",
+                ),
+                &["model", "routing_key"],
+            )?,
+            duration_seconds: register_histogram_vec(
+                registry,
+                prometheus::HistogramOpts::new(
+                    format!("{PREFIX}request_duration_seconds"),
+                    "Total observed duration for terminal proxied requests",
+                )
+                .buckets(vec![
+                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+                    60.0,
+                ]),
+                &["model", "routing_key", "status"],
+            )?,
+            input_tokens: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "request_input_tokens_total",
+                    "Total input tokens observed on terminal proxied requests",
+                ),
+                &["model", "routing_key", "status"],
+            )?,
+            output_tokens: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "request_output_tokens_total",
+                    "Total output tokens observed on terminal proxied requests",
+                ),
+                &["model", "routing_key", "status"],
+            )?,
+            stats_sources_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "request_stats_sources_total",
+                    "Total terminal proxied requests by stats source observed by pylon",
+                ),
+                &["model", "routing_key", "status", "source"],
+            )?,
+            input_tokens_histogram: register_histogram_vec(
+                registry,
+                token_histogram_opts(
+                    "request_input_tokens",
+                    "Input tokens per terminal proxied request",
+                ),
+                &["model", "routing_key", "status"],
+            )?,
+            output_tokens_histogram: register_histogram_vec(
+                registry,
+                token_histogram_opts(
+                    "request_output_tokens",
+                    "Output tokens per terminal proxied request",
+                ),
+                &["model", "routing_key", "status"],
+            )?,
+        })
+    }
+}
+
+impl EngineStatsMetrics {
+    fn register(registry: &Registry) -> prometheus::Result<Self> {
+        Ok(Self {
+            stream_events_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_stream_events_total",
+                    "Total engine stats stream events ingested by type",
+                ),
+                &["type"],
+            )?,
+            stream_invalid_events_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_stream_invalid_events_total",
+                    "Total invalid engine stats stream events by reason",
+                ),
+                &["reason"],
+            )?,
+            stream_reconnects_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_stream_reconnects_total",
+                    "Total engine stats stream reconnect attempts by reason",
+                ),
+                &["reason"],
+            )?,
+            stream_connected: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_stream_connected",
+                    "Binary gauge: 1 when the engine stats stream is connected",
+                ),
+                &["mode"],
+            )?,
+            live_requests: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_live_requests",
+                    "Current live request stats entries by source",
+                ),
+                &["source"],
+            )?,
+            model_states: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_model_states",
+                    "Current engine stats aggregate model states by source",
+                ),
+                &["source"],
+            )?,
+            stale_cleanups_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_stale_cleanups_total",
+                    "Total stale engine stats cleanups by kind and source",
+                ),
+                &["kind", "source"],
+            )?,
+            dirty_snapshots_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_dirty_snapshots_total",
+                    "Total engine stats model snapshots marked dirty by source and reason",
+                ),
+                &["source", "reason"],
+            )?,
+            source_transitions_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "engine_stats_source_transitions_total",
+                    "Total engine stats source-selection transitions",
+                ),
+                &["from", "to", "reason"],
+            )?,
+        })
+    }
+}
+
+impl ModelMetrics {
+    fn register(registry: &Registry) -> prometheus::Result<Self> {
+        Ok(Self {
+            output_tps: register_model_gauge_vec(
+                registry,
+                "model_output_tps",
+                "Current output TPS by model",
+            )?,
+            embedding_item_tps: register_model_gauge_vec(
+                registry,
+                "model_embedding_item_tps",
+                "Current embeddings item throughput by model",
+            )?,
+            last_mean_input_tps: register_model_gauge_vec(
+                registry,
+                "model_last_mean_input_tps",
+                "Last valid mean input TPS by model",
+            )?,
+            max_output_tps: register_model_gauge_vec(
+                registry,
+                "model_max_output_tps",
+                "Observed max output TPS by model",
+            )?,
+            max_embedding_item_tps: register_model_gauge_vec(
+                registry,
+                "model_max_embedding_item_tps",
+                "Observed max embeddings item throughput by model",
+            )?,
+            queue_size: register_model_gauge_vec(
+                registry,
+                "model_queue_size",
+                "Current queued request count by model",
+            )?,
+            queued_input_tokens: register_model_gauge_vec(
+                registry,
+                "model_queued_input_tokens",
+                "Current queued input tokens by model",
+            )?,
+            kv_cache_capacity_tokens: register_model_gauge_vec(
+                registry,
+                "model_kv_cache_capacity_tokens",
+                "Current KV cache capacity tokens by model",
+            )?,
+            kv_cache_used_tokens: register_model_gauge_vec(
+                registry,
+                "model_kv_cache_used_tokens",
+                "Current KV cache used tokens by model",
+            )?,
+            kv_cache_free_tokens: register_model_gauge_vec(
+                registry,
+                "model_kv_cache_free_tokens",
+                "Current KV cache free tokens by model",
+            )?,
+            stats_capability: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "model_stats_capability",
+                    "Binary gauge for observed stats capability labels by model",
+                ),
+                &["model", "capability"],
+            )?,
+            stats_source: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "model_stats_source",
+                    "Binary gauge for observed stats source labels by model",
+                ),
+                &["model", "source"],
+            )?,
+            advertised_status: register_int_gauge_vec(
+                registry,
+                prefixed_opts(
+                    "model_advertised_status",
+                    "Current model status advertised to each stargate router; the active status label is 1 and other status labels are 0",
+                ),
+                &["router", "model", "status"],
+            )?,
+            calibration_duration_ms: register_histogram_vec(
+                registry,
+                prometheus::HistogramOpts::new(
+                    format!("{PREFIX}model_calibration_duration_ms"),
+                    "Local bringup calibration duration in milliseconds by model and outcome",
+                )
+                .buckets(vec![
+                    10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0, 10_000.0,
+                    30_000.0, 60_000.0, 120_000.0, 300_000.0, 600_000.0,
+                ]),
+                &["model", "outcome"],
+            )?,
+        })
+    }
+}
+
+impl RetryMetrics {
+    fn register(registry: &Registry) -> prometheus::Result<Self> {
+        Ok(Self {
+            retryable_responses_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "retryable_responses_total",
+                    "Total number of retryable responses emitted or relayed by pylon",
+                ),
+                &["inference_server_id", "reason", "status"],
+            )?,
+            nonretryable_failures_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "nonretryable_failures_total",
+                    "Total number of upstream failures not marked retryable by pylon",
+                ),
+                &["inference_server_id", "reason"],
+            )?,
+        })
+    }
+}
+
+impl QueueAdmissionMetrics {
+    fn register(registry: &Registry) -> prometheus::Result<Self> {
+        Ok(Self {
+            decisions_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "queue_admission_decisions_total",
+                    "Total number of local queue mismatch admission decisions",
+                ),
+                &["inference_server_id", "model_id", "result"],
+            )?,
+            expected_ms: register_queue_admission_histogram(
+                registry,
+                "queue_admission_expected_ms",
+                "Expected queue milliseconds received from Stargate for local queue admission",
+            )?,
+            actual_ms: register_queue_admission_histogram(
+                registry,
+                "queue_admission_actual_ms",
+                "Actual local queue milliseconds used for queue mismatch admission",
+            )?,
+        })
+    }
+}
+
+impl QualityMetrics {
+    fn register(registry: &Registry) -> prometheus::Result<Self> {
+        Ok(Self {
+            checks_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "quality_checks_total",
+                    "Total number of quality checks by result",
+                ),
+                &["model", "result"],
+            )?,
+            threshold_matches_total: register_int_counter_vec(
+                registry,
+                prefixed_opts(
+                    "quality_threshold_matches_total",
+                    "Total number of requests that matched a quality threshold",
+                ),
+                &["model", "reason"],
+            )?,
+        })
+    }
+}
+
+fn register_collector<C>(registry: &Registry, collector: C) -> prometheus::Result<C>
+where
+    C: Collector + Clone + 'static,
+{
+    registry.register(Box::new(collector.clone()))?;
+    Ok(collector)
+}
+
+fn prefixed_opts(metric_name: &str, help: &str) -> Opts {
+    Opts::new(format!("{PREFIX}{metric_name}"), help)
+}
+
+fn register_int_gauge_vec(
+    registry: &Registry,
+    opts: Opts,
+    labels: &[&str],
+) -> prometheus::Result<IntGaugeVec> {
+    register_collector(registry, IntGaugeVec::new(opts, labels)?)
+}
+
+fn register_int_counter_vec(
+    registry: &Registry,
+    opts: Opts,
+    labels: &[&str],
+) -> prometheus::Result<IntCounterVec> {
+    register_collector(registry, IntCounterVec::new(opts, labels)?)
+}
+
+fn register_gauge_vec(
+    registry: &Registry,
+    opts: Opts,
+    labels: &[&str],
+) -> prometheus::Result<GaugeVec> {
+    register_collector(registry, GaugeVec::new(opts, labels)?)
+}
+
+fn register_histogram_vec(
+    registry: &Registry,
+    opts: prometheus::HistogramOpts,
+    labels: &[&str],
+) -> prometheus::Result<HistogramVec> {
+    register_collector(registry, HistogramVec::new(opts, labels)?)
+}
+
+fn register_model_gauge_vec(
+    registry: &Registry,
+    metric_name: &str,
+    help: &str,
+) -> prometheus::Result<GaugeVec> {
+    register_gauge_vec(registry, prefixed_opts(metric_name, help), &["model"])
+}
+
+fn register_queue_admission_histogram(
+    registry: &Registry,
+    metric_name: &str,
+    help: &str,
+) -> prometheus::Result<HistogramVec> {
+    register_histogram_vec(
+        registry,
+        prometheus::HistogramOpts::new(format!("{PREFIX}{metric_name}"), help).buckets(vec![
+            0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0,
+            10_000.0, 30_000.0, 60_000.0,
+        ]),
+        &["inference_server_id", "model_id"],
+    )
 }
 
 fn duration_histogram_opts(metric_name: &str, help: &str) -> prometheus::HistogramOpts {
@@ -849,13 +963,6 @@ fn token_histogram_opts(metric_name: &str, help: &str) -> prometheus::HistogramO
         1.0, 2.5, 5.0, 7.5, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1_000.0, 2_500.0,
         5_000.0, 7_500.0, 10_000.0, 25_000.0, 50_000.0, 75_000.0, 100_000.0, 250_000.0, 500_000.0,
     ])
-}
-
-fn gauge_vec(metric_name: &str, help: &str) -> prometheus::Result<GaugeVec> {
-    GaugeVec::new(
-        Opts::new(format!("{PREFIX}{metric_name}"), help),
-        &["model"],
-    )
 }
 
 fn request_state_label(state: RequestObservationState) -> &'static str {
@@ -904,7 +1011,24 @@ async fn get_metrics(
     ))
 }
 
-pub async fn start_metrics_server(addr: SocketAddr, registry: Arc<Registry>) -> anyhow::Result<()> {
+pub struct MetricsServerHandle {
+    task: OwnedTask,
+}
+
+impl MetricsServerHandle {
+    pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
+        self.task.wait_for_exit().await
+    }
+
+    pub async fn shutdown(self) {
+        self.task.shutdown(TASK_SHUTDOWN_TIMEOUT).await;
+    }
+}
+
+pub async fn start_metrics_server(
+    addr: SocketAddr,
+    registry: Arc<Registry>,
+) -> anyhow::Result<MetricsServerHandle> {
     let router = Router::new()
         .route("/metrics", get(get_metrics))
         .with_state(Arc::new(MetricsServerState { registry }));
@@ -912,19 +1036,27 @@ pub async fn start_metrics_server(addr: SocketAddr, registry: Arc<Registry>) -> 
     let listener = TcpListener::bind(addr).await?;
     info!(addr = %addr, "pylon metrics server listening");
 
-    axum::serve(listener, router).await?;
-    Ok(())
+    let task = OwnedTask::spawn("metrics server", move |stop| async move {
+        if let Err(error) = axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+        {
+            error!(error = %error, "pylon metrics server failed");
+        }
+    });
+    Ok(MetricsServerHandle { task })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use stargate_proto::pb::InferenceServerStatus;
 
     use crate::{
-        CurrentModelStats, PylonMetrics, RequestObservation, RequestObservationEndpoint,
-        RequestObservationState,
+        CurrentModelStats, PylonMetrics, PylonRuntimeState, RequestObservation,
+        RequestObservationEndpoint, RequestObservationState,
     };
 
     fn observation(
@@ -955,6 +1087,10 @@ mod tests {
         }
     }
 
+    fn metrics_runtime(metrics: Arc<PylonMetrics>) -> PylonRuntimeState {
+        PylonRuntimeState::observed(InferenceServerStatus::Unknown, &[], 4, Some(metrics)).0
+    }
+
     #[test]
     fn target_info_and_connectivity_gauges_are_recorded() {
         let metrics = PylonMetrics::new().expect("metrics should initialize");
@@ -972,10 +1108,95 @@ mod tests {
     }
 
     #[test]
-    fn request_observations_update_state_gauges_and_terminal_counters() {
+    fn engine_stats_metrics_are_recorded_by_mode_source_and_reason() {
         let metrics = PylonMetrics::new().expect("metrics should initialize");
 
-        metrics.observe_request_observation(&observation(
+        metrics.observe_engine_stats_stream_event("stats");
+        metrics.observe_engine_stats_invalid_event("json_parse");
+        metrics.observe_engine_stats_reconnect("eof");
+        metrics.observe_engine_stats_stream_connected("auto", true);
+        metrics.observe_engine_stats_live_requests("engine_stats_stream", 2);
+        metrics.observe_engine_stats_model_states("openai_fallback", 3);
+        metrics.observe_engine_stats_stale_cleanup("request", "engine_stats_stream");
+        metrics.observe_engine_stats_dirty_snapshot("openai_fallback", "missing_model");
+        metrics.observe_engine_stats_source_transition(
+            "openai_fallback",
+            "engine_stats_stream",
+            "fresh_stream",
+        );
+
+        let body = metrics.gather_text().expect("metrics should encode");
+        assert!(body.contains(r#"pylon_engine_stats_stream_events_total{type="stats"} 1"#));
+        assert!(
+            body.contains(
+                r#"pylon_engine_stats_stream_invalid_events_total{reason="json_parse"} 1"#
+            )
+        );
+        assert!(body.contains(r#"pylon_engine_stats_stream_reconnects_total{reason="eof"} 1"#));
+        assert!(body.contains(r#"pylon_engine_stats_stream_connected{mode="auto"} 1"#));
+        assert!(
+            body.contains(r#"pylon_engine_stats_live_requests{source="engine_stats_stream"} 2"#)
+        );
+        assert!(body.contains(r#"pylon_engine_stats_model_states{source="openai_fallback"} 3"#));
+        assert!(body.contains(
+            r#"pylon_engine_stats_stale_cleanups_total{kind="request",source="engine_stats_stream"} 1"#
+        ));
+        assert!(body.contains(
+            r#"pylon_engine_stats_dirty_snapshots_total{reason="missing_model",source="openai_fallback"} 1"#
+        ));
+        assert!(body.contains(
+            r#"pylon_engine_stats_source_transitions_total{from="openai_fallback",reason="fresh_stream",to="engine_stats_stream"} 1"#
+        ));
+    }
+
+    #[test]
+    fn retry_failure_and_queue_admission_metrics_are_recorded() {
+        let metrics = PylonMetrics::new().expect("metrics should initialize");
+
+        metrics
+            .retryable_responses_total("pylon-a", "upstream_status", "503")
+            .inc();
+        metrics
+            .nonretryable_failures_total("pylon-a", "local_connect_failure")
+            .inc();
+        metrics.observe_queue_admission_decision(
+            "pylon-a",
+            "model-a",
+            "rejected",
+            Some(17),
+            Some(23),
+        );
+
+        let body = metrics.gather_text().expect("metrics should encode");
+        assert!(body.contains(
+            r#"pylon_retryable_responses_total{inference_server_id="pylon-a",reason="upstream_status",status="503"} 1"#
+        ));
+        assert!(body.contains(
+            r#"pylon_nonretryable_failures_total{inference_server_id="pylon-a",reason="local_connect_failure"} 1"#
+        ));
+        assert!(body.contains(
+            r#"pylon_queue_admission_decisions_total{inference_server_id="pylon-a",model_id="model-a",result="rejected"} 1"#
+        ));
+        assert!(body.contains(
+            r#"pylon_queue_admission_expected_ms_count{inference_server_id="pylon-a",model_id="model-a"} 1"#
+        ));
+        assert!(body.contains(
+            r#"pylon_queue_admission_expected_ms_sum{inference_server_id="pylon-a",model_id="model-a"} 17"#
+        ));
+        assert!(body.contains(
+            r#"pylon_queue_admission_actual_ms_count{inference_server_id="pylon-a",model_id="model-a"} 1"#
+        ));
+        assert!(body.contains(
+            r#"pylon_queue_admission_actual_ms_sum{inference_server_id="pylon-a",model_id="model-a"} 23"#
+        ));
+    }
+
+    #[test]
+    fn request_observations_update_state_gauges_and_terminal_counters() {
+        let metrics = PylonMetrics::new().expect("metrics should initialize");
+        let runtime_state = metrics_runtime(metrics.clone());
+
+        runtime_state.transition_request_observation(observation(
             "req-1",
             RequestObservationState::InputProcessing,
             11,
@@ -989,7 +1210,7 @@ mod tests {
             r#"pylon_requests_state_input_tokens{model="model-a",state="input_processing"} 11"#
         ));
 
-        metrics.observe_request_observation(&observation(
+        runtime_state.transition_request_observation(observation(
             "req-1",
             RequestObservationState::OutputGeneration,
             11,
@@ -1003,7 +1224,7 @@ mod tests {
             body.contains(r#"pylon_requests_state{model="model-a",state="output_generation"} 1"#)
         );
 
-        metrics.observe_request_observation(&observation(
+        runtime_state.transition_request_observation(observation(
             "req-1",
             RequestObservationState::Complete,
             11,
@@ -1042,10 +1263,11 @@ mod tests {
     #[test]
     fn terminal_observations_record_stats_sources() {
         let metrics = PylonMetrics::new().expect("metrics should initialize");
+        let runtime_state = metrics_runtime(metrics.clone());
         let mut observation = observation("req-1", RequestObservationState::Complete, 11, 3);
         observation.output_tokens_from_chunk_usage = true;
 
-        metrics.observe_request_observation(&observation);
+        runtime_state.transition_request_observation(observation);
 
         let body = metrics.gather_text().expect("metrics should encode");
         assert!(body.lines().any(|line| {

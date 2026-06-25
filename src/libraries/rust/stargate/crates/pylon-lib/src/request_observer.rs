@@ -16,9 +16,25 @@
 use std::time::{Duration, Instant};
 
 use reqwest::header::HeaderMap;
+#[cfg(test)]
 use stargate_protocol::tunnel_contract::{
-    HEADER_INPUT_TOKENS, HEADER_MODEL, HEADER_PRIORITY, HEADER_REQUEST_ID, HEADER_ROUTING_KEY,
+    HEADER_INPUT_TOKENS, HEADER_MODEL, HEADER_REQUEST_ID, HEADER_ROUTING_KEY,
 };
+
+use crate::runtime_state::PylonRuntimeState;
+
+mod embeddings;
+mod headers;
+mod tunnel;
+
+#[cfg(test)]
+use embeddings::{EmbeddingsRequestObserver, embedding_items_from_request_body};
+#[cfg(test)]
+use headers::RequiredHeaderErrorKind;
+pub(crate) use headers::{
+    MissingRequiredHeaderError, RequiredTunnelHeaders, validate_required_tunnel_headers,
+};
+pub(crate) use tunnel::TunnelRequestObserver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestObservationState {
@@ -143,26 +159,26 @@ pub(crate) struct RequestObserver {
     priority: u32,
     input_tokens: u64,
     state: RequestLifecycleState,
-    observation_tx: Option<flume::Sender<RequestObservation>>,
+    runtime_state: PylonRuntimeState,
 }
 
 impl RequestObserver {
     #[cfg(test)]
     pub(crate) fn new(
         request_headers: &HeaderMap,
-        observation_tx: Option<flume::Sender<RequestObservation>>,
+        runtime_state: PylonRuntimeState,
     ) -> Result<Self, MissingRequiredHeaderError> {
         Ok(Self::from_required(
             RequestObservationEndpoint::ChatCompletions,
             validate_required_tunnel_headers(request_headers)?,
-            observation_tx,
+            runtime_state,
         ))
     }
 
     pub(crate) fn from_required(
         endpoint: RequestObservationEndpoint,
         required: RequiredTunnelHeaders,
-        observation_tx: Option<flume::Sender<RequestObservation>>,
+        runtime_state: PylonRuntimeState,
     ) -> Self {
         let RequiredTunnelHeaders {
             request_id,
@@ -181,7 +197,7 @@ impl RequestObserver {
             priority,
             input_tokens,
             state: RequestLifecycleState::UpstreamConnecting,
-            observation_tx,
+            runtime_state,
         };
         observer.emit();
         observer
@@ -695,15 +711,7 @@ impl RequestObserver {
             "client request observed"
         );
 
-        if let Some(tx) = &self.observation_tx
-            && let Err(error) = tx.try_send(observation)
-        {
-            tracing::warn!(
-                request_id = self.request_id,
-                error = %error,
-                "dropping request observation"
-            );
-        }
+        self.runtime_state.observe_request(observation);
     }
 }
 
@@ -715,332 +723,37 @@ impl Drop for RequestObserver {
     }
 }
 
-pub(crate) struct EmbeddingsRequestObserver {
-    required: RequiredTunnelHeaders,
-    started_at: Instant,
-    embedding_items: Option<u64>,
-    upstream_status: Option<u16>,
-    response_headers_at: Option<Instant>,
-    state: RequestObservationState,
-    observation_tx: Option<flume::Sender<RequestObservation>>,
-}
-
-impl EmbeddingsRequestObserver {
-    pub(crate) fn accepted(
-        required: RequiredTunnelHeaders,
-        observation_tx: Option<flume::Sender<RequestObservation>>,
-    ) -> Self {
-        Self::with_embedding_items(required, None, observation_tx)
-    }
-
-    fn with_embedding_items(
-        required: RequiredTunnelHeaders,
-        embedding_items: Option<u64>,
-        observation_tx: Option<flume::Sender<RequestObservation>>,
-    ) -> Self {
-        let started_at = required.accepted_at;
-        let mut observer = Self {
-            required,
-            started_at,
-            embedding_items,
-            upstream_status: None,
-            response_headers_at: None,
-            state: RequestObservationState::UpstreamConnecting,
-            observation_tx,
-        };
-        observer.emit();
-        observer
-    }
-
-    pub(crate) fn update_embedding_items(&mut self, embedding_items: Option<u64>) {
-        if self.embedding_items == embedding_items {
-            return;
-        }
-        self.embedding_items = embedding_items;
-        self.emit();
-    }
-
-    pub(crate) fn on_upstream_response_headers(&mut self, status: u16) {
-        if self.is_terminal() {
-            panic!(
-                "invalid response-header transition for request_id={} from state={:?}",
-                self.required.request_id, self.state
-            );
-        }
-        self.upstream_status = Some(status);
-        self.response_headers_at = Some(Instant::now());
-        self.state = RequestObservationState::InputProcessing;
-        self.emit();
-    }
-
-    pub(crate) fn finish(&mut self) {
-        if self.is_terminal() {
-            panic!(
-                "invalid finish transition for request_id={} from state={:?}",
-                self.required.request_id, self.state
-            );
-        }
-        self.state = if self
-            .upstream_status
-            .is_some_and(|status| (200..300).contains(&status))
-        {
-            RequestObservationState::Complete
-        } else {
-            RequestObservationState::Failed
-        };
-        self.emit();
-    }
-
-    pub(crate) fn fail(&mut self) {
-        if self.is_terminal() {
-            panic!(
-                "invalid fail transition for request_id={} from state={:?}",
-                self.required.request_id, self.state
-            );
-        }
-        self.state = RequestObservationState::Failed;
-        self.emit();
-    }
-
-    pub(crate) fn is_terminal(&self) -> bool {
-        matches!(
-            self.state,
-            RequestObservationState::Complete
-                | RequestObservationState::Failed
-                | RequestObservationState::Cancelled
-        )
-    }
-
-    fn cancel(&mut self) {
-        if self.is_terminal() {
-            panic!(
-                "invalid cancel transition for request_id={} from state={:?}",
-                self.required.request_id, self.state
-            );
-        }
-        self.state = RequestObservationState::Cancelled;
-        self.emit();
-    }
-
-    fn emit(&mut self) {
-        let observation = RequestObservation {
-            endpoint: RequestObservationEndpoint::Embeddings,
-            request_id: self.required.request_id.clone(),
-            routing_key: self.required.routing_key.clone(),
-            model_id: self.required.model_id.clone(),
-            priority: self.required.priority,
-            input_tokens: self.required.input_tokens,
-            embedding_items: self.embedding_items.unwrap_or_default(),
-            embedding_items_observed: self.embedding_items.is_some(),
-            upstream_status: self.upstream_status,
-            output_messages: 0,
-            output_tokens: 0,
-            output_tokens_explicit: false,
-            output_tokens_from_chunk_usage: false,
-            state: self.state,
-            time_to_response_headers: self
-                .response_headers_at
-                .map(|instant| instant.saturating_duration_since(self.started_at)),
-            time_to_first_output: None,
-            time_to_first_token: None,
-            total_duration: self.started_at.elapsed(),
-        };
-
-        tracing::info!(
-            request_id = observation.request_id,
-            endpoint = ?observation.endpoint,
-            routing_key = observation.routing_key.as_deref().unwrap_or(""),
-            model_id = observation.model_id.as_str(),
-            priority = observation.priority,
-            input_tokens = observation.input_tokens,
-            embedding_items = ?observation
-                .embedding_items_observed
-                .then_some(observation.embedding_items),
-            upstream_status = observation.upstream_status.unwrap_or_default(),
-            state = ?observation.state,
-            time_to_response_headers_ms = observation
-                .time_to_response_headers
-                .map(|d| d.as_secs_f64() * 1000.0)
-                .unwrap_or_default(),
-            total_duration_ms = observation.total_duration.as_secs_f64() * 1000.0,
-            "embeddings request observed"
-        );
-
-        if let Some(tx) = &self.observation_tx
-            && let Err(error) = tx.try_send(observation)
-        {
-            tracing::warn!(
-                request_id = self.required.request_id,
-                error = %error,
-                "dropping embeddings request observation"
-            );
-        }
-    }
-}
-
-impl Drop for EmbeddingsRequestObserver {
-    fn drop(&mut self) {
-        if !self.is_terminal() {
-            self.cancel();
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct MissingRequiredHeaderError {
-    pub header_name: &'static str,
-    pub kind: RequiredHeaderErrorKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RequiredHeaderErrorKind {
-    Missing,
-    Invalid,
-}
-
-impl MissingRequiredHeaderError {
-    pub(crate) fn new(header_name: &'static str) -> Self {
-        Self {
-            header_name,
-            kind: RequiredHeaderErrorKind::Missing,
-        }
-    }
-
-    pub(crate) fn invalid(header_name: &'static str) -> Self {
-        Self {
-            header_name,
-            kind: RequiredHeaderErrorKind::Invalid,
-        }
-    }
-
-    pub(crate) fn message(&self) -> String {
-        match self.kind {
-            RequiredHeaderErrorKind::Missing => {
-                format!("missing required {} header", self.header_name)
-            }
-            RequiredHeaderErrorKind::Invalid => format!("invalid {} header", self.header_name),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RequiredTunnelHeaders {
-    pub request_id: String,
-    pub routing_key: Option<String>,
-    pub model_id: String,
-    pub priority: u32,
-    pub input_tokens: u64,
-    pub(crate) accepted_at: Instant,
-}
-
-pub(crate) fn validate_required_tunnel_headers(
-    request_headers: &HeaderMap,
-) -> Result<RequiredTunnelHeaders, MissingRequiredHeaderError> {
-    let request_id = get_optional_header(request_headers, HEADER_REQUEST_ID)
-        .ok_or_else(|| MissingRequiredHeaderError::new(HEADER_REQUEST_ID))?;
-    let routing_key = get_optional_header(request_headers, HEADER_ROUTING_KEY);
-    let model_id = get_optional_header(request_headers, HEADER_MODEL)
-        .ok_or_else(|| MissingRequiredHeaderError::new(HEADER_MODEL))?;
-    let input_tokens = parse_optional_u64_header(request_headers, HEADER_INPUT_TOKENS)?
-        .ok_or_else(|| MissingRequiredHeaderError::new(HEADER_INPUT_TOKENS))?;
-    let priority = parse_optional_u32_header(request_headers, HEADER_PRIORITY)?.unwrap_or_default();
-    Ok(RequiredTunnelHeaders {
-        request_id,
-        routing_key,
-        model_id,
-        priority,
-        input_tokens,
-        accepted_at: Instant::now(),
-    })
-}
-
-pub(crate) fn embedding_items_from_request_body(body_bytes: &[u8]) -> Option<u64> {
-    let value = serde_json::from_slice::<serde_json::Value>(body_bytes).ok()?;
-    let input = value.get("input")?;
-    match input {
-        serde_json::Value::String(_) => Some(1),
-        serde_json::Value::Array(items) => {
-            if items.is_empty() {
-                return Some(0);
-            }
-            if items.iter().all(serde_json::Value::is_number) {
-                Some(1)
-            } else {
-                u64::try_from(items.len()).ok()
-            }
-        }
-        _ => None,
-    }
-}
-
-fn parse_optional_u64_header(
-    headers: &HeaderMap,
-    name: &'static str,
-) -> Result<Option<u64>, MissingRequiredHeaderError> {
-    let Some(value) = headers.get(name) else {
-        return Ok(None);
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| MissingRequiredHeaderError::invalid(name))?
-        .trim();
-    if value.is_empty() {
-        return Err(MissingRequiredHeaderError::invalid(name));
-    }
-    value
-        .parse::<u64>()
-        .map(Some)
-        .map_err(|_| MissingRequiredHeaderError::invalid(name))
-}
-
-fn parse_optional_u32_header(
-    headers: &HeaderMap,
-    name: &'static str,
-) -> Result<Option<u32>, MissingRequiredHeaderError> {
-    let Some(value) = headers.get(name) else {
-        return Ok(None);
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| MissingRequiredHeaderError::invalid(name))?
-        .trim();
-    if value.is_empty() {
-        return Err(MissingRequiredHeaderError::invalid(name));
-    }
-    value
-        .parse::<u32>()
-        .map(Some)
-        .map_err(|_| MissingRequiredHeaderError::invalid(name))
-}
-
-fn get_optional_header(headers: &HeaderMap, name: &'static str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
+    use stargate_proto::pb::InferenceServerStatus;
+
     use super::*;
 
+    fn observed_runtime(
+        capacity: usize,
+    ) -> (
+        PylonRuntimeState,
+        flume::Receiver<crate::RequestObservationEvent>,
+    ) {
+        PylonRuntimeState::observed(InferenceServerStatus::Unknown, &[], capacity, None)
+    }
+
     async fn recv_observation(
-        rx: &flume::Receiver<RequestObservation>,
+        rx: &flume::Receiver<crate::RequestObservationEvent>,
         context: &'static str,
     ) -> RequestObservation {
         tokio::time::timeout(Duration::from_secs(1), rx.recv_async())
             .await
             .expect(context)
             .expect("observation channel should remain open")
+            .into_observation()
     }
 
     fn recv_observation_blocking(
-        rx: &flume::Receiver<RequestObservation>,
+        rx: &flume::Receiver<crate::RequestObservationEvent>,
         context: &'static str,
     ) -> RequestObservation {
-        rx.try_recv().expect(context)
+        rx.try_recv().expect(context).into_observation()
     }
 
     #[test]
@@ -1160,14 +873,73 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_observer_drop_fails_each_observed_endpoint() {
+        for endpoint in [
+            RequestObservationEndpoint::ChatCompletions,
+            RequestObservationEndpoint::Responses,
+            RequestObservationEndpoint::Embeddings,
+        ] {
+            let (runtime_state, rx) = observed_runtime(4);
+            let observer = TunnelRequestObserver::accepted(
+                endpoint,
+                embeddings_required_headers(),
+                runtime_state,
+            );
+
+            // Dropping a live tunnel observer is the terminal behavior under test.
+            drop(observer);
+
+            let observations = rx
+                .try_iter()
+                .map(crate::RequestObservationEvent::into_observation)
+                .collect::<Vec<_>>();
+            assert_eq!(observations.len(), 2);
+            assert_eq!(observations[0].endpoint, endpoint);
+            assert_eq!(
+                observations[0].state,
+                RequestObservationState::UpstreamConnecting
+            );
+            assert_eq!(observations[1].endpoint, endpoint);
+            assert_eq!(observations[1].state, RequestObservationState::Failed);
+        }
+    }
+
+    #[test]
+    fn terminal_tunnel_observer_drop_emits_nothing() {
+        for endpoint in [
+            RequestObservationEndpoint::ChatCompletions,
+            RequestObservationEndpoint::Responses,
+            RequestObservationEndpoint::Embeddings,
+        ] {
+            let (runtime_state, rx) = observed_runtime(8);
+            let mut observer = TunnelRequestObserver::accepted(
+                endpoint,
+                embeddings_required_headers(),
+                runtime_state,
+            );
+            observer.on_upstream_response_headers(&HeaderMap::new(), 200);
+            if let Some(generation) = observer.generation_mut() {
+                generation.observe_output_message();
+            }
+            observer.finish();
+            let observations_before_drop = rx.len();
+
+            // Dropping a terminal observer proves the wrapper does not emit again.
+            drop(observer);
+
+            assert_eq!(rx.len(), observations_before_drop);
+        }
+    }
+
+    #[test]
     fn embeddings_observer_uses_request_acceptance_time() {
         let mut required = embeddings_required_headers();
         required.accepted_at = Instant::now()
             .checked_sub(Duration::from_millis(50))
             .expect("test acceptance time should be representable");
-        let (tx, rx) = flume::bounded(4);
+        let (runtime_state, rx) = observed_runtime(4);
 
-        let _observer = EmbeddingsRequestObserver::accepted(required, Some(tx));
+        let _observer = EmbeddingsRequestObserver::accepted(required, runtime_state);
         let observation = recv_observation_blocking(&rx, "accepted embeddings observation");
 
         assert!(observation.total_duration >= Duration::from_millis(40));
@@ -1175,9 +947,9 @@ mod tests {
 
     #[test]
     fn embeddings_observer_can_record_cardinality_after_acceptance() {
-        let (tx, rx) = flume::bounded(4);
+        let (runtime_state, rx) = observed_runtime(4);
         let mut observer =
-            EmbeddingsRequestObserver::accepted(embeddings_required_headers(), Some(tx));
+            EmbeddingsRequestObserver::accepted(embeddings_required_headers(), runtime_state);
 
         let accepted = recv_observation_blocking(&rx, "accepted embeddings observation");
         assert_eq!(accepted.embedding_items, 0);
@@ -1192,7 +964,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "invalid fail transition")]
     fn embeddings_observer_rejects_terminal_fail_transition() {
-        let mut observer = EmbeddingsRequestObserver::accepted(embeddings_required_headers(), None);
+        let mut observer = EmbeddingsRequestObserver::accepted(
+            embeddings_required_headers(),
+            PylonRuntimeState::default(),
+        );
         observer.update_embedding_items(Some(1));
         observer.on_upstream_response_headers(200);
         observer.finish();
@@ -1202,7 +977,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "invalid finish transition")]
     fn embeddings_observer_rejects_terminal_finish_transition() {
-        let mut observer = EmbeddingsRequestObserver::accepted(embeddings_required_headers(), None);
+        let mut observer = EmbeddingsRequestObserver::accepted(
+            embeddings_required_headers(),
+            PylonRuntimeState::default(),
+        );
         observer.update_embedding_items(Some(1));
         observer.fail();
         observer.finish();
@@ -1222,7 +1000,7 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
 
-        let mut observer = RequestObserver::new(&headers, None).unwrap();
+        let mut observer = RequestObserver::new(&headers, PylonRuntimeState::default()).unwrap();
         observer.on_upstream_response_headers(&response_headers, 200);
         observer.observe_output_message();
         observer.observe_output_message();
@@ -1253,8 +1031,8 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
 
-        let (tx, rx) = flume::bounded(8);
-        let mut observer = RequestObserver::new(&headers, Some(tx)).unwrap();
+        let (runtime_state, rx) = observed_runtime(8);
+        let mut observer = RequestObserver::new(&headers, runtime_state).unwrap();
 
         let initial = recv_observation(&rx, "initial observation should be emitted").await;
         assert_eq!(initial.state, RequestObservationState::UpstreamConnecting);
@@ -1280,8 +1058,8 @@ mod tests {
         headers.insert(HEADER_MODEL, "model-a".parse().unwrap());
         headers.insert(HEADER_INPUT_TOKENS, "42".parse().unwrap());
 
-        let (tx, rx) = flume::bounded(8);
-        let _observer = RequestObserver::new(&headers, Some(tx)).unwrap();
+        let (runtime_state, rx) = observed_runtime(8);
+        let _observer = RequestObserver::new(&headers, runtime_state).unwrap();
 
         let observation = recv_observation(&rx, "initial observation should be emitted").await;
         assert_eq!(observation.request_id, "req-connect");
@@ -1301,8 +1079,8 @@ mod tests {
         headers.insert(HEADER_MODEL, "model-a".parse().unwrap());
         headers.insert(HEADER_INPUT_TOKENS, "42".parse().unwrap());
 
-        let (tx, rx) = flume::bounded(8);
-        let observer = RequestObserver::new(&headers, Some(tx)).unwrap();
+        let (runtime_state, rx) = observed_runtime(8);
+        let observer = RequestObserver::new(&headers, runtime_state).unwrap();
         let initial = recv_observation(&rx, "initial observation should be emitted").await;
         assert_eq!(initial.state, RequestObservationState::UpstreamConnecting);
 
@@ -1327,7 +1105,7 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
 
-        let mut observer = RequestObserver::new(&headers, None).unwrap();
+        let mut observer = RequestObserver::new(&headers, PylonRuntimeState::default()).unwrap();
         observer.on_upstream_response_headers(&response_headers, 200);
         observer.observe_output_message();
         observer.observe_output_tokens(3);
@@ -1355,8 +1133,8 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
 
-        let (tx, rx) = flume::bounded(8);
-        let mut observer = RequestObserver::new(&headers, Some(tx)).unwrap();
+        let (runtime_state, rx) = observed_runtime(8);
+        let mut observer = RequestObserver::new(&headers, runtime_state).unwrap();
         let _ = recv_observation(&rx, "initial observation should be emitted").await;
         observer.on_upstream_response_headers(&response_headers, 200);
         let _ = recv_observation(&rx, "response-header observation should be emitted").await;
@@ -1382,8 +1160,8 @@ mod tests {
 
         let response_headers = HeaderMap::new();
 
-        let (tx, rx) = flume::bounded(8);
-        let mut observer = RequestObserver::new(&headers, Some(tx)).unwrap();
+        let (runtime_state, rx) = observed_runtime(8);
+        let mut observer = RequestObserver::new(&headers, runtime_state).unwrap();
         let _ = recv_observation(&rx, "initial observation should be emitted").await;
         observer.on_upstream_response_headers(&response_headers, 200);
         let header_observation =
@@ -1417,8 +1195,8 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
 
-        let (tx, rx) = flume::bounded(8);
-        let mut observer = RequestObserver::new(&headers, Some(tx)).unwrap();
+        let (runtime_state, rx) = observed_runtime(8);
+        let mut observer = RequestObserver::new(&headers, runtime_state).unwrap();
         let _ = recv_observation(&rx, "initial observation should be emitted").await;
         observer.on_upstream_response_headers(&response_headers, 200);
         let _ = recv_observation(&rx, "response-header observation should be emitted").await;
@@ -1462,8 +1240,8 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
 
-        let (tx, rx) = flume::bounded(8);
-        let mut observer = RequestObserver::new(&headers, Some(tx)).unwrap();
+        let (runtime_state, rx) = observed_runtime(8);
+        let mut observer = RequestObserver::new(&headers, runtime_state).unwrap();
         let _ = recv_observation(&rx, "initial observation should be emitted").await;
         observer.on_upstream_response_headers(&response_headers, 200);
         let _ = recv_observation(&rx, "response-header observation should be emitted").await;
@@ -1501,8 +1279,8 @@ mod tests {
         headers.insert(HEADER_MODEL, "model-a".parse().unwrap());
         headers.insert(HEADER_INPUT_TOKENS, "42".parse().unwrap());
 
-        let (tx, rx) = flume::bounded(8);
-        let mut observer = RequestObserver::new(&headers, Some(tx)).unwrap();
+        let (runtime_state, rx) = observed_runtime(8);
+        let mut observer = RequestObserver::new(&headers, runtime_state).unwrap();
         let _ = recv_observation(&rx, "initial observation should be emitted").await;
         observer.on_upstream_response_headers(&HeaderMap::new(), 200);
         let _ = recv_observation(&rx, "response-header observation should be emitted").await;
@@ -1613,7 +1391,7 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
 
-        let mut observer = RequestObserver::new(&headers, None).unwrap();
+        let mut observer = RequestObserver::new(&headers, PylonRuntimeState::default()).unwrap();
         observer.on_upstream_response_headers(&response_headers, 200);
         observer.finish();
     }
@@ -1683,7 +1461,7 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
 
-        let mut observer = RequestObserver::new(&headers, None).unwrap();
+        let mut observer = RequestObserver::new(&headers, PylonRuntimeState::default()).unwrap();
         observer.on_upstream_response_headers(&response_headers, 503);
         observer.finish();
 
@@ -1699,7 +1477,7 @@ mod tests {
     #[test]
     fn missing_request_id_is_rejected() {
         let headers = HeaderMap::new();
-        let result = RequestObserver::new(&headers, None);
+        let result = RequestObserver::new(&headers, PylonRuntimeState::default());
         assert!(matches!(
             result,
             Err(MissingRequiredHeaderError {
@@ -1714,7 +1492,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_REQUEST_ID, "req-4".parse().unwrap());
         headers.insert(HEADER_INPUT_TOKENS, "12".parse().unwrap());
-        let result = RequestObserver::new(&headers, None);
+        let result = RequestObserver::new(&headers, PylonRuntimeState::default());
         assert!(matches!(
             result,
             Err(MissingRequiredHeaderError {
@@ -1730,7 +1508,7 @@ mod tests {
         headers.insert(HEADER_REQUEST_ID, "req-5".parse().unwrap());
         headers.insert(HEADER_ROUTING_KEY, "rk-1".parse().unwrap());
         headers.insert(HEADER_MODEL, "model-a".parse().unwrap());
-        let result = RequestObserver::new(&headers, None);
+        let result = RequestObserver::new(&headers, PylonRuntimeState::default());
         assert!(matches!(
             result,
             Err(MissingRequiredHeaderError {
@@ -1746,7 +1524,7 @@ mod tests {
         headers.insert(HEADER_ROUTING_KEY, "rk-1".parse().unwrap());
         headers.insert(HEADER_MODEL, "model-a".parse().unwrap());
         headers.insert(HEADER_INPUT_TOKENS, "10".parse().unwrap());
-        RequestObserver::new(&headers, None).unwrap()
+        RequestObserver::new(&headers, PylonRuntimeState::default()).unwrap()
     }
 
     #[test]

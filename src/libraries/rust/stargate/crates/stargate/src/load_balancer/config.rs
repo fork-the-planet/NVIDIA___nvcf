@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
@@ -180,30 +180,30 @@ pub struct LoadBalancerRequestPolicy {
     pub consider_kv_free_tokens: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PulsarAlgorithmConfig {
-    pub seed: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct GroqMultiregionAlgorithmConfig {
+    #[serde(default)]
     pub seed: Option<String>,
+    #[serde(default)]
     pub cache_affinity_virtual_nodes: Option<usize>,
+    #[serde(default)]
     pub cache_affinity_backend_selection_count: Option<usize>,
+    #[serde(default)]
     pub max_queue_time_floor_ms: Option<u64>,
+    #[serde(default)]
     pub max_queue_time_ceil_ms: Option<u64>,
+    #[serde(default)]
     pub ttft_bucket_size_ms: Option<u64>,
+    #[serde(default)]
     pub next_bucket_unlock_factor: Option<f64>,
+    #[serde(default)]
     pub n: Option<usize>,
+    #[serde(default)]
     pub max_queued: Option<u64>,
+    #[serde(default)]
     pub ignore_queue_time: Option<bool>,
+    #[serde(default)]
     pub ignore_input_processing_time: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct PulsarMultiregionAlgorithmConfig {
-    pub seed: Option<String>,
-    pub multiregion: GroqMultiregionAlgorithmConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -212,8 +212,8 @@ pub enum LoadBalancerAlgorithmSettings {
     GroqMultiregion(GroqMultiregionAlgorithmConfig),
     RoundRobin,
     Random,
-    Pulsar(PulsarAlgorithmConfig),
-    PulsarMultiregion(PulsarMultiregionAlgorithmConfig),
+    Pulsar(Option<String>),
+    PulsarMultiregion(GroqMultiregionAlgorithmConfig),
 }
 
 impl LoadBalancerAlgorithmSettings {
@@ -261,7 +261,7 @@ impl LoadBalancerAlgorithmConfig {
     pub fn seed(&self) -> Option<&str> {
         match &self.settings {
             LoadBalancerAlgorithmSettings::GroqMultiregion(config) => config.seed.as_deref(),
-            LoadBalancerAlgorithmSettings::Pulsar(config) => config.seed.as_deref(),
+            LoadBalancerAlgorithmSettings::Pulsar(seed) => seed.as_deref(),
             LoadBalancerAlgorithmSettings::PulsarMultiregion(config) => config.seed.as_deref(),
             LoadBalancerAlgorithmSettings::PowerOfTwo
             | LoadBalancerAlgorithmSettings::RoundRobin
@@ -280,13 +280,12 @@ impl LoadBalancerAlgorithmConfig {
                 config.seed = seed;
                 Ok(())
             }
-            LoadBalancerAlgorithmSettings::Pulsar(config) => {
-                config.seed = seed;
+            LoadBalancerAlgorithmSettings::Pulsar(current_seed) => {
+                *current_seed = seed;
                 Ok(())
             }
             LoadBalancerAlgorithmSettings::PulsarMultiregion(config) => {
-                config.seed = seed.clone();
-                config.multiregion.seed = seed;
+                config.seed = seed;
                 Ok(())
             }
             LoadBalancerAlgorithmSettings::PowerOfTwo
@@ -300,7 +299,7 @@ impl LoadBalancerAlgorithmConfig {
     pub fn multiregion_settings(&self) -> Option<&GroqMultiregionAlgorithmConfig> {
         match &self.settings {
             LoadBalancerAlgorithmSettings::GroqMultiregion(config) => Some(config),
-            LoadBalancerAlgorithmSettings::PulsarMultiregion(config) => Some(&config.multiregion),
+            LoadBalancerAlgorithmSettings::PulsarMultiregion(config) => Some(config),
             LoadBalancerAlgorithmSettings::PowerOfTwo
             | LoadBalancerAlgorithmSettings::RoundRobin
             | LoadBalancerAlgorithmSettings::Random
@@ -311,9 +310,7 @@ impl LoadBalancerAlgorithmConfig {
     pub fn multiregion_settings_mut(&mut self) -> Option<&mut GroqMultiregionAlgorithmConfig> {
         match &mut self.settings {
             LoadBalancerAlgorithmSettings::GroqMultiregion(config) => Some(config),
-            LoadBalancerAlgorithmSettings::PulsarMultiregion(config) => {
-                Some(&mut config.multiregion)
-            }
+            LoadBalancerAlgorithmSettings::PulsarMultiregion(config) => Some(config),
             LoadBalancerAlgorithmSettings::PowerOfTwo
             | LoadBalancerAlgorithmSettings::RoundRobin
             | LoadBalancerAlgorithmSettings::Random
@@ -342,181 +339,145 @@ impl From<LoadBalancerAlgorithm> for LoadBalancerAlgorithmSettings {
             }
             LoadBalancerAlgorithm::RoundRobin => Self::RoundRobin,
             LoadBalancerAlgorithm::Random => Self::Random,
-            LoadBalancerAlgorithm::Pulsar => Self::Pulsar(PulsarAlgorithmConfig::default()),
+            LoadBalancerAlgorithm::Pulsar => Self::Pulsar(None),
             LoadBalancerAlgorithm::PulsarMultiregion => {
-                Self::PulsarMultiregion(PulsarMultiregionAlgorithmConfig::default())
+                Self::PulsarMultiregion(GroqMultiregionAlgorithmConfig::default())
             }
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawLoadBalancerAlgorithmConfig {
-    algorithm: LoadBalancerAlgorithm,
-    #[serde(default)]
-    seed: Option<String>,
-    #[serde(default)]
-    cache_affinity_virtual_nodes: Option<usize>,
-    #[serde(default)]
-    cache_affinity_backend_selection_count: Option<usize>,
+#[derive(Debug, Default, Deserialize)]
+struct RawCommonAlgorithmConfig {
     #[serde(default)]
     require_cache_affinity_key: Option<bool>,
     #[serde(default)]
     require_input_tokens: Option<bool>,
     #[serde(default)]
-    consider_kv_free_tokens: Option<bool>,
-    #[serde(default)]
-    max_queue_time_floor_ms: Option<u64>,
-    #[serde(default)]
-    max_queue_time_ceil_ms: Option<u64>,
-    #[serde(default)]
-    ttft_bucket_size_ms: Option<u64>,
-    #[serde(default)]
-    next_bucket_unlock_factor: Option<f64>,
-    #[serde(default)]
-    n: Option<usize>,
-    #[serde(default)]
-    max_queued: Option<u64>,
-    #[serde(default)]
     max_input_work_seconds: Option<f64>,
     #[serde(default)]
-    ignore_queue_time: Option<bool>,
-    #[serde(default)]
-    ignore_input_processing_time: Option<bool>,
-    #[serde(default)]
     request_algorithms: HashMap<LoadBalancerAlgorithm, LoadBalancerModelConfig>,
+    #[serde(flatten)]
+    unsupported_fields: BTreeMap<String, serde_json::Value>,
 }
 
-impl RawLoadBalancerAlgorithmConfig {
-    fn into_config(self) -> Result<LoadBalancerAlgorithmConfig, String> {
-        self.validate_algorithm_fields()?;
+impl RawCommonAlgorithmConfig {
+    fn into_config(
+        self,
+        algorithm: LoadBalancerAlgorithm,
+        settings: LoadBalancerAlgorithmSettings,
+        consider_kv_free_tokens: Option<bool>,
+    ) -> Result<LoadBalancerAlgorithmConfig, String> {
+        if !self.unsupported_fields.is_empty() {
+            return Err(format!(
+                "{} config does not support field(s): {}",
+                algorithm,
+                self.unsupported_fields
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         let request_policy = LoadBalancerRequestPolicy {
             require_cache_affinity_key: self.require_cache_affinity_key.unwrap_or(false),
             require_input_tokens: self.require_input_tokens.unwrap_or(false),
-            consider_kv_free_tokens: self.consider_kv_free_tokens.unwrap_or(false),
+            consider_kv_free_tokens: consider_kv_free_tokens.unwrap_or(false),
         };
-        let max_input_work_seconds = self.max_input_work_seconds;
-        let settings = self.to_settings();
         Ok(LoadBalancerAlgorithmConfig {
             request_policy,
-            max_input_work_seconds,
+            max_input_work_seconds: self.max_input_work_seconds,
             request_algorithms: self.request_algorithms,
             settings,
         })
     }
-
-    fn to_settings(&self) -> LoadBalancerAlgorithmSettings {
-        let multiregion = GroqMultiregionAlgorithmConfig {
-            seed: self.seed.clone(),
-            cache_affinity_virtual_nodes: self.cache_affinity_virtual_nodes,
-            cache_affinity_backend_selection_count: self.cache_affinity_backend_selection_count,
-            max_queue_time_floor_ms: self.max_queue_time_floor_ms,
-            max_queue_time_ceil_ms: self.max_queue_time_ceil_ms,
-            ttft_bucket_size_ms: self.ttft_bucket_size_ms,
-            next_bucket_unlock_factor: self.next_bucket_unlock_factor,
-            n: self.n,
-            max_queued: self.max_queued,
-            ignore_queue_time: self.ignore_queue_time,
-            ignore_input_processing_time: self.ignore_input_processing_time,
-        };
-        match self.algorithm {
-            LoadBalancerAlgorithm::PowerOfTwo => LoadBalancerAlgorithmSettings::PowerOfTwo,
-            LoadBalancerAlgorithm::GroqMultiregion => {
-                LoadBalancerAlgorithmSettings::GroqMultiregion(multiregion)
-            }
-            LoadBalancerAlgorithm::RoundRobin => LoadBalancerAlgorithmSettings::RoundRobin,
-            LoadBalancerAlgorithm::Random => LoadBalancerAlgorithmSettings::Random,
-            LoadBalancerAlgorithm::Pulsar => {
-                LoadBalancerAlgorithmSettings::Pulsar(PulsarAlgorithmConfig {
-                    seed: self.seed.clone(),
-                })
-            }
-            LoadBalancerAlgorithm::PulsarMultiregion => {
-                LoadBalancerAlgorithmSettings::PulsarMultiregion(PulsarMultiregionAlgorithmConfig {
-                    seed: self.seed.clone(),
-                    multiregion,
-                })
-            }
-        }
-    }
-
-    fn validate_algorithm_fields(&self) -> Result<(), String> {
-        let multiregion_fields = [
-            (
-                "cache_affinity_virtual_nodes",
-                self.cache_affinity_virtual_nodes.is_some(),
-            ),
-            (
-                "cache_affinity_backend_selection_count",
-                self.cache_affinity_backend_selection_count.is_some(),
-            ),
-            (
-                "max_queue_time_floor_ms",
-                self.max_queue_time_floor_ms.is_some(),
-            ),
-            (
-                "max_queue_time_ceil_ms",
-                self.max_queue_time_ceil_ms.is_some(),
-            ),
-            ("ttft_bucket_size_ms", self.ttft_bucket_size_ms.is_some()),
-            (
-                "next_bucket_unlock_factor",
-                self.next_bucket_unlock_factor.is_some(),
-            ),
-            ("n", self.n.is_some()),
-            ("max_queued", self.max_queued.is_some()),
-            ("ignore_queue_time", self.ignore_queue_time.is_some()),
-            (
-                "ignore_input_processing_time",
-                self.ignore_input_processing_time.is_some(),
-            ),
-        ];
-        match self.algorithm {
-            LoadBalancerAlgorithm::PowerOfTwo
-            | LoadBalancerAlgorithm::RoundRobin
-            | LoadBalancerAlgorithm::Random => {
-                reject_present_fields(self.algorithm, &[("seed", self.seed.is_some())])?;
-                reject_present_fields(self.algorithm, &multiregion_fields)?;
-                reject_present_fields(
-                    self.algorithm,
-                    &[(
-                        "consider_kv_free_tokens",
-                        self.consider_kv_free_tokens.is_some(),
-                    )],
-                )
-            }
-            LoadBalancerAlgorithm::Pulsar => {
-                reject_present_fields(self.algorithm, &multiregion_fields)
-            }
-            LoadBalancerAlgorithm::GroqMultiregion => reject_present_fields(
-                self.algorithm,
-                &[(
-                    "consider_kv_free_tokens",
-                    self.consider_kv_free_tokens.is_some(),
-                )],
-            ),
-            LoadBalancerAlgorithm::PulsarMultiregion => Ok(()),
-        }
-    }
 }
 
-fn reject_present_fields(
-    algorithm: LoadBalancerAlgorithm,
-    fields: &[(&'static str, bool)],
-) -> Result<(), String> {
-    let present = fields
-        .iter()
-        .filter_map(|(name, present)| present.then_some(*name))
-        .collect::<Vec<_>>();
-    if present.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} config does not support field(s): {}",
-            algorithm,
-            present.join(", ")
-        ))
+#[derive(Debug, Deserialize)]
+#[serde(tag = "algorithm", rename_all = "kebab-case")]
+enum RawLoadBalancerAlgorithmConfig {
+    PowerOfTwo {
+        #[serde(flatten)]
+        common: RawCommonAlgorithmConfig,
+    },
+    GroqMultiregion {
+        #[serde(flatten)]
+        settings: GroqMultiregionAlgorithmConfig,
+        #[serde(flatten)]
+        common: RawCommonAlgorithmConfig,
+    },
+    RoundRobin {
+        #[serde(flatten)]
+        common: RawCommonAlgorithmConfig,
+    },
+    Random {
+        #[serde(flatten)]
+        common: RawCommonAlgorithmConfig,
+    },
+    Pulsar {
+        #[serde(default)]
+        seed: Option<String>,
+        #[serde(default)]
+        consider_kv_free_tokens: Option<bool>,
+        #[serde(flatten)]
+        common: RawCommonAlgorithmConfig,
+    },
+    PulsarMultiregion {
+        #[serde(flatten)]
+        settings: GroqMultiregionAlgorithmConfig,
+        #[serde(default)]
+        consider_kv_free_tokens: Option<bool>,
+        #[serde(flatten)]
+        common: RawCommonAlgorithmConfig,
+    },
+}
+
+impl RawLoadBalancerAlgorithmConfig {
+    fn into_parts(
+        self,
+    ) -> (
+        RawCommonAlgorithmConfig,
+        LoadBalancerAlgorithmSettings,
+        Option<bool>,
+    ) {
+        match self {
+            Self::PowerOfTwo { common } => {
+                (common, LoadBalancerAlgorithmSettings::PowerOfTwo, None)
+            }
+            Self::GroqMultiregion { settings, common } => (
+                common,
+                LoadBalancerAlgorithmSettings::GroqMultiregion(settings),
+                None,
+            ),
+            Self::RoundRobin { common } => {
+                (common, LoadBalancerAlgorithmSettings::RoundRobin, None)
+            }
+            Self::Random { common } => (common, LoadBalancerAlgorithmSettings::Random, None),
+            Self::Pulsar {
+                seed,
+                consider_kv_free_tokens,
+                common,
+            } => (
+                common,
+                LoadBalancerAlgorithmSettings::Pulsar(seed),
+                consider_kv_free_tokens,
+            ),
+            Self::PulsarMultiregion {
+                settings,
+                consider_kv_free_tokens,
+                common,
+            } => (
+                common,
+                LoadBalancerAlgorithmSettings::PulsarMultiregion(settings),
+                consider_kv_free_tokens,
+            ),
+        }
+    }
+
+    fn into_config(self) -> Result<LoadBalancerAlgorithmConfig, String> {
+        let (common, settings, consider_kv_free_tokens) = self.into_parts();
+        let algorithm = settings.algorithm();
+        common.into_config(algorithm, settings, consider_kv_free_tokens)
     }
 }
 

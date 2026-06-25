@@ -17,18 +17,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use stargate_auth::AuthTokenProvider;
-use stargate_proto::pb::InferenceServerStatus;
 use stargate_protocol::TunnelTransportProtocol;
 
 use crate::bringup::BringupConfig;
 use crate::output_token_parser::OutputTokenParserFactory;
-use crate::queue_admission::{PylonQueueMismatchRetryConfig, QueueAdmissionTracker};
+use crate::queue_admission::PylonQueueMismatchRetryConfig;
 use crate::quic_http_tunnel::{PylonRetryConfig, TunnelError};
-use crate::request_observer::RequestObservation;
 use crate::request_quality_monitor::RequestQualityMonitorConfig;
+use crate::runtime_state::PylonRuntimeState;
 use crate::stats::PylonMetrics;
 
-use super::state::CurrentModelStats;
 use super::urls::{
     effective_cluster_id, infer_upstream_http_base_url, is_direct_inference_server_url,
 };
@@ -49,18 +47,17 @@ pub struct InferenceServerRegistrationConfig {
     pub inference_server_url: String,
     pub upstream_http_base_url: Option<String>,
     pub min_update_interval: Duration,
-    pub status: InferenceServerStatus,
     pub reverse_tunnel: bool,
+    pub tls_cert_pem: Option<Vec<u8>>,
     pub quic_insecure: bool,
     pub tunnel_protocol: TunnelTransportProtocol,
     pub bringup: BringupConfig,
     pub output_token_parser_factory: OutputTokenParserFactory,
-    pub request_observation_tx: Option<flume::Sender<RequestObservation>>,
+    pub runtime_state: PylonRuntimeState,
     pub request_quality_monitor: RequestQualityMonitorConfig,
     pub metrics: Option<Arc<PylonMetrics>>,
     pub retry: PylonRetryConfig,
     pub queue_mismatch_retry: PylonQueueMismatchRetryConfig,
-    pub queue_tracker: QueueAdmissionTracker,
     pub auth_token_provider: Option<Arc<AuthTokenProvider>>,
 }
 
@@ -77,6 +74,11 @@ impl RegistrationStartPlan {
     ) -> Result<Self, ClientError> {
         if config.seeds.is_empty() {
             return Err(ClientError::Config("stargate seeds are empty".to_string()));
+        }
+        if config.runtime_state.model_ids().is_empty() {
+            return Err(ClientError::Config(
+                "pylon runtime state has no configured models".to_string(),
+            ));
         }
         if !config.reverse_tunnel && !is_direct_inference_server_url(&config.inference_server_url) {
             return Err(ClientError::Config(
@@ -106,9 +108,4 @@ impl RegistrationStartPlan {
             upstream_http_base_url,
         })
     }
-}
-
-pub struct InferenceServerUpdateChannels {
-    pub status: flume::Sender<InferenceServerStatus>,
-    pub model_stats: flume::Sender<(String, CurrentModelStats)>,
 }

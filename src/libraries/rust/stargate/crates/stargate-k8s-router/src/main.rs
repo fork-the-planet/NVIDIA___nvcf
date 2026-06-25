@@ -15,9 +15,10 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use kube::Client;
 use stargate_forwarding::RelayEndpointConfig;
@@ -27,11 +28,11 @@ use stargate_k8s_router::health::serve_health;
 use stargate_k8s_router::metrics::RouterMetrics;
 use stargate_k8s_router::quic::{QuicRouterConfig, serve_quic_router};
 use stargate_k8s_router::watcher::run_endpoint_slice_watcher;
+use stargate_runtime::{
+    CriticalTaskFailureReceiver, CriticalTaskGroup, wait_for_termination_signal,
+};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -90,147 +91,248 @@ struct Args {
     quic_insecure: bool,
 }
 
+#[derive(Debug)]
+struct RouterStartupConfig {
+    listen_addr: SocketAddr,
+    reverse_tunnel_listen_addr: SocketAddr,
+    health_listen_addr: SocketAddr,
+    target_namespace: String,
+    advertised_hostname_template: String,
+    target_build_config: TargetBuildConfig,
+    connect_timeout: Duration,
+    relay_endpoint_config: RelayEndpointConfig,
+    tls_cert_pem: Option<Vec<u8>>,
+    tls_key_pem: Option<Vec<u8>>,
+    quic_insecure: bool,
+}
+
+impl RouterStartupConfig {
+    fn from_args(args: Args) -> Result<Self> {
+        let relay_endpoint_config = relay_endpoint_config_from_args(&args)?;
+        let tls_cert_pem = read_optional_file(args.tls_cert_path.as_deref())?;
+        let tls_key_pem = read_optional_file(args.tls_key_path.as_deref())?;
+
+        Ok(Self {
+            listen_addr: args.listen_addr,
+            reverse_tunnel_listen_addr: args.reverse_tunnel_listen_addr,
+            health_listen_addr: args.health_listen_addr,
+            target_namespace: args.target_namespace,
+            advertised_hostname_template: args.advertised_hostname_template,
+            target_build_config: TargetBuildConfig {
+                service_name: args.target_service_name,
+                grpc_port_name: args.grpc_port_name,
+                quic_port_name: args.quic_port_name,
+            },
+            connect_timeout: Duration::from_millis(args.connect_timeout_ms),
+            relay_endpoint_config,
+            tls_cert_pem,
+            tls_key_pem,
+            quic_insecure: args.quic_insecure,
+        })
+    }
+
+    fn grpc_router_config(&self) -> GrpcRouterConfig {
+        GrpcRouterConfig {
+            advertised_hostname_template: self.advertised_hostname_template.clone(),
+            target_namespace: self.target_namespace.clone(),
+            connect_timeout: self.connect_timeout,
+        }
+    }
+
+    fn quic_router_config(&self) -> QuicRouterConfig {
+        QuicRouterConfig {
+            listen_addr: self.reverse_tunnel_listen_addr,
+            advertised_hostname_template: self.advertised_hostname_template.clone(),
+            target_namespace: self.target_namespace.clone(),
+            connect_timeout: self.connect_timeout,
+            relay_max_idle_timeout: self.relay_endpoint_config.max_idle_timeout,
+            relay_keep_alive_interval: self.relay_endpoint_config.keep_alive_interval,
+            tls_cert_pem: self.tls_cert_pem.clone(),
+            tls_key_pem: self.tls_key_pem.clone(),
+            quic_insecure: self.quic_insecure,
+        }
+    }
+}
+
+struct RouterTaskInputs {
+    client: Client,
+    config: RouterStartupConfig,
+    grpc_listener: TcpListener,
+    targets_tx: watch::Sender<TargetSnapshot>,
+    targets_rx: watch::Receiver<TargetSnapshot>,
+    metrics: Arc<RouterMetrics>,
+}
+
+struct RouterRuntime {
+    tasks: CriticalTaskGroup,
+    critical_failure_rx: CriticalTaskFailureReceiver,
+}
+
+impl RouterRuntime {
+    async fn start(config: RouterStartupConfig) -> Result<Self> {
+        let client = Client::try_default()
+            .await
+            .context("failed to create Kubernetes client")?;
+        let grpc_listener = bind_grpc_listener(config.listen_addr).await?;
+        let (targets_tx, targets_rx) = watch::channel(TargetSnapshot::default());
+        let metrics = Arc::new(RouterMetrics::new()?);
+        let (tasks, critical_failure_rx) = CriticalTaskGroup::new("router");
+
+        spawn_router_tasks(
+            &tasks,
+            RouterTaskInputs {
+                client,
+                config,
+                grpc_listener,
+                targets_tx,
+                targets_rx,
+                metrics,
+            },
+        );
+
+        Ok(Self {
+            tasks,
+            critical_failure_rx,
+        })
+    }
+
+    async fn run_until_shutdown<S>(self, signal: S) -> Result<()>
+    where
+        S: Future<Output = std::io::Result<&'static str>>,
+    {
+        tokio::pin!(signal);
+        let failure = tokio::select! {
+            result = &mut signal => {
+                result
+                    .context("failed to receive router termination signal")
+                    .map(|signal| {
+                        info!(signal, "received shutdown signal");
+                        None
+                    })
+            }
+            failure = self.critical_failure_rx.recv_async() => {
+                failure
+                    .context("router critical failure channel closed")
+                    .map(|failure| {
+                        error!(error = %failure, "critical router task exited");
+                        Some(failure)
+                    })
+            }
+        };
+
+        self.tasks.begin_shutdown();
+        self.tasks.wait().await;
+        match failure? {
+            Some(failure) => Err(failure.into()),
+            None => {
+                info!("stargate Kubernetes router stopped cleanly");
+                Ok(())
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
+    install_default_crypto_provider();
+    let config = RouterStartupConfig::from_args(Args::parse())?;
+    run_router(config).await
+}
+
+fn install_default_crypto_provider() {
     if rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .is_err()
     {
         debug!("rustls crypto provider was already installed");
     }
-    let args = Args::parse();
-    let tls_cert_pem = args.tls_cert_path.as_ref().map(std::fs::read).transpose()?;
-    let tls_key_pem = args.tls_key_path.as_ref().map(std::fs::read).transpose()?;
-    let connect_timeout = Duration::from_millis(args.connect_timeout_ms);
-    let relay_endpoint_config = relay_endpoint_config_from_args(&args)?;
+}
 
+async fn run_router(config: RouterStartupConfig) -> Result<()> {
+    log_startup(&config);
+    RouterRuntime::start(config)
+        .await?
+        .run_until_shutdown(wait_for_termination_signal())
+        .await
+}
+
+fn log_startup(config: &RouterStartupConfig) {
     info!(
-        listen_addr = %args.listen_addr,
-        reverse_tunnel_listen_addr = %args.reverse_tunnel_listen_addr,
-        health_listen_addr = %args.health_listen_addr,
-        target_namespace = %args.target_namespace,
-        target_service_name = %args.target_service_name,
-        advertised_hostname_template = %args.advertised_hostname_template,
-        grpc_port_name = %args.grpc_port_name,
-        quic_port_name = %args.quic_port_name,
-        connect_timeout_ms = args.connect_timeout_ms,
-        relay_idle_timeout_ms = args.relay_idle_timeout_ms,
-        relay_keep_alive_ms = args.relay_keep_alive_ms,
-        quic_insecure = args.quic_insecure,
+        listen_addr = %config.listen_addr,
+        reverse_tunnel_listen_addr = %config.reverse_tunnel_listen_addr,
+        health_listen_addr = %config.health_listen_addr,
+        target_namespace = %config.target_namespace,
+        target_service_name = %config.target_build_config.service_name,
+        advertised_hostname_template = %config.advertised_hostname_template,
+        grpc_port_name = %config.target_build_config.grpc_port_name,
+        quic_port_name = %config.target_build_config.quic_port_name,
+        connect_timeout_ms = config.connect_timeout.as_millis(),
+        relay_idle_timeout_ms = config.relay_endpoint_config.max_idle_timeout.as_millis(),
+        relay_keep_alive_ms = config
+            .relay_endpoint_config
+            .keep_alive_interval
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0),
+        quic_insecure = config.quic_insecure,
         "starting stargate Kubernetes router"
     );
+}
 
-    let client = Client::try_default()
-        .await
-        .context("failed to create Kubernetes client")?;
-    let (targets_tx, targets_rx) = watch::channel(TargetSnapshot::default());
-    let metrics = std::sync::Arc::new(RouterMetrics::new()?);
-    let shutdown = CancellationToken::new();
-    let tracker = TaskTracker::new();
-    let (critical_task_tx, critical_task_rx) = mpsc::unbounded_channel();
-
-    let grpc_listener = TcpListener::bind(args.listen_addr)
+async fn bind_grpc_listener(listen_addr: SocketAddr) -> Result<TcpListener> {
+    let grpc_listener = TcpListener::bind(listen_addr)
         .await
         .context("failed to bind gRPC router listener")?;
     info!(addr = %grpc_listener.local_addr()?, "gRPC router listening");
+    Ok(grpc_listener)
+}
 
-    tracker.spawn({
-        let shutdown = shutdown.child_token();
-        let target_namespace = args.target_namespace.clone();
-        let build_config = TargetBuildConfig {
-            service_name: args.target_service_name.clone(),
-            grpc_port_name: args.grpc_port_name.clone(),
-            quic_port_name: args.quic_port_name.clone(),
-        };
-        let critical_task_tx = critical_task_tx.clone();
-        async move {
-            let result = run_endpoint_slice_watcher(
-                client,
-                target_namespace,
-                build_config,
-                targets_tx,
-                shutdown.clone(),
-            )
-            .await;
-            report_critical_task_exit("EndpointSlice watcher", result, &shutdown, critical_task_tx);
-        }
+fn spawn_router_tasks(tasks: &CriticalTaskGroup, inputs: RouterTaskInputs) {
+    let RouterTaskInputs {
+        client,
+        config,
+        grpc_listener,
+        targets_tx,
+        targets_rx,
+        metrics,
+    } = inputs;
+
+    let target_namespace = config.target_namespace.clone();
+    let build_config = config.target_build_config.clone();
+    tasks.spawn_critical("EndpointSlice watcher", move |shutdown| async move {
+        run_endpoint_slice_watcher(client, target_namespace, build_config, targets_tx, shutdown)
+            .await
     });
 
-    tracker.spawn({
-        let shutdown = shutdown.child_token();
+    tasks.spawn_critical("gRPC router", {
         let targets = targets_rx.clone();
-        let critical_task_tx = critical_task_tx.clone();
-        let config = GrpcRouterConfig {
-            advertised_hostname_template: args.advertised_hostname_template.clone(),
-            target_namespace: args.target_namespace.clone(),
-            connect_timeout,
-        };
-        async move {
-            let result = serve_grpc_router(grpc_listener, config, targets, shutdown.clone()).await;
-            report_critical_task_exit("gRPC router", result, &shutdown, critical_task_tx);
-        }
+        let config = config.grpc_router_config();
+        move |shutdown| async move { serve_grpc_router(grpc_listener, config, targets, shutdown).await }
     });
 
-    tracker.spawn({
-        let shutdown = shutdown.child_token();
+    tasks.spawn_critical("QUIC router", {
         let targets = targets_rx.clone();
         let metrics = metrics.clone();
-        let critical_task_tx = critical_task_tx.clone();
-        let config = QuicRouterConfig {
-            listen_addr: args.reverse_tunnel_listen_addr,
-            advertised_hostname_template: args.advertised_hostname_template.clone(),
-            target_namespace: args.target_namespace.clone(),
-            connect_timeout,
-            relay_max_idle_timeout: relay_endpoint_config.max_idle_timeout,
-            relay_keep_alive_interval: relay_endpoint_config.keep_alive_interval,
-            tls_cert_pem,
-            tls_key_pem,
-            quic_insecure: args.quic_insecure,
-        };
-        async move {
-            let result = serve_quic_router(config, targets, metrics, shutdown.clone()).await;
-            report_critical_task_exit("QUIC router", result, &shutdown, critical_task_tx);
-        }
+        let config = config.quic_router_config();
+        move |shutdown| async move { serve_quic_router(config, targets, metrics, shutdown).await }
     });
 
-    tracker.spawn({
-        let shutdown = shutdown.child_token();
-        let critical_task_tx = critical_task_tx.clone();
+    tasks.spawn_critical("health server", {
         let metrics = metrics.clone();
-        async move {
-            let result = serve_health(
-                args.health_listen_addr,
-                targets_rx,
-                metrics,
-                shutdown.clone(),
-            )
-            .await;
-            report_critical_task_exit("health server", result, &shutdown, critical_task_tx);
+        let health_listen_addr = config.health_listen_addr;
+        move |shutdown| async move {
+            serve_health(health_listen_addr, targets_rx, metrics, shutdown).await
         }
     });
-    // Close the parent sender so wait_for_shutdown_reason can observe channel
-    // closure if every critical task exits before a signal arrives.
-    drop(critical_task_tx);
+}
 
-    let shutdown_reason =
-        wait_for_shutdown_reason(wait_for_termination_signal(), critical_task_rx).await;
-    match &shutdown_reason {
-        ShutdownReason::Signal(signal) => {
-            info!(signal, "received shutdown signal");
-        }
-        ShutdownReason::CriticalTaskExit(message) => {
-            error!(%message, "critical router task exited");
-        }
+fn read_optional_file(path: Option<&str>) -> Result<Option<Vec<u8>>> {
+    match path {
+        Some(path) => std::fs::read(path)
+            .with_context(|| format!("failed to read {path}"))
+            .map(Some),
+        None => Ok(None),
     }
-    shutdown.cancel();
-    tracker.close();
-    tracker.wait().await;
-    if let ShutdownReason::CriticalTaskExit(message) = shutdown_reason {
-        return Err(anyhow!(message));
-    }
-    info!("stargate Kubernetes router stopped cleanly");
-    Ok(())
 }
 
 fn relay_endpoint_config_from_args(args: &Args) -> Result<RelayEndpointConfig> {
@@ -261,67 +363,190 @@ fn init_logging() {
         .init();
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum ShutdownReason {
-    Signal(&'static str),
-    CriticalTaskExit(String),
-}
-
-fn report_critical_task_exit(
-    task_name: &'static str,
-    result: Result<()>,
-    shutdown: &CancellationToken,
-    critical_task_tx: mpsc::UnboundedSender<String>,
-) {
-    if shutdown.is_cancelled() {
-        return;
-    }
-    let message = match result {
-        Ok(()) => format!("{task_name} exited unexpectedly"),
-        Err(error) => format!("{task_name} exited with error: {error:#}"),
-    };
-    let _ = critical_task_tx.send(message);
-}
-
-async fn wait_for_shutdown_reason<S>(
-    signal: S,
-    mut critical_task_rx: mpsc::UnboundedReceiver<String>,
-) -> ShutdownReason
-where
-    S: Future<Output = &'static str>,
-{
-    tokio::select! {
-        signal = signal => ShutdownReason::Signal(signal),
-        message = critical_task_rx.recv() => {
-            ShutdownReason::CriticalTaskExit(
-                message.unwrap_or_else(|| "all critical router tasks exited".to_string()),
-            )
-        }
-    }
-}
-
-async fn wait_for_termination_signal() -> &'static str {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => "SIGINT",
-            _ = sigterm.recv() => "SIGTERM",
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        "CTRL_C"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_file(contents: &[u8]) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("test file should be creatable");
+        std::fs::write(file.path(), contents).expect("test file should be writable");
+        file
+    }
+
+    fn test_file_path(file: &tempfile::NamedTempFile) -> &str {
+        file.path()
+            .to_str()
+            .expect("test file path should be valid UTF-8")
+    }
+
+    #[test]
+    fn startup_config_derives_runtime_configs_from_args() {
+        let cert = test_file(b"cert-bytes");
+        let key = test_file(b"key-bytes");
+        let args = Args::parse_from([
+            "stargate-k8s-router",
+            "--listen-addr",
+            "127.0.0.1:41071",
+            "--reverse-tunnel-listen-addr",
+            "127.0.0.1:41072",
+            "--health-listen-addr",
+            "127.0.0.1:41800",
+            "--target-namespace",
+            "prod",
+            "--target-service-name",
+            "stargate-ready",
+            "--advertised-hostname-template",
+            "{pod_name}.{namespace}.example",
+            "--grpc-port-name",
+            "grpc-control",
+            "--quic-port-name",
+            "quic-tunnel",
+            "--connect-timeout-ms",
+            "2500",
+            "--relay-idle-timeout-ms",
+            "20000",
+            "--relay-keep-alive-ms",
+            "5000",
+            "--tls-cert-path",
+            test_file_path(&cert),
+            "--tls-key-path",
+            test_file_path(&key),
+            "--quic-insecure",
+        ]);
+
+        let config =
+            RouterStartupConfig::from_args(args).expect("startup config should derive from args");
+
+        assert_eq!(config.listen_addr, "127.0.0.1:41071".parse().unwrap());
+        assert_eq!(
+            config.health_listen_addr,
+            "127.0.0.1:41800".parse().unwrap()
+        );
+        assert_eq!(config.target_namespace, "prod");
+        assert_eq!(
+            config.advertised_hostname_template,
+            "{pod_name}.{namespace}.example"
+        );
+        assert_eq!(config.connect_timeout, Duration::from_millis(2500));
+        assert_eq!(
+            config.relay_endpoint_config,
+            RelayEndpointConfig {
+                max_idle_timeout: Duration::from_millis(20000),
+                keep_alive_interval: Some(Duration::from_millis(5000)),
+            }
+        );
+        assert_eq!(config.tls_cert_pem.as_deref(), Some(&b"cert-bytes"[..]));
+        assert_eq!(config.tls_key_pem.as_deref(), Some(&b"key-bytes"[..]));
+        assert!(config.quic_insecure);
+
+        let target_build_config = config.target_build_config.clone();
+        assert_eq!(
+            target_build_config,
+            TargetBuildConfig {
+                service_name: "stargate-ready".to_string(),
+                grpc_port_name: "grpc-control".to_string(),
+                quic_port_name: "quic-tunnel".to_string(),
+            }
+        );
+
+        let grpc_config = config.grpc_router_config();
+        assert_eq!(
+            grpc_config.advertised_hostname_template,
+            "{pod_name}.{namespace}.example"
+        );
+        assert_eq!(grpc_config.target_namespace, "prod");
+        assert_eq!(grpc_config.connect_timeout, Duration::from_millis(2500));
+
+        let quic_config = config.quic_router_config();
+        assert_eq!(quic_config.listen_addr, "127.0.0.1:41072".parse().unwrap());
+        assert_eq!(
+            quic_config.advertised_hostname_template,
+            "{pod_name}.{namespace}.example"
+        );
+        assert_eq!(quic_config.target_namespace, "prod");
+        assert_eq!(quic_config.connect_timeout, Duration::from_millis(2500));
+        assert_eq!(
+            quic_config.relay_max_idle_timeout,
+            Duration::from_millis(20000)
+        );
+        assert_eq!(
+            quic_config.relay_keep_alive_interval,
+            Some(Duration::from_millis(5000))
+        );
+        assert_eq!(
+            quic_config.tls_cert_pem.as_deref(),
+            Some(&b"cert-bytes"[..])
+        );
+        assert_eq!(quic_config.tls_key_pem.as_deref(), Some(&b"key-bytes"[..]));
+        assert!(quic_config.quic_insecure);
+    }
+
+    #[test]
+    fn startup_config_derives_absent_tls_and_logs_disabled_keepalive() {
+        let args = Args::parse_from([
+            "stargate-k8s-router",
+            "--target-namespace",
+            "prod",
+            "--relay-keep-alive-ms",
+            "0",
+        ]);
+
+        let config =
+            RouterStartupConfig::from_args(args).expect("startup config should derive from args");
+
+        assert_eq!(config.tls_cert_pem, None);
+        assert_eq!(config.tls_key_pem, None);
+        assert_eq!(config.relay_endpoint_config.keep_alive_interval, None);
+        assert_eq!(read_optional_file(None).unwrap(), None);
+        log_startup(&config);
+    }
+
+    #[tokio::test]
+    async fn router_runtime_turns_critical_exit_into_error() {
+        let (tasks, critical_failure_rx) = CriticalTaskGroup::new("router");
+        tasks.spawn_critical("QUIC router", |_shutdown| async {
+            anyhow::bail!("bind failed")
+        });
+        let runtime = RouterRuntime {
+            tasks,
+            critical_failure_rx,
+        };
+
+        let error = runtime
+            .run_until_shutdown(std::future::pending())
+            .await
+            .expect_err("critical task exits should fail the process");
+
+        assert!(error.to_string().contains("QUIC router"));
+        assert!(error.to_string().contains("bind failed"));
+    }
+
+    #[tokio::test]
+    async fn router_runtime_signal_error_still_stops_critical_tasks() {
+        let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+        let (tasks, critical_failure_rx) = CriticalTaskGroup::new("router");
+        tasks.spawn_critical("stoppable root", |shutdown| async move {
+            shutdown.cancelled().await;
+            let _ = stopped_tx.send(());
+            Ok(())
+        });
+        let runtime = RouterRuntime {
+            tasks,
+            critical_failure_rx,
+        };
+
+        let error = runtime
+            .run_until_shutdown(std::future::ready(Err(std::io::Error::other(
+                "signal setup failed",
+            ))))
+            .await
+            .expect_err("signal failure should fail the process after shutdown");
+
+        assert!(format!("{error:#}").contains("signal setup failed"));
+        stopped_rx
+            .await
+            .expect("signal failure should cancel and join critical tasks");
+    }
 
     #[test]
     fn relay_endpoint_config_uses_long_idle_defaults() {
@@ -394,22 +619,6 @@ mod tests {
             error
                 .to_string()
                 .contains("--relay-keep-alive-ms must be less than --relay-idle-timeout-ms")
-        );
-    }
-
-    #[tokio::test]
-    async fn wait_for_shutdown_reason_reports_critical_task_exit() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        tx.send("QUIC router exited with error: bind failed".to_string())
-            .expect("critical task channel should be open");
-
-        let reason = wait_for_shutdown_reason(std::future::pending(), rx).await;
-
-        assert_eq!(
-            reason,
-            ShutdownReason::CriticalTaskExit(
-                "QUIC router exited with error: bind failed".to_string()
-            )
         );
     }
 }

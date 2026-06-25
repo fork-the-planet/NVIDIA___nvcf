@@ -14,23 +14,26 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, ensure};
-use bytes::Bytes;
+use anyhow::{Context, Result};
 use clap::Parser;
-use http::{HeaderMap, Method, Request, Response, StatusCode};
-use quinn::{ClientConfig, Endpoint, ServerConfig};
-use rustls::pki_types::CertificateDer;
+use quinn::{Endpoint, ServerConfig};
 use stargate_protocol::TunnelTransportProtocol;
-use stargate_protocol::tunnel_contract::WEBTRANSPORT_TUNNEL_PATH;
+use stargate_tls::ServerTlsIdentity;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-const WEBTRANSPORT_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+#[path = "stargate_webtransport_l7_proxy/network.rs"]
+mod network;
+#[path = "stargate_webtransport_l7_proxy/session.rs"]
+mod session;
+
+use network::{connect_first_upstream_candidate, resolve_upstream_addrs};
 
 #[derive(Parser, Debug)]
 #[command(name = "stargate-webtransport-l7-proxy")]
@@ -43,6 +46,14 @@ struct Args {
     control_plane_listen_addr: SocketAddr,
     #[arg(long, value_name = "ADDR")]
     control_plane_upstream_addr: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    tls_cert_path: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    tls_key_path: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    upstream_tls_cert_path: Option<PathBuf>,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    upstream_quic_insecure: bool,
 }
 
 #[tokio::main]
@@ -55,55 +66,105 @@ async fn main() -> Result<()> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    let endpoint = Endpoint::server(server_config()?, args.listen_addr)
-        .context("bind l7 proxy QUIC server")?;
+    let downstream_identity = ServerTlsIdentity::from_optional_pem(
+        read_optional_file(args.tls_cert_path.as_deref())?,
+        read_optional_file(args.tls_key_path.as_deref())?,
+    )?;
+    let upstream_tls = session::UpstreamTlsConfig {
+        cert_pem: read_optional_file(args.upstream_tls_cert_path.as_deref())?,
+        quic_insecure: args.upstream_quic_insecure,
+    };
+    let endpoint = bind_webtransport_listener(args.listen_addr, &downstream_identity)?;
     let listen_addr = endpoint.local_addr().context("read l7 proxy listen addr")?;
     let shutdown = CancellationToken::new();
-    let control_plane_task = if let Some(upstream_addr) = args.control_plane_upstream_addr.clone() {
-        let control_plane_listener = TcpListener::bind(args.control_plane_listen_addr)
-            .await
-            .with_context(|| {
-                format!(
-                    "bind control-plane TCP proxy on {}",
-                    args.control_plane_listen_addr
-                )
-            })?;
-        let control_plane_shutdown = shutdown.clone();
-        Some(tokio::spawn(run_control_plane_tcp_proxy(
-            control_plane_listener,
-            upstream_addr,
-            control_plane_shutdown,
-        )))
-    } else {
-        None
-    };
-    let shutdown_for_signal = shutdown.clone();
+    let control_plane_task = spawn_control_plane_tcp_proxy_if_configured(&args, &shutdown).await?;
+    let signal_shutdown = shutdown.clone();
     tokio::spawn(async move {
         if let Err(error) = tokio::signal::ctrl_c().await {
             warn!(error = %error, "failed to wait for shutdown signal");
         }
-        shutdown_for_signal.cancel();
+        signal_shutdown.cancel();
     });
     info!(%listen_addr, "WebTransport L7 proxy listening");
 
+    accept_webtransport_connections(&endpoint, &args.upstream_template, &upstream_tls, &shutdown)
+        .await;
+    close_webtransport_listener(endpoint).await;
+    shutdown.cancel();
+    join_control_plane_tcp_proxy(control_plane_task).await
+}
+
+fn read_optional_file(path: Option<&Path>) -> Result<Option<Vec<u8>>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    std::fs::read(path)
+        .map(Some)
+        .with_context(|| format!("read TLS file {}", path.display()))
+}
+
+fn bind_webtransport_listener(
+    listen_addr: SocketAddr,
+    identity: &ServerTlsIdentity,
+) -> Result<Endpoint> {
+    Endpoint::server(server_config(identity)?, listen_addr).context("bind l7 proxy QUIC server")
+}
+
+async fn spawn_control_plane_tcp_proxy_if_configured(
+    args: &Args,
+    shutdown: &CancellationToken,
+) -> Result<Option<JoinHandle<Result<()>>>> {
+    let Some(upstream_addr) = args.control_plane_upstream_addr.clone() else {
+        return Ok(None);
+    };
+    let control_plane_listener = TcpListener::bind(args.control_plane_listen_addr)
+        .await
+        .with_context(|| {
+            format!(
+                "bind control-plane TCP proxy on {}",
+                args.control_plane_listen_addr
+            )
+        })?;
+    Ok(Some(tokio::spawn(run_control_plane_tcp_proxy(
+        control_plane_listener,
+        upstream_addr,
+        shutdown.clone(),
+    ))))
+}
+
+async fn accept_webtransport_connections(
+    endpoint: &Endpoint,
+    upstream_template: &str,
+    upstream_tls: &session::UpstreamTlsConfig,
+    shutdown: &CancellationToken,
+) {
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
-                let upstream_template = args.upstream_template.clone();
+                let upstream_template = upstream_template.to_string();
+                let upstream_tls = upstream_tls.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle_connection(incoming, upstream_template).await {
+                    if let Err(error) =
+                        session::handle_connection(incoming, upstream_template, upstream_tls).await
+                    {
                         warn!(error = %error, "WebTransport L7 proxy connection failed");
                     }
                 });
             }
         }
     }
+}
 
+async fn close_webtransport_listener(endpoint: Endpoint) {
     endpoint.close(0u32.into(), b"shutdown");
     endpoint.wait_idle().await;
-    shutdown.cancel();
+}
+
+async fn join_control_plane_tcp_proxy(
+    control_plane_task: Option<JoinHandle<Result<()>>>,
+) -> Result<()> {
     if let Some(task) = control_plane_task {
         task.await
             .context("join control-plane TCP proxy task")?
@@ -144,10 +205,23 @@ async fn handle_control_plane_tcp_connection(
     downstream: TcpStream,
     upstream_addr: &str,
 ) -> Result<()> {
-    let resolved_target = resolve_upstream_addr(upstream_addr).await?;
-    let upstream = TcpStream::connect(resolved_target)
-        .await
-        .with_context(|| format!("connect control-plane upstream {upstream_addr}"))?;
+    let upstream = connect_control_plane_upstream(upstream_addr).await?;
+    proxy_control_plane_streams(downstream, upstream).await
+}
+
+async fn connect_control_plane_upstream(upstream_addr: &str) -> Result<TcpStream> {
+    let candidates = resolve_upstream_addrs(upstream_addr).await?;
+    let (_, stream) = connect_first_upstream_candidate(&candidates, |candidate| async move {
+        TcpStream::connect(candidate)
+            .await
+            .with_context(|| format!("connect control-plane upstream {upstream_addr}"))
+    })
+    .await
+    .with_context(|| format!("connect control-plane upstream {upstream_addr}"))?;
+    Ok(stream)
+}
+
+async fn proxy_control_plane_streams(downstream: TcpStream, upstream: TcpStream) -> Result<()> {
     let (downstream_recv, downstream_send) = downstream.into_split();
     let (upstream_recv, upstream_send) = upstream.into_split();
     let downstream_to_upstream = copy_tcp_half(downstream_recv, upstream_send);
@@ -171,336 +245,12 @@ where
     Ok(())
 }
 
-async fn handle_connection(incoming: quinn::Incoming, upstream_template: String) -> Result<()> {
-    let connection = incoming
-        .await
-        .context("accept downstream QUIC connection")?;
-    let server_name = downstream_server_name(&connection).unwrap_or_else(|| "stargate".to_string());
-    let upstream_addr = upstream_addr_for_sni(&upstream_template, &server_name)?;
-    info!(%server_name, %upstream_addr, "accepted downstream WebTransport connection");
-
-    let mut builder = h3::server::builder();
-    builder
-        .enable_webtransport(true)
-        .enable_extended_connect(true)
-        .enable_datagram(true)
-        .max_webtransport_sessions(1);
-    let mut downstream_h3: h3::server::Connection<h3_quinn::Connection, Bytes> = builder
-        .build(h3_quinn::Connection::new(connection.clone()))
-        .await
-        .map_err(|error| anyhow!("create downstream h3 server: {error:?}"))?;
-    let Some(resolver) = downstream_h3
-        .accept()
-        .await
-        .map_err(|error| anyhow!("accept downstream WebTransport CONNECT: {error:?}"))?
-    else {
-        return Ok(());
-    };
-    let (downstream_request, mut downstream_connect) = resolver
-        .resolve_request()
-        .await
-        .map_err(|error| anyhow!("resolve downstream WebTransport CONNECT: {error:?}"))?;
-    validate_webtransport_connect(&downstream_request)?;
-
-    let upstream =
-        connect_upstream(&upstream_addr, &server_name, downstream_request.headers()).await?;
-    if !upstream.response_status.is_success() {
-        let response = Response::builder()
-            .status(upstream.response_status)
-            .body(())
-            .context("build downstream rejection response")?;
-        downstream_connect
-            .send_response(response)
-            .await
-            .map_err(|error| anyhow!("send downstream rejection response: {error:?}"))?;
-        downstream_connect
-            .finish()
-            .await
-            .map_err(|error| anyhow!("finish downstream rejection response: {error:?}"))?;
-        return Ok(());
-    }
-
-    let downstream_session_id = downstream_connect.id().into_inner();
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .body(())
-        .context("build downstream WebTransport response")?;
-    downstream_connect
-        .send_response(response)
-        .await
-        .map_err(|error| anyhow!("send downstream WebTransport response: {error:?}"))?;
-
-    let _downstream_h3 = downstream_h3;
-    let _downstream_connect = downstream_connect;
-    let _upstream_endpoint = upstream.endpoint;
-    let _upstream_h3 = upstream.h3_connection;
-    let _upstream_connect = upstream.connect_stream;
-    let upstream_connection = upstream.connection;
-    let upstream_session_id = upstream.session_id;
-
-    bridge_upstream_webtransport_streams(
-        connection,
-        upstream_connection,
-        upstream_session_id,
-        downstream_session_id,
-    )
-    .await;
-
-    Ok(())
-}
-
-async fn bridge_upstream_webtransport_streams(
-    downstream_connection: quinn::Connection,
-    upstream_connection: quinn::Connection,
-    upstream_session_id: u64,
-    downstream_session_id: u64,
-) {
-    loop {
-        tokio::select! {
-            _ = downstream_connection.closed() => {
-                upstream_connection.close(0u32.into(), b"downstream webtransport closed");
-                break;
-            }
-            stream = upstream_connection.accept_bi() => {
-                let Ok((upstream_send, upstream_recv)) = stream else {
-                    downstream_connection.close(0u32.into(), b"upstream webtransport closed");
-                    break;
-                };
-                let downstream_connection = downstream_connection.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = bridge_upstream_webtransport_stream(
-                        downstream_connection,
-                        upstream_send,
-                        upstream_recv,
-                        upstream_session_id,
-                        downstream_session_id,
-                    )
-                    .await
-                    {
-                        warn!(error = %error, "WebTransport L7 stream bridge failed");
-                    }
-                });
-            }
-        }
-    }
-}
-
-async fn bridge_upstream_webtransport_stream(
-    downstream_connection: quinn::Connection,
-    mut upstream_send: quinn::SendStream,
-    mut upstream_recv: quinn::RecvStream,
-    upstream_session_id: u64,
-    downstream_session_id: u64,
-) -> Result<()> {
-    let stream_session_id = match tokio::time::timeout(
-        WEBTRANSPORT_STREAM_HEADER_TIMEOUT,
-        stargate_protocol::read_webtransport_bidi_header(&mut upstream_recv),
-    )
-    .await
-    {
-        Ok(Ok(session_id)) => session_id,
-        Ok(Err(error)) => {
-            reset_webtransport_stream(&mut upstream_send, &mut upstream_recv);
-            return Err(error).context("read upstream WebTransport stream header");
-        }
-        Err(_) => {
-            reset_webtransport_stream(&mut upstream_send, &mut upstream_recv);
-            return Err(anyhow!(
-                "timed out waiting for upstream WebTransport stream header"
-            ));
-        }
-    };
-    if stream_session_id != upstream_session_id {
-        reset_webtransport_stream(&mut upstream_send, &mut upstream_recv);
-        ensure!(
-            stream_session_id == upstream_session_id,
-            "upstream WebTransport session id mismatch: got {stream_session_id}, expected {upstream_session_id}"
-        );
-    }
-
-    let (mut downstream_send, downstream_recv) = downstream_connection
-        .open_bi()
-        .await
-        .context("open downstream WebTransport stream")?;
-    stargate_protocol::write_webtransport_bidi_header(&mut downstream_send, downstream_session_id)
-        .await
-        .context("write downstream WebTransport stream header")?;
-
-    bridge_bidirectional(
-        upstream_send,
-        upstream_recv,
-        downstream_send,
-        downstream_recv,
-    )
-    .await
-}
-
-fn reset_webtransport_stream(
-    quinn_send: &mut quinn::SendStream,
-    quinn_recv: &mut quinn::RecvStream,
-) {
-    let _ = quinn_send.reset(0u32.into());
-    let _ = quinn_recv.stop(0u32.into());
-}
-
-struct UpstreamSession {
-    endpoint: Endpoint,
-    connection: quinn::Connection,
-    h3_connection: h3::client::Connection<h3_quinn::Connection, Bytes>,
-    connect_stream: h3::client::RequestStream<
-        <h3_quinn::OpenStreams as h3::quic::OpenStreams<Bytes>>::BidiStream,
-        Bytes,
-    >,
-    response_status: StatusCode,
-    session_id: u64,
-}
-
-async fn connect_upstream(
-    upstream_addr: &str,
-    server_name: &str,
-    headers: &HeaderMap,
-) -> Result<UpstreamSession> {
-    let resolved_target = resolve_upstream_addr(upstream_addr).await?;
-    let mut endpoint =
-        Endpoint::client("0.0.0.0:0".parse().unwrap()).context("bind upstream QUIC client")?;
-    endpoint.set_default_client_config(client_config()?);
-    let connection = endpoint
-        .connect(resolved_target, server_name)
-        .with_context(|| format!("start upstream QUIC connect to {upstream_addr}"))?
-        .await
-        .with_context(|| format!("connect upstream QUIC to {upstream_addr}"))?;
-
-    let mut builder = h3::client::builder();
-    builder.enable_extended_connect(true).enable_datagram(true);
-    let (h3_connection, mut send_request): (
-        h3::client::Connection<h3_quinn::Connection, Bytes>,
-        h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
-    ) = builder
-        .build(h3_quinn::Connection::new(connection.clone()))
-        .await
-        .map_err(|error| anyhow!("create upstream h3 client: {error:?}"))?;
-
-    let mut request = Request::builder()
-        .method(Method::CONNECT)
-        .uri(format!("https://{server_name}{WEBTRANSPORT_TUNNEL_PATH}"))
-        .body(())
-        .context("build upstream WebTransport CONNECT")?;
-    for (name, value) in headers {
-        request.headers_mut().append(name, value.clone());
-    }
-    request
-        .extensions_mut()
-        .insert(h3::ext::Protocol::WEB_TRANSPORT);
-
-    let mut connect_stream = send_request
-        .send_request(request)
-        .await
-        .map_err(|error| anyhow!("send upstream WebTransport CONNECT: {error:?}"))?;
-    let session_id = connect_stream.id().into_inner();
-    connect_stream
-        .finish()
-        .await
-        .map_err(|error| anyhow!("finish upstream WebTransport CONNECT: {error:?}"))?;
-    let response = connect_stream
-        .recv_response()
-        .await
-        .map_err(|error| anyhow!("read upstream WebTransport CONNECT response: {error:?}"))?;
-    let response_status = response.status();
-
-    Ok(UpstreamSession {
-        endpoint,
-        connection,
-        h3_connection,
-        connect_stream,
-        response_status,
-        session_id,
-    })
-}
-
-async fn bridge_bidirectional(
-    upstream_send: quinn::SendStream,
-    upstream_recv: quinn::RecvStream,
-    downstream_send: quinn::SendStream,
-    downstream_recv: quinn::RecvStream,
-) -> Result<()> {
-    let downstream = copy_stream(upstream_recv, downstream_send);
-    let upstream = copy_stream(downstream_recv, upstream_send);
-    let (downstream_result, upstream_result) = tokio::join!(downstream, upstream);
-    downstream_result.context("copy upstream to downstream")?;
-    upstream_result.context("copy downstream to upstream")?;
-    Ok(())
-}
-
-async fn copy_stream(mut recv: quinn::RecvStream, mut send: quinn::SendStream) -> Result<()> {
-    while let Some(chunk) = recv
-        .read_chunk(usize::MAX, true)
-        .await
-        .context("read QUIC stream chunk")?
-    {
-        send.write_all(&chunk.bytes)
-            .await
-            .context("write QUIC stream chunk")?;
-    }
-    send.finish().context("finish QUIC send stream")?;
-    Ok(())
-}
-
-fn validate_webtransport_connect<B>(request: &Request<B>) -> Result<()> {
-    let is_webtransport = request
-        .extensions()
-        .get::<h3::ext::Protocol>()
-        .is_some_and(|protocol| *protocol == h3::ext::Protocol::WEB_TRANSPORT);
-    ensure!(
-        request.method() == Method::CONNECT
-            && request.uri().path() == WEBTRANSPORT_TUNNEL_PATH
-            && is_webtransport,
-        "invalid downstream WebTransport CONNECT"
-    );
-    Ok(())
-}
-
-async fn resolve_upstream_addr(upstream_addr: &str) -> Result<SocketAddr> {
-    let resolved_addrs: Vec<_> = tokio::net::lookup_host(upstream_addr)
-        .await
-        .with_context(|| format!("resolve upstream address {upstream_addr}"))?
-        .collect();
-    resolved_addrs
-        .iter()
-        .find(|addr| addr.is_ipv4())
-        .copied()
-        .or_else(|| resolved_addrs.first().copied())
-        .ok_or_else(|| anyhow!("no resolved upstream address for {upstream_addr}"))
-}
-
-fn downstream_server_name(connection: &quinn::Connection) -> Option<String> {
-    connection
-        .handshake_data()
-        .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
-        .and_then(|data| data.server_name)
-}
-
-fn upstream_addr_for_sni(template: &str, server_name: &str) -> Result<String> {
-    let pod_name = server_name
-        .split('.')
-        .next()
-        .filter(|value| !value.is_empty())
-        .context("server name does not include a pod hostname")?;
-    Ok(template
-        .replace("{pod_name}", pod_name)
-        .replace("{server_name}", server_name))
-}
-
-fn client_config() -> Result<ClientConfig> {
-    stargate_tls::build_insecure_quic_client_config_with_alpn(
-        TunnelTransportProtocol::WebTransport.alpn_protocols(),
-    )
-}
-
-fn server_config() -> Result<ServerConfig> {
-    let (cert_pem, key_pem) = stargate_tls::generate_self_signed_cert()?;
-    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &*cert_pem)
-        .collect::<std::result::Result<_, _>>()
-        .context("parse l7 proxy cert")?;
+fn server_config(identity: &ServerTlsIdentity) -> Result<ServerConfig> {
+    let (cert_pem, key_pem) = identity.pem_pair()?;
+    let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut &*cert_pem)
+            .collect::<std::result::Result<_, _>>()
+            .context("parse l7 proxy cert")?;
     let key = rustls_pemfile::private_key(&mut &*key_pem)
         .context("parse l7 proxy key")?
         .context("missing l7 proxy key")?;
@@ -516,150 +266,167 @@ fn server_config() -> Result<ServerConfig> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
 
+    fn args(control_plane_upstream_addr: Option<String>) -> Args {
+        Args {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            upstream_template: "{server_name}:50072".to_string(),
+            control_plane_listen_addr: "127.0.0.1:0".parse().unwrap(),
+            control_plane_upstream_addr,
+            tls_cert_path: None,
+            tls_key_path: None,
+            upstream_tls_cert_path: None,
+            upstream_quic_insecure: true,
+        }
+    }
+
     #[test]
-    fn upstream_addr_template_uses_pod_name_from_sni() {
-        let addr = upstream_addr_for_sni(
-            "{pod_name}.stargate-headless.ns.svc.cluster.local:50072",
-            "stargate-1.stargate.external",
-        )
-        .unwrap();
+    fn cli_parses_downstream_identity_and_upstream_trust_settings() {
+        let args = Args::try_parse_from([
+            "stargate-webtransport-l7-proxy",
+            "--upstream-template={server_name}:50072",
+            "--tls-cert-path=/tls/downstream.crt",
+            "--tls-key-path=/tls/downstream.key",
+            "--upstream-tls-cert-path=/tls/upstream.crt",
+            "--upstream-quic-insecure=false",
+        ])
+        .expect("TLS CLI should parse");
 
         assert_eq!(
-            addr,
-            "stargate-1.stargate-headless.ns.svc.cluster.local:50072"
+            args.tls_cert_path.as_deref(),
+            Some(std::path::Path::new("/tls/downstream.crt"))
         );
+        assert_eq!(
+            args.tls_key_path.as_deref(),
+            Some(std::path::Path::new("/tls/downstream.key"))
+        );
+        assert_eq!(
+            args.upstream_tls_cert_path.as_deref(),
+            Some(std::path::Path::new("/tls/upstream.crt"))
+        );
+        assert!(!args.upstream_quic_insecure);
     }
 
     #[test]
-    fn upstream_addr_template_can_use_full_server_name() {
-        let addr =
-            upstream_addr_for_sni("{server_name}:50072", "stargate-1.stargate.example").unwrap();
+    fn downstream_server_config_accepts_provided_identity() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (cert_pem, key_pem) = stargate_tls::generate_self_signed_cert().unwrap();
+        let identity = stargate_tls::ServerTlsIdentity::Provided { cert_pem, key_pem };
 
-        assert_eq!(addr, "stargate-1.stargate.example:50072");
+        server_config(&identity).expect("provided downstream identity should build");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stalled_upstream_stream_header_does_not_block_later_streams() {
+    #[tokio::test]
+    async fn webtransport_listener_binds_and_closes() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let (
-            _upstream_server_endpoint,
-            _upstream_proxy_endpoint,
-            upstream_server_connection,
-            upstream_proxy_connection,
-        ) = connect_quic_pair().await;
-        let (
-            _downstream_proxy_endpoint,
-            _downstream_client_endpoint,
-            downstream_proxy_connection,
-            downstream_client_connection,
-        ) = connect_quic_pair().await;
-
-        let bridge_task = tokio::spawn(bridge_upstream_webtransport_streams(
-            downstream_proxy_connection,
-            upstream_proxy_connection,
-            41,
-            77,
-        ));
-        let (_stalled_send, _stalled_recv) = upstream_server_connection
-            .open_bi()
-            .await
-            .expect("stalled stream");
-
-        let (mut upstream_send, _upstream_recv) = upstream_server_connection
-            .open_bi()
-            .await
-            .expect("second upstream stream");
-        stargate_protocol::write_webtransport_bidi_header(&mut upstream_send, 41)
-            .await
-            .expect("write upstream WebTransport header");
-        upstream_send
-            .write_all(b"later stream")
-            .await
-            .expect("write upstream payload");
-        upstream_send.finish().expect("finish upstream stream");
-
-        let (mut downstream_send, mut downstream_recv) = tokio::time::timeout(
-            Duration::from_secs(1),
-            downstream_client_connection.accept_bi(),
+        let endpoint = bind_webtransport_listener(
+            "127.0.0.1:0".parse().unwrap(),
+            &ServerTlsIdentity::SelfSigned,
         )
-        .await
-        .expect("later downstream stream should not be blocked")
-        .expect("downstream stream");
-        let downstream_session_id =
-            stargate_protocol::read_webtransport_bidi_header(&mut downstream_recv)
-                .await
-                .expect("read downstream WebTransport header");
-        assert_eq!(downstream_session_id, 77);
-        downstream_send.finish().expect("finish downstream stream");
-        let payload = downstream_recv
-            .read_to_end(1024)
-            .await
-            .expect("read payload");
-        assert_eq!(payload, b"later stream");
+        .expect("listener should bind");
 
-        bridge_task.abort();
+        assert!(endpoint.local_addr().unwrap().port() > 0);
+
+        close_webtransport_listener(endpoint).await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn downstream_close_closes_upstream_session() {
+    #[tokio::test]
+    async fn webtransport_accept_loop_runs_until_shutdown() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let (
-            _upstream_server_endpoint,
-            _upstream_proxy_endpoint,
-            upstream_server_connection,
-            upstream_proxy_connection,
-        ) = connect_quic_pair().await;
-        let (
-            _downstream_proxy_endpoint,
-            _downstream_client_endpoint,
-            downstream_proxy_connection,
-            downstream_client_connection,
-        ) = connect_quic_pair().await;
+        let endpoint = bind_webtransport_listener(
+            "127.0.0.1:0".parse().unwrap(),
+            &ServerTlsIdentity::SelfSigned,
+        )
+        .expect("listener should bind");
+        let shutdown = CancellationToken::new();
+        let upstream_tls = session::UpstreamTlsConfig::default();
+        {
+            let accept_loop = accept_webtransport_connections(
+                &endpoint,
+                "{server_name}:50072",
+                &upstream_tls,
+                &shutdown,
+            );
+            tokio::pin!(accept_loop);
 
-        let bridge_task = tokio::spawn(bridge_upstream_webtransport_streams(
-            downstream_proxy_connection,
-            upstream_proxy_connection,
-            41,
-            77,
-        ));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut accept_loop)
+                    .await
+                    .is_err(),
+                "accept loop should wait for connections or shutdown"
+            );
 
-        downstream_client_connection.close(0u32.into(), b"client restart");
-        tokio::time::timeout(Duration::from_secs(1), upstream_server_connection.closed())
-            .await
-            .expect("upstream session should close after downstream disconnects");
-
-        bridge_task.abort();
+            shutdown.cancel();
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut accept_loop)
+                .await
+                .expect("accept loop should stop after cancellation");
+        }
+        close_webtransport_listener(endpoint).await;
     }
 
-    async fn connect_quic_pair() -> (Endpoint, Endpoint, quinn::Connection, quinn::Connection) {
-        let server_endpoint =
-            Endpoint::server(server_config().unwrap(), "127.0.0.1:0".parse().unwrap()).unwrap();
-        let server_addr = server_endpoint.local_addr().unwrap();
-        let server_task = tokio::spawn(async move {
-            let incoming = server_endpoint
-                .accept()
-                .await
-                .expect("server should accept");
-            let server_connection = incoming.await.expect("server connection should complete");
-            (server_endpoint, server_connection)
+    #[tokio::test]
+    async fn control_plane_tcp_proxy_forwards_bytes_and_shutdown() -> Result<()> {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let upstream_addr = upstream_listener.local_addr()?;
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await?;
+            let mut request = [0; 4];
+            stream.read_exact(&mut request).await?;
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").await?;
+            stream.shutdown().await?;
+            Result::<()>::Ok(())
         });
 
-        let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        client_endpoint.set_default_client_config(client_config().unwrap());
-        let client_connection = client_endpoint
-            .connect(server_addr, "stargate")
-            .unwrap()
-            .await
-            .unwrap();
-        let (server_endpoint, server_connection) = server_task.await.unwrap();
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let proxy_addr = proxy_listener.local_addr()?;
+        let shutdown = CancellationToken::new();
+        let proxy_task = tokio::spawn(run_control_plane_tcp_proxy(
+            proxy_listener,
+            upstream_addr.to_string(),
+            shutdown.clone(),
+        ));
 
-        (
-            server_endpoint,
-            client_endpoint,
-            server_connection,
-            client_connection,
-        )
+        let mut client = TcpStream::connect(proxy_addr).await?;
+        client.write_all(b"ping").await?;
+        let mut response = [0; 4];
+        client.read_exact(&mut response).await?;
+        assert_eq!(&response, b"pong");
+        client.shutdown().await?;
+
+        upstream_task.await??;
+        shutdown.cancel();
+        proxy_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn control_plane_proxy_task_helpers_handle_absent_and_present_tasks() -> Result<()> {
+        let shutdown = CancellationToken::new();
+        assert!(
+            spawn_control_plane_tcp_proxy_if_configured(&args(None), &shutdown)
+                .await?
+                .is_none()
+        );
+
+        let reserved_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let listen_addr = reserved_listener.local_addr()?;
+        // Release the reserved port so the helper under test can prove it binds that address.
+        drop(reserved_listener);
+        let mut present_args = args(Some("127.0.0.1:1".to_string()));
+        present_args.control_plane_listen_addr = listen_addr;
+        let task = spawn_control_plane_tcp_proxy_if_configured(&present_args, &shutdown)
+            .await?
+            .expect("configured control-plane proxy should spawn a task");
+        shutdown.cancel();
+        join_control_plane_tcp_proxy(Some(task)).await?;
+
+        let task = tokio::spawn(async { Result::<()>::Ok(()) });
+        join_control_plane_tcp_proxy(Some(task)).await?;
+        join_control_plane_tcp_proxy(None).await?;
+        Ok(())
     }
 }

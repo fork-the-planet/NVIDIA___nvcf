@@ -99,35 +99,49 @@ impl Discovery for HeadlessDnsDiscovery {
     // StatefulSet-backed headless Service SRV records carry canonical pod
     // hostnames and are backed by ready EndpointSlices.
     async fn discover_stargates(&self) -> Vec<StargateInfo> {
-        let mut stargates = Vec::new();
         let srv_lookup_name = self.srv_lookup_name();
 
         match self.resolver.srv_lookup(srv_lookup_name.as_str()).await {
-            Ok(lookup) => {
-                for srv in lookup.iter() {
-                    let target = srv.target().to_utf8();
-                    let Some(endpoint_hostname) =
-                        endpoint_hostname_from_srv_target(&target, &self.discovery_dns_name)
-                    else {
-                        warn!(
-                            dns_name = %self.discovery_dns_name,
-                            srv_target = %target,
-                            "ignoring SRV target outside headless service domain"
-                        );
-                        continue;
-                    };
-                    stargates.push(self.stargate_info_for_endpoint(&endpoint_hostname, srv.port()));
-                }
-            }
+            Ok(lookup) => self.stargates_from_srv_records(
+                lookup
+                    .iter()
+                    .map(|srv| (srv.target().to_utf8(), srv.port())),
+            ),
             Err(e) => {
                 warn!(
                     dns_name = %srv_lookup_name,
                     error = %e,
                     "headless service SRV lookup failed"
                 );
+                self.initial_stargates()
             }
-        };
+        }
+    }
+}
 
+impl HeadlessDnsDiscovery {
+    fn stargates_from_srv_records<I>(&self, srv_records: I) -> Vec<StargateInfo>
+    where
+        I: IntoIterator<Item = (String, u16)>,
+    {
+        let mut stargates = Vec::new();
+        for (target, port) in srv_records {
+            let Some(endpoint_hostname) =
+                endpoint_hostname_from_srv_target(&target, &self.discovery_dns_name)
+            else {
+                warn!(
+                    dns_name = %self.discovery_dns_name,
+                    srv_target = %target,
+                    "ignoring SRV target outside headless service domain"
+                );
+                continue;
+            };
+            stargates.push(self.stargate_info_for_endpoint(&endpoint_hostname, port));
+        }
+        self.finalize_stargates(stargates)
+    }
+
+    fn finalize_stargates(&self, mut stargates: Vec<StargateInfo>) -> Vec<StargateInfo> {
         if stargates.is_empty() {
             return self.initial_stargates();
         }
@@ -239,53 +253,57 @@ impl DnsDiscovery {
             grpc_pylon_dial_addr: String::new(),
         })
     }
+
+    fn self_stargate_info(&self) -> StargateInfo {
+        let self_addr = self.self_addr.to_string();
+        StargateInfo {
+            stargate_id: self.self_stargate_id.clone(),
+            advertise_addr: self_addr,
+            http_advertise_addr: SocketAddr::new(self.self_addr.ip(), self.http_port).to_string(),
+            grpc_pylon_dial_addr: String::new(),
+        }
+    }
+
+    fn stargates_from_ips<I>(&self, ips: I) -> Vec<StargateInfo>
+    where
+        I: IntoIterator<Item = IpAddr>,
+    {
+        let stargates = ips
+            .into_iter()
+            .filter_map(|ip| self.stargate_info_for_ip(ip))
+            .collect();
+        self.finalize_stargates(stargates)
+    }
+
+    fn finalize_stargates(&self, mut stargates: Vec<StargateInfo>) -> Vec<StargateInfo> {
+        let self_addr_str = self.self_addr.to_string();
+        if !stargates.iter().any(|s| s.advertise_addr == self_addr_str) {
+            stargates.push(self.self_stargate_info());
+        }
+
+        sort_stargates(&mut stargates);
+        stargates
+    }
 }
 
 #[async_trait::async_trait]
 impl Discovery for DnsDiscovery {
     fn initial_stargates(&self) -> Vec<StargateInfo> {
-        let self_addr = self.self_addr.to_string();
-        vec![StargateInfo {
-            stargate_id: self.self_stargate_id.clone(),
-            advertise_addr: self_addr,
-            http_advertise_addr: SocketAddr::new(self.self_addr.ip(), self.http_port).to_string(),
-            grpc_pylon_dial_addr: String::new(),
-        }]
+        vec![self.self_stargate_info()]
     }
 
     async fn discover_stargates(&self) -> Vec<StargateInfo> {
-        let self_addr_str = self.self_addr.to_string();
-        let mut stargates = Vec::new();
-
         match self.resolver.lookup_ip(&self.discovery_dns_name).await {
-            Ok(lookup) => {
-                for ip in lookup.iter() {
-                    if let Some(stargate) = self.stargate_info_for_ip(ip) {
-                        stargates.push(stargate);
-                    }
-                }
-            }
+            Ok(lookup) => self.stargates_from_ips(lookup.iter()),
             Err(err) => {
                 warn!(
                     dns_name = %self.discovery_dns_name,
                     error = %err,
                     "dns lookup failed"
                 );
+                self.initial_stargates()
             }
         }
-
-        if !stargates.iter().any(|s| s.advertise_addr == self_addr_str) {
-            stargates.push(StargateInfo {
-                stargate_id: self.self_stargate_id.clone(),
-                advertise_addr: self_addr_str,
-                http_advertise_addr: SocketAddr::new(self.self_addr.ip(), self.http_port)
-                    .to_string(),
-                grpc_pylon_dial_addr: String::new(),
-            });
-        }
-
-        sort_stargates(&mut stargates);
-        stargates
     }
 }
 
@@ -384,6 +402,105 @@ mod tests {
                 .map(|stargate| stargate.stargate_id)
                 .collect::<Vec<_>>(),
             vec!["stargate-0", "stargate-1"]
+        );
+    }
+
+    #[test]
+    fn headless_dns_discovery_finalizes_srv_records_with_self_fallback_and_sorting() {
+        let discovery = make_headless_discovery();
+
+        let stargates = discovery.stargates_from_srv_records(vec![
+            (
+                "stargate-2.stargate-headless.prod.svc.cluster.local.".to_string(),
+                50072,
+            ),
+            (
+                "stargate-9.other.prod.svc.cluster.local.".to_string(),
+                50071,
+            ),
+            (
+                "stargate-1.stargate-headless.prod.svc.cluster.local.".to_string(),
+                50071,
+            ),
+        ]);
+
+        assert_eq!(
+            stargates,
+            vec![
+                StargateInfo {
+                    stargate_id: "stargate-0".to_string(),
+                    advertise_addr: "stargate-0.stargate.external:50071".to_string(),
+                    http_advertise_addr: String::new(),
+                    grpc_pylon_dial_addr: String::new(),
+                },
+                StargateInfo {
+                    stargate_id: "stargate-1".to_string(),
+                    advertise_addr: "stargate-1.stargate.external:50071".to_string(),
+                    http_advertise_addr: String::new(),
+                    grpc_pylon_dial_addr: String::new(),
+                },
+                StargateInfo {
+                    stargate_id: "stargate-2".to_string(),
+                    advertise_addr: "stargate-2.stargate.external:50072".to_string(),
+                    http_advertise_addr: String::new(),
+                    grpc_pylon_dial_addr: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn headless_dns_discovery_falls_back_to_self_when_no_srv_records_survive() {
+        let discovery = make_headless_discovery();
+
+        let stargates = discovery.stargates_from_srv_records(vec![(
+            "stargate-9.other.prod.svc.cluster.local.".to_string(),
+            50071,
+        )]);
+
+        assert_eq!(stargates, discovery.initial_stargates());
+    }
+
+    #[test]
+    fn dns_discovery_finalizes_ips_with_self_fallback_alias_filter_and_sorting() {
+        let resolver =
+            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let discovery = DnsDiscovery::new(
+            "10.0.0.2:50071".parse().unwrap(),
+            "local-stargate".to_string(),
+            "stargate-headless".to_string(),
+            resolver,
+            8000,
+        );
+
+        let stargates = discovery.stargates_from_ips(vec![
+            "10.0.0.3".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+            "10.0.0.1".parse().unwrap(),
+        ]);
+
+        assert_eq!(
+            stargates,
+            vec![
+                StargateInfo {
+                    stargate_id: "10.0.0.1:50071".to_string(),
+                    advertise_addr: "10.0.0.1:50071".to_string(),
+                    http_advertise_addr: String::new(),
+                    grpc_pylon_dial_addr: String::new(),
+                },
+                StargateInfo {
+                    stargate_id: "10.0.0.3:50071".to_string(),
+                    advertise_addr: "10.0.0.3:50071".to_string(),
+                    http_advertise_addr: String::new(),
+                    grpc_pylon_dial_addr: String::new(),
+                },
+                StargateInfo {
+                    stargate_id: "local-stargate".to_string(),
+                    advertise_addr: "10.0.0.2:50071".to_string(),
+                    http_advertise_addr: "10.0.0.2:8000".to_string(),
+                    grpc_pylon_dial_addr: String::new(),
+                },
+            ]
         );
     }
 

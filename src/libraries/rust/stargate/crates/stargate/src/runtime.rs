@@ -13,42 +13,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod server_tasks;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::watch;
-use tokio_stream::wrappers::TcpListenerStream;
-use tokio_util::task::TaskTracker;
-use tonic::transport::Server;
-use tower::util::MapRequestLayer;
-use tracing::{error, info};
+use tracing::info;
 
-use tokio_util::sync::CancellationToken;
-
-use stargate_forwarding::{ForwardingResolver, render_hostname};
+use stargate_forwarding::ForwardingResolver;
+pub use stargate_runtime::CriticalTaskFailure;
+use stargate_runtime::CriticalTaskGroup;
 
 use crate::auth::{OpenAuthenticator, WorkerAuthenticator};
-use crate::control_plane::{RegistrationConnectionConfig, StargateService, StargateServiceConfig};
+use crate::control_plane::{
+    RegistrationConnectionConfig, ReverseTunnelRegistrationConfig, StargateService,
+    StargateServiceConfig,
+};
 use crate::discovery::Discovery;
 use crate::http_proxy::{ProxyAppState, ProxyTrafficState, ProxyTransportConfig, make_router};
 use crate::load_balancer::{LoadBalancerConfig, LoadBalancerRouter};
 use crate::metrics::StargateMetrics;
 use crate::routing_state::StargateState;
 use crate::tunnel::{QuicHttpProxy, QuicTunnelConfig};
-
-const ACTIVE_MODELS_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
-
-#[cfg(test)]
-static ACTIVE_MODELS_SNAPSHOT_TASKS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
+use server_tasks::{
+    bind_tcp_listener, spawn_control_plane_grpc_server, spawn_http_proxy_server,
+    spawn_model_discovery_grpc_server,
+};
 #[derive(Debug, Clone)]
 pub struct StargateRuntimeConfig {
-    /// Stable process/pod identity used in logs, metrics, routing snapshots, and
-    /// as the default `{pod_name}` value when no Kubernetes pod name is set.
+    /// Stable process/pod identity used in logs, metrics, and routing snapshots.
     pub stargate_id: String,
 
     /// Local TCP socket for the backend-facing gRPC control plane:
@@ -59,9 +54,11 @@ pub struct StargateRuntimeConfig {
     /// This is intentionally separate from the backend control plane.
     pub model_discovery_listen_addr: SocketAddr,
 
-    /// Local HTTP socket for OpenAI-compatible proxy traffic, health probes,
-    /// and metrics scraping.
+    /// Local HTTP socket for OpenAI-compatible proxy traffic and health probes.
     pub http_listen_addr: SocketAddr,
+
+    /// Optional local TCP socket for Prometheus metrics.
+    pub metrics_listen_addr: Option<SocketAddr>,
 
     /// Self address used by discovery implementations before any hostname
     /// template is applied. Outside Kubernetes this is usually what pylons see
@@ -71,7 +68,8 @@ pub struct StargateRuntimeConfig {
 
     /// DNS name used for Stargate peer discovery. In Kubernetes this must be
     /// the headless Service name so EndpointSlice readiness controls which pods
-    /// are visible to pylons and peer forwarding.
+    /// are visible to pylons and to the development-only peer relay when it is
+    /// explicitly enabled.
     pub stargate_discovery_dns_name: String,
 
     /// Additional `WatchStargates` endpoints for remote regions. These are
@@ -84,17 +82,6 @@ pub struct StargateRuntimeConfig {
     /// gRPC authority/SNI identity and sends this as `grpc_pylon_dial_addr` so
     /// pylons connect through a TCP load balancer.
     pub grpc_pylon_dial_addr: Option<String>,
-
-    /// Template for backend-facing advertised hostnames, supporting
-    /// `{pod_name}` and `{namespace}`. The rendered value is used as gRPC
-    /// authority and QUIC SNI so routers can identify the selected pod.
-    pub advertised_hostname_template: Option<String>,
-
-    /// Kubernetes pod name used to render `advertised_hostname_template`.
-    pub pod_name: Option<String>,
-
-    /// Kubernetes namespace used to render `advertised_hostname_template`.
-    pub pod_namespace: Option<String>,
 
     /// Poll cadence for DNS-based peer discovery.
     pub dns_poll_interval: Duration,
@@ -120,20 +107,21 @@ pub struct StargateRuntimeConfig {
     /// Prefix prepended to Prometheus metric names.
     pub metrics_prefix: String,
 
-    /// Local UDP socket Stargate binds for pylon-initiated reverse QUIC
-    /// tunnels. This is the actual listener, not necessarily the address pylons
-    /// should dial from another network.
-    pub reverse_tunnel_listen_addr: Option<SocketAddr>,
+    /// Reverse listener, advertised identity, external dial address, and
+    /// registration wait policy. `None` disables reverse registrations.
+    pub reverse_tunnel: Option<ReverseTunnelConfig>,
+}
 
-    /// Optional pylon dial address for reverse QUIC tunnels. When set, Stargate
-    /// still sends the per-pod `reverse_tunnel_target` identity for SNI/routing,
-    /// and sends this as `reverse_tunnel_pylon_dial_addr` so pylons open the UDP
-    /// connection through a separate load balancer.
-    pub reverse_tunnel_pylon_dial_addr: Option<String>,
-
-    /// How long registration processing waits for the reverse tunnel connection
-    /// before advertising the backend inactive for that Stargate.
-    pub reverse_tunnel_connect_timeout: Duration,
+#[derive(Debug, Clone)]
+pub struct ReverseTunnelConfig {
+    /// Local UDP socket Stargate binds for pylon-initiated reverse QUIC tunnels.
+    pub listen_addr: SocketAddr,
+    /// Already-rendered hostname used as reverse QUIC SNI and routing identity.
+    pub advertised_host: String,
+    /// Optional externally reachable UDP load-balancer address for pylons.
+    pub pylon_dial_addr: Option<String>,
+    /// How long registration waits for a reverse connection after advertising.
+    pub connect_timeout: Duration,
 }
 
 pub struct StargateRuntime {
@@ -196,14 +184,17 @@ impl StargateRuntime {
     }
 
     pub async fn start(self) -> Result<StargateHandle> {
-        let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-        let task_tracker = TaskTracker::new();
-        let draining = Arc::new(AtomicBool::new(false));
-        let shutdown_token = CancellationToken::new();
-        let startup_shutdown =
-            StartupShutdownGuard::new(&shutdown_sender, &shutdown_token, &task_tracker);
+        let (tasks, critical_failure_rx) = CriticalTaskGroup::new("stargate");
+        let startup_shutdown = StartupShutdownGuard::new(&tasks);
         let metrics = StargateMetrics::new_with_prefix(&self.config.metrics_prefix)
             .context("failed to create prometheus metrics registry")?;
+        if let Some(metrics_addr) = self.config.metrics_listen_addr {
+            let metrics_listener = bind_tcp_listener(None, metrics_addr, "metrics").await?;
+            let metrics_registry = metrics.registry();
+            tasks.spawn_critical("metrics server", move |stop| {
+                crate::metrics::start_metrics_server(metrics_listener, metrics_registry, stop)
+            });
+        }
 
         let quic_proxy = QuicHttpProxy::new(
             QuicTunnelConfig {
@@ -220,51 +211,25 @@ impl StargateRuntime {
         .context("failed to initialize quic proxy")?;
         let quic_proxy = Arc::new(quic_proxy);
         let shared_state = Arc::new(StargateState::new_with_metrics(metrics.clone()));
-        spawn_active_models_snapshot_loop(
-            &task_tracker,
-            shared_state.clone(),
-            ACTIVE_MODELS_SNAPSHOT_INTERVAL,
-            shutdown_token.clone(),
-        );
 
-        let reverse_tunnel_ack_addrs =
-            if let Some(reverse_addr) = self.config.reverse_tunnel_listen_addr {
-                let bound_reverse_addr = quic_proxy
-                    .start_reverse_listener(
-                        reverse_addr,
-                        shared_state.clone(),
-                        shutdown_token.clone(),
-                        task_tracker.clone(),
-                        self.forwarding.clone(),
-                        self.reverse_tunnel_socket,
-                    )
-                    .await
-                    .context("failed to start reverse tunnel listener")?;
-                Some(derive_reverse_tunnel_ack_addrs(
-                    &self
-                        .config
-                        .advertised_hostname_template
-                        .clone()
-                        .unwrap_or_else(|| "{pod_name}.stargate.external".to_string()),
-                    self.config.pod_namespace.as_deref().unwrap_or(""),
-                    self.config
-                        .pod_name
-                        .as_deref()
-                        .unwrap_or(&self.config.stargate_id),
-                    bound_reverse_addr.port(),
-                    self.config.reverse_tunnel_pylon_dial_addr.as_deref(),
-                ))
-            } else {
-                None
-            };
+        let reverse_tunnel = if let Some(reverse_tunnel) = &self.config.reverse_tunnel {
+            let bound_reverse_addr = quic_proxy
+                .start_reverse_listener(
+                    reverse_tunnel.listen_addr,
+                    shared_state.clone(),
+                    tasks.clone(),
+                    self.forwarding.clone(),
+                    self.reverse_tunnel_socket,
+                )
+                .await
+                .context("failed to start reverse tunnel listener")?;
+            Some(reverse_tunnel.registration_config(bound_reverse_addr.port()))
+        } else {
+            None
+        };
         let registration_connection_config = RegistrationConnectionConfig {
             quic_proxy: quic_proxy.clone(),
-            reverse_tunnel_connect_timeout: self.config.reverse_tunnel_connect_timeout,
-            reverse_tunnel_target: reverse_tunnel_ack_addrs
-                .as_ref()
-                .map(|addrs| addrs.routing_target_addr.clone()),
-            reverse_tunnel_pylon_dial_addr: reverse_tunnel_ack_addrs
-                .map(|addrs| addrs.pylon_dial_addr),
+            reverse_tunnel,
         };
 
         let lb_config = match &self.config.lb_config_path {
@@ -286,18 +251,12 @@ impl StargateRuntime {
             "load balancer config loaded"
         );
 
-        let model_discovery_listener = match self.model_discovery_listener {
-            Some(listener) => {
-                listener
-                    .set_nonblocking(true)
-                    .context("failed to set model-discovery listener to non-blocking")?;
-                tokio::net::TcpListener::from_std(listener)
-                    .context("failed to convert model-discovery listener")?
-            }
-            None => tokio::net::TcpListener::bind(self.config.model_discovery_listen_addr)
-                .await
-                .context("failed to bind model-discovery listener")?,
-        };
+        let model_discovery_listener = bind_tcp_listener(
+            self.model_discovery_listener,
+            self.config.model_discovery_listen_addr,
+            "model-discovery",
+        )
+        .await?;
         let service = StargateService::new(StargateServiceConfig {
             stargate_id: self.config.stargate_id.clone(),
             advertise_addr: self.config.advertise_addr,
@@ -307,8 +266,7 @@ impl StargateRuntime {
             grpc_pylon_dial_addr: self.config.grpc_pylon_dial_addr.clone(),
             discovery_poll_interval: self.config.dns_poll_interval,
             watch_heartbeat_interval: self.config.watch_heartbeat_interval,
-            shutdown_token: shutdown_token.clone(),
-            task_tracker: task_tracker.clone(),
+            tasks: tasks.clone(),
             registration_update_idle_timeout: self.config.registration_update_idle_timeout,
             registration_update_max_idle_timeout: self.config.registration_update_max_idle_timeout,
             state: shared_state.clone(),
@@ -320,7 +278,7 @@ impl StargateRuntime {
         let proxy_router = make_router(ProxyAppState {
             state: service.state(),
             traffic: ProxyTrafficState {
-                is_draining: draining.clone(),
+                shutdown: tasks.shutdown_signal(),
             },
             quic_proxy: quic_proxy.clone(),
             lb_router,
@@ -328,96 +286,20 @@ impl StargateRuntime {
             retry: self.config.proxy_transport.retry.clone(),
         });
 
-        let grpc_listener = match self.grpc_listener {
-            Some(listener) => {
-                listener
-                    .set_nonblocking(true)
-                    .context("failed to set gRPC listener to non-blocking")?;
-                tokio::net::TcpListener::from_std(listener)
-                    .context("failed to convert gRPC listener")?
-            }
-            None => tokio::net::TcpListener::bind(self.config.grpc_listen_addr)
-                .await
-                .context("failed to bind gRPC listener")?,
-        };
-        let grpc_incoming = TcpListenerStream::new(grpc_listener);
-        let mut grpc_shutdown = shutdown_receiver.clone();
-        let grpc_service = service.clone();
-        task_tracker.spawn(async move {
-            let authority_layer = MapRequestLayer::new(|mut req: http::Request<_>| {
-                if let Some(authority) = req.uri().authority().cloned() {
-                    req.extensions_mut().insert(authority);
-                }
-                req
-            });
-            let result = Server::builder()
-                .layer(authority_layer)
-                .add_service(
-                    stargate_proto::pb::stargate_control_plane_server::StargateControlPlaneServer::new(
-                        grpc_service,
-                    ),
-                )
-                .serve_with_incoming_shutdown(grpc_incoming, async move {
-                    let _ = grpc_shutdown.changed().await;
-                })
-                .await;
-            if let Err(error) = result {
-                error!(%error, "gRPC server exited with error");
-            }
-        });
+        let grpc_listener =
+            bind_tcp_listener(self.grpc_listener, self.config.grpc_listen_addr, "gRPC").await?;
+        spawn_control_plane_grpc_server(&tasks, grpc_listener, service.clone());
 
-        let model_discovery_incoming = TcpListenerStream::new(model_discovery_listener);
-        let mut model_discovery_shutdown = shutdown_receiver.clone();
-        let model_discovery_service = service.clone();
-        task_tracker.spawn(async move {
-            let result = Server::builder()
-                .add_service(
-                    stargate_proto::pb::stargate_model_discovery_server::StargateModelDiscoveryServer::new(
-                        model_discovery_service,
-                    ),
-                )
-                .serve_with_incoming_shutdown(model_discovery_incoming, async move {
-                    let _ = model_discovery_shutdown.changed().await;
-                })
-                .await;
-            if let Err(error) = result {
-                error!(%error, "model-discovery gRPC server exited with error");
-            }
-        });
+        spawn_model_discovery_grpc_server(&tasks, model_discovery_listener, service.clone());
 
-        let listener = match self.http_listener {
-            Some(listener) => {
-                listener
-                    .set_nonblocking(true)
-                    .context("failed to set HTTP listener to non-blocking")?;
-                tokio::net::TcpListener::from_std(listener)
-                    .context("failed to convert HTTP listener")?
-            }
-            None => tokio::net::TcpListener::bind(self.config.http_listen_addr)
-                .await
-                .context("failed to bind HTTP listener")?,
-        };
-        let mut http_shutdown = shutdown_receiver.clone();
-        task_tracker.spawn(async move {
-            let result = axum::serve(
-                listener,
-                proxy_router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move {
-                let _ = http_shutdown.changed().await;
-            })
-            .await;
-            if let Err(error) = result {
-                error!(%error, "HTTP server exited with error");
-            }
-        });
+        let http_listener =
+            bind_tcp_listener(self.http_listener, self.config.http_listen_addr, "HTTP").await?;
+        spawn_http_proxy_server(&tasks, http_listener, proxy_router);
 
         startup_shutdown.disarm();
         Ok(StargateHandle {
-            shutdown_sender,
-            task_tracker,
-            draining,
-            shutdown_token,
+            tasks,
+            critical_failure_rx,
             metrics,
             state: service.state(),
         })
@@ -425,22 +307,14 @@ impl StargateRuntime {
 }
 
 struct StartupShutdownGuard<'a> {
-    shutdown_sender: &'a watch::Sender<bool>,
-    shutdown_token: &'a CancellationToken,
-    task_tracker: &'a TaskTracker,
+    tasks: &'a CriticalTaskGroup,
     disarmed: bool,
 }
 
 impl<'a> StartupShutdownGuard<'a> {
-    fn new(
-        shutdown_sender: &'a watch::Sender<bool>,
-        shutdown_token: &'a CancellationToken,
-        task_tracker: &'a TaskTracker,
-    ) -> Self {
+    fn new(tasks: &'a CriticalTaskGroup) -> Self {
         Self {
-            shutdown_sender,
-            shutdown_token,
-            task_tracker,
+            tasks,
             disarmed: false,
         }
     }
@@ -455,59 +329,13 @@ impl Drop for StartupShutdownGuard<'_> {
         if self.disarmed {
             return;
         }
-        self.shutdown_token.cancel();
-        let _ = self.shutdown_sender.send(true);
-        self.task_tracker.close();
-    }
-}
-
-fn spawn_active_models_snapshot_loop(
-    task_tracker: &TaskTracker,
-    state: Arc<StargateState>,
-    interval: Duration,
-    shutdown_token: CancellationToken,
-) {
-    #[cfg(test)]
-    ACTIVE_MODELS_SNAPSHOT_TASKS.fetch_add(1, Ordering::SeqCst);
-
-    task_tracker.spawn(async move {
-        #[cfg(test)]
-        let _active_task = ActiveModelsSnapshotTaskGuard;
-
-        run_active_models_snapshot_loop(state, interval, shutdown_token).await;
-    });
-}
-
-#[cfg(test)]
-struct ActiveModelsSnapshotTaskGuard;
-
-#[cfg(test)]
-impl Drop for ActiveModelsSnapshotTaskGuard {
-    fn drop(&mut self) {
-        ACTIVE_MODELS_SNAPSHOT_TASKS.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-async fn run_active_models_snapshot_loop(
-    state: Arc<StargateState>,
-    interval: Duration,
-    shutdown_token: CancellationToken,
-) {
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            _ = shutdown_token.cancelled() => break,
-            _ = ticker.tick() => state.refresh_active_models_snapshot().await,
-        }
+        self.tasks.begin_shutdown();
     }
 }
 
 pub struct StargateHandle {
-    shutdown_sender: watch::Sender<bool>,
-    task_tracker: TaskTracker,
-    draining: Arc<AtomicBool>,
-    shutdown_token: CancellationToken,
+    tasks: CriticalTaskGroup,
+    critical_failure_rx: flume::Receiver<CriticalTaskFailure>,
     metrics: Arc<StargateMetrics>,
     state: Arc<StargateState>,
 }
@@ -522,57 +350,48 @@ impl StargateHandle {
     }
 
     pub fn begin_shutdown(&self) {
-        let already_draining = self.draining.swap(true, Ordering::SeqCst);
-        if !already_draining {
+        if !self.tasks.is_stopping() {
             info!("Entering draining mode");
-            self.shutdown_token.cancel();
-            let _ = self.shutdown_sender.send(true);
-            self.task_tracker.close();
+            self.tasks.begin_shutdown();
         }
+    }
+
+    pub async fn wait_for_critical_failure(&self) -> CriticalTaskFailure {
+        self.critical_failure_rx
+            .recv_async()
+            .await
+            .expect("runtime task group outlives its critical-failure receiver")
     }
 
     pub async fn wait_for_shutdown(&self, timeout: Duration) -> bool {
         tokio::select! {
-            _ = self.task_tracker.wait() => true,
+            _ = self.tasks.wait() => true,
             _ = tokio::time::sleep(timeout) => false,
         }
     }
 }
 
-fn derive_reverse_tunnel_target(
-    hostname_template: &str,
-    namespace: &str,
-    pod_name: &str,
-    reverse_port: u16,
-) -> String {
-    let hostname = render_hostname(hostname_template, pod_name, namespace);
-    format!("{hostname}:{reverse_port}")
+impl Drop for StargateHandle {
+    fn drop(&mut self) {
+        self.tasks.begin_shutdown();
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReverseTunnelAckAddrs {
-    routing_target_addr: String,
-    pylon_dial_addr: String,
-}
-
-fn derive_reverse_tunnel_ack_addrs(
-    hostname_template: &str,
-    namespace: &str,
-    pod_name: &str,
-    reverse_port: u16,
-    reverse_tunnel_pylon_dial_addr: Option<&str>,
-) -> ReverseTunnelAckAddrs {
-    let routing_target_addr =
-        derive_reverse_tunnel_target(hostname_template, namespace, pod_name, reverse_port);
-    let pylon_dial_addr = reverse_tunnel_pylon_dial_addr
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| routing_target_addr.clone());
-
-    ReverseTunnelAckAddrs {
-        routing_target_addr,
-        pylon_dial_addr,
+impl ReverseTunnelConfig {
+    fn registration_config(&self, bound_port: u16) -> ReverseTunnelRegistrationConfig {
+        let target = format!("{}:{bound_port}", self.advertised_host);
+        let pylon_dial_addr = self
+            .pylon_dial_addr
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| target.clone());
+        ReverseTunnelRegistrationConfig {
+            target,
+            pylon_dial_addr,
+            connect_timeout: self.connect_timeout,
+        }
     }
 }
 
@@ -581,56 +400,46 @@ mod tests {
     use super::*;
     use crate::http_proxy::ProxyTransportConfig;
     use stargate_proto::pb::StargateInfo;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::oneshot;
     use tokio::time::Instant as TokioInstant;
 
-    // ACTIVE_MODELS_SNAPSHOT_TASKS is process-global in unit tests, so serialize
-    // runtime tests that assert exact snapshot-task counts.
-    static SNAPSHOT_TASK_COUNTER_TEST_LOCK: tokio::sync::Mutex<()> =
-        tokio::sync::Mutex::const_new(());
-
     #[test]
-    fn derive_target_uses_template() {
-        let result =
-            derive_reverse_tunnel_target("{pod_name}.stargate.external", "ns", "stargate-0", 50072);
-        assert_eq!(result, "stargate-0.stargate.external:50072");
-    }
-
-    #[test]
-    fn derive_reverse_tunnel_ack_addrs_keep_routing_target_separate_from_pylon_dial_address() {
-        let addrs = derive_reverse_tunnel_ack_addrs(
-            "{pod_name}.stargate-headless.{namespace}.svc.cluster.local",
-            "stargate",
-            "stargate-0",
-            50072,
-            Some("stargate-quic-lb.stargate.svc.cluster.local:50072"),
-        );
+    fn reverse_tunnel_registration_config_keeps_target_separate_from_pylon_dial_address() {
+        let config = ReverseTunnelConfig {
+            listen_addr: "0.0.0.0:50072".parse().unwrap(),
+            advertised_host: "stargate-0.stargate-headless.stargate.svc.cluster.local".to_string(),
+            pylon_dial_addr: Some("stargate-quic-lb.stargate.svc.cluster.local:50072".to_string()),
+            connect_timeout: Duration::from_secs(10),
+        }
+        .registration_config(50072);
 
         assert_eq!(
-            addrs.routing_target_addr,
+            config.target,
             "stargate-0.stargate-headless.stargate.svc.cluster.local:50072"
         );
         assert_eq!(
-            addrs.pylon_dial_addr,
+            config.pylon_dial_addr,
             "stargate-quic-lb.stargate.svc.cluster.local:50072"
         );
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
     }
 
     #[test]
-    fn derive_reverse_tunnel_ack_addrs_uses_routing_target_as_default_pylon_dial_address() {
-        let addrs = derive_reverse_tunnel_ack_addrs(
-            "{pod_name}.stargate-headless.{namespace}.svc.cluster.local",
-            "stargate",
-            "stargate-0",
-            50072,
-            None,
-        );
+    fn reverse_tunnel_registration_config_uses_target_as_default_pylon_dial_address() {
+        let config = ReverseTunnelConfig {
+            listen_addr: "0.0.0.0:0".parse().unwrap(),
+            advertised_host: "stargate-0.stargate-headless.stargate.svc.cluster.local".to_string(),
+            pylon_dial_addr: Some("   ".to_string()),
+            connect_timeout: Duration::from_secs(10),
+        }
+        .registration_config(50072);
 
         assert_eq!(
-            addrs.routing_target_addr,
+            config.target,
             "stargate-0.stargate-headless.stargate.svc.cluster.local:50072"
         );
-        assert_eq!(addrs.pylon_dial_addr, addrs.routing_target_addr);
+        assert_eq!(config.pylon_dial_addr, config.target);
     }
 
     struct CountingDiscovery {
@@ -697,10 +506,8 @@ mod tests {
 
     #[tokio::test]
     async fn start_failure_after_service_construction_stops_startup_tasks() {
-        let _snapshot_counter_guard = SNAPSHOT_TASK_COUNTER_TEST_LOCK.lock().await;
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-        let snapshot_task_baseline = active_models_snapshot_task_count();
         let active_discoveries = Arc::new(AtomicUsize::new(0));
         let grpc_blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let grpc_addr = grpc_blocker.local_addr().unwrap();
@@ -720,13 +527,11 @@ mod tests {
                 grpc_listen_addr: grpc_addr,
                 model_discovery_listen_addr: "127.0.0.1:0".parse().unwrap(),
                 http_listen_addr: http_addr,
+                metrics_listen_addr: None,
                 advertise_addr: grpc_addr,
                 stargate_discovery_dns_name: "localhost".to_string(),
                 remote_watch_stargate_urls: Vec::new(),
                 grpc_pylon_dial_addr: None,
-                advertised_hostname_template: None,
-                pod_name: None,
-                pod_namespace: None,
                 dns_poll_interval: Duration::from_secs(60),
                 watch_heartbeat_interval: Duration::from_secs(60),
                 registration_update_idle_timeout:
@@ -745,9 +550,7 @@ mod tests {
                 },
                 lb_config_path: None,
                 metrics_prefix: crate::metrics::DEFAULT_PREFIX.to_string(),
-                reverse_tunnel_listen_addr: None,
-                reverse_tunnel_pylon_dial_addr: None,
-                reverse_tunnel_connect_timeout: Duration::from_secs(10),
+                reverse_tunnel: None,
             },
             Box::new(discovery),
         );
@@ -755,14 +558,11 @@ mod tests {
         let result = runtime.start().await;
         assert!(result.is_err(), "occupied gRPC port should fail startup");
 
-        wait_for_active_models_snapshot_task_count(snapshot_task_baseline, Duration::from_secs(2))
-            .await;
         wait_for_count(&active_discoveries, 0, Duration::from_secs(2)).await;
     }
 
     #[tokio::test]
     async fn shutdown_cancels_in_flight_discovery_poll() {
-        let _snapshot_counter_guard = SNAPSHOT_TASK_COUNTER_TEST_LOCK.lock().await;
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let active_calls = Arc::new(AtomicUsize::new(0));
@@ -774,13 +574,11 @@ mod tests {
                 grpc_listen_addr: grpc_addr,
                 model_discovery_listen_addr: "127.0.0.1:0".parse().unwrap(),
                 http_listen_addr: http_addr,
+                metrics_listen_addr: None,
                 advertise_addr: grpc_addr,
                 stargate_discovery_dns_name: "localhost".to_string(),
                 remote_watch_stargate_urls: Vec::new(),
                 grpc_pylon_dial_addr: None,
-                advertised_hostname_template: None,
-                pod_name: None,
-                pod_namespace: None,
                 dns_poll_interval: Duration::from_secs(60),
                 watch_heartbeat_interval: Duration::from_secs(60),
                 registration_update_idle_timeout:
@@ -799,9 +597,7 @@ mod tests {
                 },
                 lb_config_path: None,
                 metrics_prefix: crate::metrics::DEFAULT_PREFIX.to_string(),
-                reverse_tunnel_listen_addr: None,
-                reverse_tunnel_pylon_dial_addr: None,
-                reverse_tunnel_connect_timeout: Duration::from_secs(10),
+                reverse_tunnel: None,
             },
             Box::new(BlockingDiscovery {
                 active_calls: active_calls.clone(),
@@ -825,12 +621,53 @@ mod tests {
         wait_for_count(&active_calls, 0, Duration::from_secs(2)).await;
     }
 
-    fn active_models_snapshot_task_count() -> usize {
-        ACTIVE_MODELS_SNAPSHOT_TASKS.load(Ordering::SeqCst)
+    #[tokio::test]
+    async fn handle_surfaces_critical_root_failure_and_stops_runtime() {
+        let (tasks, critical_failure_rx) = CriticalTaskGroup::new("stargate");
+        let handle = StargateHandle {
+            tasks: tasks.clone(),
+            critical_failure_rx,
+            metrics: StargateMetrics::new().expect("metrics should initialize"),
+            state: Arc::new(StargateState::new()),
+        };
+        tasks.spawn_critical("test critical root", |_| async { Ok(()) });
+
+        let failure =
+            tokio::time::timeout(Duration::from_secs(1), handle.wait_for_critical_failure())
+                .await
+                .expect("critical root failure should reach the handle");
+
+        assert_eq!(failure.task_name(), "test critical root");
+        assert_eq!(failure.detail(), "exited unexpectedly");
+        assert!(
+            handle.wait_for_shutdown(Duration::from_secs(1)).await,
+            "critical root failure should stop the runtime tree"
+        );
     }
 
-    async fn wait_for_active_models_snapshot_task_count(expected: usize, timeout: Duration) {
-        wait_for_count(&ACTIVE_MODELS_SNAPSHOT_TASKS, expected, timeout).await;
+    #[tokio::test]
+    async fn dropping_handle_cancels_owned_runtime_work() {
+        let (tasks, critical_failure_rx) = CriticalTaskGroup::new("stargate");
+        let stop = tasks.shutdown_signal();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
+        tasks.task_tracker().spawn(async move {
+            stop.cancelled().await;
+            let _ = stopped_tx.send(());
+        });
+        let handle = StargateHandle {
+            tasks,
+            critical_failure_rx,
+            metrics: StargateMetrics::new().expect("metrics should initialize"),
+            state: Arc::new(StargateState::new()),
+        };
+
+        // Dropping the runtime owner is the behavior under test.
+        drop(handle);
+
+        tokio::time::timeout(Duration::from_secs(1), stopped_rx)
+            .await
+            .expect("dropping the handle should cancel owned runtime work")
+            .expect("owned runtime work should publish completion");
     }
 
     async fn wait_for_count(count: &AtomicUsize, expected: usize, timeout: Duration) {

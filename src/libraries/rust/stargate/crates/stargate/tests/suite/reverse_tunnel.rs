@@ -19,6 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::common::sse::{
+    assert_sse_done, chat_completion_contents, json_events, parse_sse_events,
+};
 use crate::common::{
     bind_ephemeral_udp, init_crypto, make_stargate_runtime_with_reverse,
     make_stargate_runtime_with_reverse_and_lb, start_dummy_backend, wait_for_inference_server_ids,
@@ -180,31 +183,30 @@ async fn reverse_tunnel_proxies_chat_endpoint_contract() {
     let backend_addr = start_dummy_backend_with_responses("rt-chat-contract-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-chat-contract-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-chat-contract-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-chat-contract-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-chat-contract-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "rt-chat-contract-model", Duration::from_secs(10)).await;
@@ -253,14 +255,25 @@ async fn reverse_tunnel_proxies_chat_endpoint_contract() {
         "rt-chat-contract-inst"
     );
     let response_text = resp.text().await.expect("response should be text");
-    assert!(response_text.contains(r#""object":"chat.completion.chunk""#));
-    assert!(response_text.contains(r#""model":"rt-chat-contract-model""#));
+    let events = parse_sse_events(&response_text).expect("response should be valid SSE");
+    assert_sse_done(&events);
+    let payloads = json_events(&events);
     assert!(
-        response_text.contains(r#""path_and_query":"/v1/chat/completions?trace=reverse-chat""#)
+        payloads.iter().any(|payload| {
+            payload["object"] == "chat.completion.chunk"
+                && payload["model"] == "rt-chat-contract-model"
+                && payload["path_and_query"] == "/v1/chat/completions?trace=reverse-chat"
+                && payload
+                    .pointer("/choices/0/delta/content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("reverse contract echo")
+                && payload
+                    .pointer("/request/messages/0/content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("reverse contract")
+        }),
+        "reverse chat SSE payload did not preserve the endpoint contract: {payloads:#?}"
     );
-    assert!(response_text.contains(r#""content":"reverse contract echo""#));
-    assert!(response_text.contains(r#""content":"reverse contract""#));
-    assert!(response_text.contains("[DONE]"));
 
     reg_client.stop();
     handle.begin_shutdown();
@@ -279,31 +292,30 @@ async fn reverse_tunnel_proxies_streaming_response() {
     let backend_addr = start_dummy_backend("rt-stream-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-stream-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-stream-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-stream-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-stream-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "rt-stream-model", Duration::from_secs(10)).await;
@@ -329,10 +341,12 @@ async fn reverse_tunnel_proxies_streaming_response() {
     assert_eq!(resp.status(), 200);
 
     let sse_text = resp.text().await.expect("failed to read streaming body");
-    assert!(sse_text.contains("Hello"), "SSE should contain 'Hello'");
-    assert!(sse_text.contains(" world"), "SSE should contain ' world'");
-    assert!(sse_text.contains("!"), "SSE should contain '!'");
-    assert!(sse_text.contains("[DONE]"), "SSE should end with [DONE]");
+    let events = parse_sse_events(&sse_text).expect("streaming body should be valid SSE");
+    assert_sse_done(&events);
+    assert_eq!(
+        chat_completion_contents(&events),
+        vec!["Hello", " world", "!"]
+    );
 
     reg_client.stop();
     handle.begin_shutdown();
@@ -354,31 +368,30 @@ async fn reverse_tunnel_proxies_responses_response() {
     let backend_addr = start_dummy_backend_with_responses("rt-responses-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-responses-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-responses-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-responses-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-responses-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "rt-responses-model", Duration::from_secs(10)).await;
@@ -428,13 +441,49 @@ async fn reverse_tunnel_proxies_responses_response() {
         "rt-responses-inst"
     );
     let response_text = resp.text().await.expect("response should be text");
-    assert!(response_text.contains("event: response.completed"));
-    assert!(response_text.contains(r#""type":"response.completed""#));
-    assert!(response_text.contains(r#""object":"response""#));
-    assert!(response_text.contains(r#""model":"rt-responses-model""#));
-    assert!(response_text.contains(r#""path_and_query":"/v1/responses?trace=reverse-responses""#));
-    assert!(response_text.contains(r#""input":"hi""#));
-    assert!(response_text.contains(r#""stream":true"#));
+    let events = parse_sse_events(&response_text).expect("response should be valid SSE");
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| event.event_name.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["response.completed"]
+    );
+    let payloads = json_events(&events);
+    let completed = payloads
+        .iter()
+        .find(|payload| payload["type"] == "response.completed")
+        .expect("responses stream should include response.completed");
+    assert_eq!(
+        completed
+            .pointer("/response/object")
+            .and_then(serde_json::Value::as_str),
+        Some("response")
+    );
+    assert_eq!(
+        completed
+            .pointer("/response/model")
+            .and_then(serde_json::Value::as_str),
+        Some("rt-responses-model")
+    );
+    assert_eq!(
+        completed
+            .pointer("/response/path_and_query")
+            .and_then(serde_json::Value::as_str),
+        Some("/v1/responses?trace=reverse-responses")
+    );
+    assert_eq!(
+        completed
+            .pointer("/response/request/input")
+            .and_then(serde_json::Value::as_str),
+        Some("hi")
+    );
+    assert_eq!(
+        completed
+            .pointer("/response/request/stream")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
 
     reg_client.stop();
     handle.begin_shutdown();
@@ -456,31 +505,30 @@ async fn reverse_tunnel_forwards_endpoint_upstream_errors() {
     let backend_addr = start_dummy_backend_with_responses("rt-error-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-error-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-error-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-error-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-error-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "rt-error-model", Duration::from_secs(10)).await;
@@ -570,31 +618,30 @@ async fn reverse_tunnel_rejects_non_streaming_chat_completions() {
     let backend_addr = start_dummy_backend("rt-ns-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-ns-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-ns-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-ns-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-ns-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "rt-ns-model", Duration::from_secs(10)).await;
@@ -642,31 +689,30 @@ async fn reverse_tunnel_disconnection_removes_from_routing() {
     let backend_addr = start_dummy_backend("rt-disc-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-disc-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-disc-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-disc-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-disc-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "rt-disc-model", Duration::from_secs(10)).await;
@@ -694,31 +740,30 @@ async fn reverse_tunnel_reconnection_restores_routing() {
     let backend_addr = start_dummy_backend("rt-recon-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-recon-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-recon-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-recon-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-recon-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "rt-recon-model", Duration::from_secs(10)).await;
@@ -728,31 +773,30 @@ async fn reverse_tunnel_reconnection_restores_routing() {
 
     // Re-register with the same backend
     let mut reg_client2 = InferenceServerRegistrationClient::default();
-    let _channels2 = reg_client2
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-recon-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-recon-model".to_string()],
-        )
+    reg_client2
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-recon-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-recon-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("re-registration failed");
 
     wait_for_routing(http_addr, "rt-recon-model", Duration::from_secs(10)).await;
@@ -776,7 +820,7 @@ async fn reverse_tunnel_reconnection_restores_routing() {
     .expect("request after reconnection failed");
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
-    assert!(text.contains("[DONE]"), "SSE should end with [DONE]");
+    assert_sse_done(&parse_sse_events(&text).expect("reconnected stream should be valid SSE"));
 
     reg_client2.stop();
     handle.begin_shutdown();
@@ -852,59 +896,57 @@ async fn reverse_tunnel_multiple_instances() {
     let backend_addr_b = start_dummy_backend("rt-multi-model").await;
 
     let mut reg_a = InferenceServerRegistrationClient::default();
-    let _channels_a = reg_a
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-multi-a".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr_a}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr_a}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-multi-model".to_string()],
-        )
+    reg_a
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-multi-a".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr_a}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr_a}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-multi-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     let mut reg_b = InferenceServerRegistrationClient::default();
-    let _channels_b = reg_b
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-multi-b".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr_b}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr_b}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-multi-model".to_string()],
-        )
+    reg_b
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-multi-b".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr_b}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr_b}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-multi-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     // Wait for both instances to become routable
@@ -1031,31 +1073,30 @@ async fn reverse_tunnel_does_not_reconnect_on_duplicate_acks() {
     let backend_addr = start_dummy_backend("rt-storm-model").await;
 
     let mut reg_client = InferenceServerRegistrationClient::default();
-    let _channels = reg_client
-        .start(
-            InferenceServerRegistrationConfig {
-                seeds: vec![grpc_addr.to_string()],
-                inference_server_id: "rt-storm-inst".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: format!("http://{backend_addr}"),
-                upstream_http_base_url: Some(format!("http://{backend_addr}")),
-                min_update_interval: Duration::from_millis(100),
-                status: InferenceServerStatus::Active,
-                reverse_tunnel: true,
-                bringup: BringupConfig::default(),
-                output_token_parser_factory: OutputTokenParserFactory::vllm(),
-                request_observation_tx: None,
-                request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-                metrics: None,
-                retry: pylon_lib::PylonRetryConfig::default(),
-                queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-                queue_tracker: pylon_lib::QueueAdmissionTracker::default(),
-                auth_token_provider: None,
-                quic_insecure: true,
-                tunnel_protocol: Default::default(),
-            },
-            vec!["rt-storm-model".to_string()],
-        )
+    reg_client
+        .start(InferenceServerRegistrationConfig {
+            seeds: vec![grpc_addr.to_string()],
+            inference_server_id: "rt-storm-inst".to_string(),
+            cluster_id: String::new(),
+            inference_server_url: format!("http://{backend_addr}"),
+            upstream_http_base_url: Some(format!("http://{backend_addr}")),
+            min_update_interval: Duration::from_millis(100),
+            reverse_tunnel: true,
+            bringup: BringupConfig::default(),
+            output_token_parser_factory: OutputTokenParserFactory::vllm(),
+            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
+            metrics: None,
+            retry: pylon_lib::PylonRetryConfig::default(),
+            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
+            runtime_state: pylon_lib::PylonRuntimeState::new(
+                InferenceServerStatus::Active,
+                &["rt-storm-model".to_string()],
+            ),
+            auth_token_provider: None,
+            tls_cert_pem: None,
+            quic_insecure: true,
+            tunnel_protocol: Default::default(),
+        })
         .expect("registration failed");
 
     wait_for_routing(http_addr, "rt-storm-model", Duration::from_secs(10)).await;

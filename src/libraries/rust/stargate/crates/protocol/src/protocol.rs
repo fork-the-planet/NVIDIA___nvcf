@@ -109,36 +109,18 @@ impl QuicMessage {
         })?;
         match which {
             quic_capnp::message::Which::Headers(Ok(headers)) => {
-                let entries = headers.get_entries()?;
-                let mut vec = Vec::with_capacity(entries.len() as usize);
-                for entry in entries {
-                    let k = entry.get_key()?.to_str().map_err(|e| {
-                        ProtocolError::InvalidHeader(format!("non-UTF8 header key: {e}"))
-                    })?;
-                    let v = entry.get_value()?.to_str().map_err(|e| {
-                        ProtocolError::InvalidHeader(format!("non-UTF8 header value: {e}"))
-                    })?;
-                    vec.push((k.to_owned(), v.to_owned()));
-                }
-                Ok(QuicMessage::Header(QuicHeader { entries: vec }))
+                let entries =
+                    quic_message_entries_from_capnp_map(headers, HeaderMapMessageKind::Header)?;
+                Ok(QuicMessage::Header(QuicHeader { entries }))
             }
             quic_capnp::message::Which::Body(Ok(body)) => {
                 let content = body.get_content()?.to_vec().into();
                 Ok(QuicMessage::Body(QuicBody { content }))
             }
             quic_capnp::message::Which::Trailers(Ok(trailers)) => {
-                let entries = trailers.get_entries()?;
-                let mut vec = Vec::with_capacity(entries.len() as usize);
-                for entry in entries {
-                    let k = entry.get_key()?.to_str().map_err(|e| {
-                        ProtocolError::InvalidHeader(format!("non-UTF8 trailer key: {e}"))
-                    })?;
-                    let v = entry.get_value()?.to_str().map_err(|e| {
-                        ProtocolError::InvalidHeader(format!("non-UTF8 trailer value: {e}"))
-                    })?;
-                    vec.push((k.to_owned(), v.to_owned()));
-                }
-                Ok(QuicMessage::Trailer(QuicTrailer { entries: vec }))
+                let entries =
+                    quic_message_entries_from_capnp_map(trailers, HeaderMapMessageKind::Trailer)?;
+                Ok(QuicMessage::Trailer(QuicTrailer { entries }))
             }
             _ => Err(ProtocolError::ProtocolViolation(
                 "unknown QuicMessage type".to_string(),
@@ -550,6 +532,20 @@ impl HeaderMapMessageKind {
             Self::Trailer => 2,
         }
     }
+
+    fn key_label(self) -> &'static str {
+        match self {
+            Self::Header => "header key",
+            Self::Trailer => "trailer key",
+        }
+    }
+
+    fn value_label(self) -> &'static str {
+        match self {
+            Self::Header => "header value",
+            Self::Trailer => "trailer value",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -601,11 +597,7 @@ fn header_map_from_capnp_map(
 ) -> Result<HeaderMap, ProtocolError> {
     let entries = headers.get_entries()?;
     let entry_count = entries.len() as usize;
-    if entry_count > MAX_QUIC_HEADER_COUNT {
-        return Err(ProtocolError::ProtocolViolation(format!(
-            "too many custom tunnel headers: {entry_count}"
-        )));
-    }
+    validate_quic_header_count(entry_count)?;
     let mut header_map = HeaderMap::with_capacity(entry_count);
     for entry in entries {
         let key = entry
@@ -619,6 +611,34 @@ fn header_map_from_capnp_map(
         append_header_entry(&mut header_map, key, value)?;
     }
     Ok(header_map)
+}
+
+fn quic_message_entries_from_capnp_map(
+    headers: quic_capnp::map::Reader<'_, capnp::text::Owned, capnp::text::Owned>,
+    kind: HeaderMapMessageKind,
+) -> Result<Vec<(String, String)>, ProtocolError> {
+    let entries = headers.get_entries()?;
+    let entry_count = entries.len() as usize;
+    validate_quic_header_count(entry_count)?;
+
+    let mut decoded = Vec::with_capacity(entry_count);
+    for entry in entries {
+        let key = entry.get_key()?.to_str().map_err(|error| {
+            ProtocolError::InvalidHeader(format!("non-UTF8 {}: {error}", kind.key_label()))
+        })?;
+        let value = entry.get_value()?.to_str().map_err(|error| {
+            ProtocolError::InvalidHeader(format!("non-UTF8 {}: {error}", kind.value_label()))
+        })?;
+        decoded.push((key.to_owned(), value.to_owned()));
+    }
+    Ok(decoded)
+}
+
+fn validate_quic_header_count(entry_count: usize) -> Result<(), ProtocolError> {
+    if entry_count > MAX_QUIC_HEADER_COUNT {
+        return Err(custom_header_too_large(entry_count));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -772,6 +792,58 @@ mod tests {
         let typed_reader =
             TypedReader::<capnp::serialize::OwnedSegments, quic_capnp::message::Owned>::new(reader);
         QuicMessage::from_reader(typed_reader).unwrap()
+    }
+
+    fn oversized_entry_message_builder(
+        kind: HeaderMapMessageKind,
+    ) -> TypedBuilder<quic_capnp::message::Owned> {
+        let mut builder: TypedBuilder<quic_capnp::message::Owned> = TypedBuilder::new_default();
+        builder.init_root();
+        let mut root = builder.get_root().unwrap();
+        let entry_count = (MAX_QUIC_HEADER_COUNT + 1)
+            .try_into()
+            .expect("test entry count fits in u32");
+        match kind {
+            HeaderMapMessageKind::Header => {
+                root.reborrow()
+                    .init_headers()
+                    .reborrow()
+                    .init_entries(entry_count);
+            }
+            HeaderMapMessageKind::Trailer => {
+                root.reborrow()
+                    .init_trailers()
+                    .reborrow()
+                    .init_entries(entry_count);
+            }
+        }
+        builder
+    }
+
+    fn decode_message_builder(
+        builder: TypedBuilder<quic_capnp::message::Owned>,
+    ) -> Result<QuicMessage, ProtocolError> {
+        let mut buf = Vec::new();
+        capnp::serialize::write_message(&mut buf, builder.borrow_inner()).unwrap();
+        let reader =
+            capnp::serialize::read_message(&mut &buf[..], capnp::message::ReaderOptions::default())
+                .unwrap();
+        let typed_reader =
+            TypedReader::<capnp::serialize::OwnedSegments, quic_capnp::message::Owned>::new(reader);
+        QuicMessage::from_reader(typed_reader)
+    }
+
+    #[test]
+    fn quic_message_reader_rejects_excessive_header_and_trailer_entries() {
+        for kind in [HeaderMapMessageKind::Header, HeaderMapMessageKind::Trailer] {
+            let error = decode_message_builder(oversized_entry_message_builder(kind))
+                .expect_err("oversized entry list should fail before decoding entries");
+            assert!(
+                matches!(&error, ProtocolError::ProtocolViolation(message)
+                    if message.contains("too many custom tunnel headers")),
+                "{kind:?} returned {error:?}"
+            );
+        }
     }
 
     #[test]

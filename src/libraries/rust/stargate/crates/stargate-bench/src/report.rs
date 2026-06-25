@@ -13,10 +13,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+
 use crate::config::{BenchmarkConfig, PylonQueueAdmissionConfig, ScenarioMetadata};
 use crate::manifest::Manifest;
 use crate::score::{BackendSummary, QueueAdmissionSummary, RunSummary};
-use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
 pub struct ReportContext {
@@ -74,6 +78,81 @@ pub struct ReportEntry {
     pub algorithm_name: String,
     pub pylon_queue_admission: Option<PylonQueueAdmissionConfig>,
     pub summary: RunSummary,
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkReportArtifacts {
+    pub comparison_path: PathBuf,
+    pub report_path: PathBuf,
+}
+
+pub fn write_benchmark_report_artifacts(
+    output_dir: &Path,
+    context: &ReportContext,
+    entries: &[ReportEntry],
+) -> anyhow::Result<BenchmarkReportArtifacts> {
+    let artifacts = BenchmarkReportArtifacts {
+        comparison_path: output_dir.join("comparison.json"),
+        report_path: output_dir.join("report.md"),
+    };
+    write_comparison_artifact(&artifacts.comparison_path, entries)?;
+    write_markdown_report_artifact(&artifacts.report_path, context, entries)?;
+    Ok(artifacts)
+}
+
+pub fn write_markdown_report_artifact(
+    report_path: &Path,
+    context: &ReportContext,
+    entries: &[ReportEntry],
+) -> anyhow::Result<()> {
+    let report = render_markdown_report(context, entries);
+    std::fs::write(report_path, report)
+        .with_context(|| format!("failed to write {}", report_path.display()))
+}
+
+pub fn write_comparison_artifact(
+    comparison_path: &Path,
+    entries: &[ReportEntry],
+) -> anyhow::Result<()> {
+    let comparison = entries.iter().map(comparison_entry).collect::<Vec<_>>();
+    let comparison_bytes = serde_json::to_vec_pretty(&comparison)
+        .context("failed to serialize benchmark comparison")?;
+    std::fs::write(comparison_path, comparison_bytes)
+        .with_context(|| format!("failed to write {}", comparison_path.display()))
+}
+
+pub(crate) fn comparison_entry(entry: &ReportEntry) -> serde_json::Value {
+    let summary = &entry.summary;
+    serde_json::json!({
+        "algorithm_name": entry.algorithm_name,
+        "pylon_queue_admission": entry.pylon_queue_admission,
+        "success_rate": summary.success_rate,
+        "avg_ttft_ms": summary.avg_ttft_ms,
+        "p95_ttft_ms": summary.p95_ttft_ms,
+        "avg_ttlt_ms": summary.avg_ttlt_ms,
+        "max_ttlt_ms": summary.max_ttlt_ms,
+        "total_length_ms": summary.total_length_ms,
+        "successful_requests_per_second": summary.successful_requests_per_second,
+        "successful_output_tokens_per_second": summary.successful_output_tokens_per_second,
+        "balance_score": summary.balance_score,
+        "capacity_balance_score": summary.capacity_balance_score,
+        "cluster_balance_score": summary.cluster_balance_score,
+        "cluster_capacity_balance_score": summary.cluster_capacity_balance_score,
+        "cache_observed_request_count": summary.cache_summary.observed_request_count,
+        "cache_hit_count": summary.cache_summary.hit_count,
+        "cache_miss_count": summary.cache_summary.miss_count,
+        "cache_hit_rate": summary.cache_summary.hit_rate,
+        "cache_eviction_count": summary.cache_summary.eviction_count,
+        "cache_evicted_tokens": summary.cache_summary.evicted_tokens,
+        "cache_reused_input_tokens": summary.cache_summary.reused_input_tokens,
+        "cache_uncached_input_tokens": summary.cache_summary.uncached_input_tokens,
+        "cache_input_reuse_rate": summary.cache_summary.input_reuse_rate,
+        "cache_key_movement_rate": summary.stickiness_summary.movement_rate,
+        "moved_cache_key_count": summary.stickiness_summary.moved_cache_key_count,
+        "failure_group_count": summary.failure_summary.len(),
+        "queue_admission": summary.queue_admission_summary,
+        "routing_selection": summary.routing_selection_summary,
+    })
 }
 
 pub fn render_markdown_report(context: &ReportContext, entries: &[ReportEntry]) -> String {
@@ -558,6 +637,66 @@ mod tests {
             degradation: Default::default(),
             algorithms: Vec::new(),
         }
+    }
+
+    #[test]
+    fn report_artifacts_write_comparison_and_markdown_from_same_entries() {
+        let tempdir = tempfile::tempdir().expect("tempdir should create");
+        let mut summary = summarize_with_capacity(&[], BTreeMap::new());
+        summary.p95_ttft_ms = Some(17);
+        summary.queue_admission_summary = QueueAdmissionSummary {
+            pylon_rejected_count: 4.0,
+            stargate_queue_mismatch_retry_count: 3.0,
+            ..QueueAdmissionSummary::default()
+        };
+        summary.routing_selection_summary = RoutingSelectionSummary {
+            primary_count: 5.0,
+            fallback_count: 2.0,
+            kv_free_token_fallback_count: 1.0,
+        };
+        let entry = ReportEntry {
+            algorithm_name: "groq-admission-enabled".to_string(),
+            pylon_queue_admission: Some(crate::config::PylonQueueAdmissionConfig {
+                enabled: true,
+                min_delta_ms: Some(0),
+                tolerance_factor: Some(1.0),
+                retry_after_ms: Some(5),
+            }),
+            summary,
+        };
+
+        let artifacts = write_benchmark_report_artifacts(
+            tempdir.path(),
+            &ReportContext::from_config(&config()),
+            &[entry],
+        )
+        .expect("report artifacts should write");
+
+        let comparison: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&artifacts.comparison_path).expect("comparison should read"),
+        )
+        .expect("comparison should parse");
+        assert_eq!(comparison[0]["algorithm_name"], "groq-admission-enabled");
+        assert_eq!(comparison[0]["pylon_queue_admission"]["enabled"], true);
+        assert_eq!(comparison[0]["p95_ttft_ms"], 17);
+        assert_eq!(
+            comparison[0]["queue_admission"]["pylon_rejected_count"],
+            4.0
+        );
+        assert_eq!(
+            comparison[0]["queue_admission"]["stargate_queue_mismatch_retry_count"],
+            3.0
+        );
+        assert_eq!(comparison[0]["routing_selection"]["fallback_count"], 2.0);
+        assert_eq!(
+            comparison[0]["routing_selection"]["kv_free_token_fallback_count"],
+            1.0
+        );
+
+        let report = std::fs::read_to_string(&artifacts.report_path).expect("report should read");
+        assert!(report.contains("| groq-admission-enabled | enabled"));
+        assert!(report.contains("Pylon Rejected"));
+        assert!(report.contains("Fallback Route Choices"));
     }
 
     #[test]

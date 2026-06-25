@@ -18,7 +18,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn request(max_tokens: Option<usize>) -> ChatRequest {
@@ -35,6 +35,181 @@ fn test_stats_events() -> broadcast::Sender<StatsStreamEvent> {
     tx
 }
 
+#[tokio::test]
+async fn test_controls_isolate_chat_failure_by_model() {
+    let controls = TestControlState::default();
+
+    controls.set_chat_failure("model-b", true).await;
+
+    assert!(!controls.chat_failure_enabled("model-a").await);
+    assert!(controls.chat_failure_enabled("model-b").await);
+
+    controls.set_chat_failure("model-b", false).await;
+
+    assert!(!controls.chat_failure_enabled("model-b").await);
+}
+
+#[tokio::test]
+async fn test_controls_count_endpoint_model_and_request_class() {
+    let controls = TestControlState::default();
+
+    controls
+        .record_request(
+            TestEndpoint::ChatCompletions,
+            "model-a",
+            TestRequestClass::Bringup,
+        )
+        .await;
+    controls
+        .record_request(
+            TestEndpoint::ChatCompletions,
+            "model-a",
+            TestRequestClass::NonBringup,
+        )
+        .await;
+    controls
+        .record_request(
+            TestEndpoint::Embeddings,
+            "model-b",
+            TestRequestClass::NonBringup,
+        )
+        .await;
+
+    let snapshot = controls.snapshot().await;
+    assert_eq!(
+        snapshot.counter(
+            TestEndpoint::ChatCompletions,
+            "model-a",
+            TestRequestClass::Bringup,
+        ),
+        1
+    );
+    assert_eq!(
+        snapshot.counter(
+            TestEndpoint::ChatCompletions,
+            "model-a",
+            TestRequestClass::NonBringup,
+        ),
+        1
+    );
+    assert_eq!(
+        snapshot.counter(
+            TestEndpoint::Embeddings,
+            "model-b",
+            TestRequestClass::NonBringup,
+        ),
+        1
+    );
+    assert_eq!(
+        snapshot.counter(
+            TestEndpoint::Responses,
+            "model-a",
+            TestRequestClass::NonBringup,
+        ),
+        0
+    );
+}
+
+#[tokio::test]
+async fn test_control_http_api_updates_one_model_and_reports_request_counters() {
+    let state = AppState {
+        model_name: "dummy-model".to_string(),
+        num_tokens: 1,
+        token_delay: Duration::ZERO,
+        decode_jitter_ms: 0,
+        ttft: Duration::ZERO,
+        ttft_jitter_ms: 0,
+        prefill_tokens_per_s: 0.0,
+        request_slots: None,
+        health_delay: Duration::ZERO,
+        kv_cache: Arc::new(Mutex::new(KvCacheState::new(0))),
+        stats_events: test_stats_events(),
+        test_control: TestControlState::default(),
+    };
+    let observed_control = state.test_control.clone();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(chat_completions))
+        .route(
+            "/test-control/models/{model}",
+            put(update_model_test_control),
+        )
+        .route("/test-control", get(test_control_snapshot))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test server should bind");
+    let addr = listener.local_addr().expect("local address should exist");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("test server should serve");
+    });
+
+    let update_body = r#"{"chat_failure":true}"#;
+    let update_response = raw_http_request(
+        addr,
+        &format!(
+            "PUT /test-control/models/model-b HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{update_body}",
+            update_body.len()
+        ),
+    )
+    .await;
+    assert!(update_response.starts_with("HTTP/1.1 200 OK"));
+    assert!(update_response.contains(r#""model-b":{"chat_failure":true}"#));
+
+    let failed_body = r#"{"model":"model-b","messages":[],"max_tokens":1,"stream":false}"#;
+    let failed_response = raw_http_request(
+        addr,
+        &format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\nx-request-id: bringup-7\r\n\r\n{failed_body}",
+            failed_body.len()
+        ),
+    )
+    .await;
+    assert!(failed_response.starts_with("HTTP/1.1 503 Service Unavailable"));
+
+    let successful_body = r#"{"model":"model-a","messages":[],"max_tokens":1,"stream":false}"#;
+    let successful_response = raw_http_request(
+        addr,
+        &format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\nx-request-id: user-7\r\n\r\n{successful_body}",
+            successful_body.len()
+        ),
+    )
+    .await;
+    assert!(successful_response.starts_with("HTTP/1.1 200 OK"));
+
+    let snapshot_response = raw_http_request(
+        addr,
+        &format!("GET /test-control HTTP/1.1\r\nhost: {addr}\r\nconnection: close\r\n\r\n"),
+    )
+    .await;
+    assert!(snapshot_response.starts_with("HTTP/1.1 200 OK"));
+    assert!(snapshot_response.contains(r#""endpoint":"chat_completions""#));
+    assert!(snapshot_response.contains(r#""request_class":"bringup""#));
+    assert!(snapshot_response.contains(r#""request_class":"non_bringup""#));
+
+    let snapshot = observed_control.snapshot().await;
+    assert_eq!(
+        snapshot.counter(
+            TestEndpoint::ChatCompletions,
+            "model-b",
+            TestRequestClass::Bringup,
+        ),
+        1
+    );
+    assert_eq!(
+        snapshot.counter(
+            TestEndpoint::ChatCompletions,
+            "model-a",
+            TestRequestClass::NonBringup,
+        ),
+        1
+    );
+
+    server.abort();
+}
+
 #[test]
 fn counts_openai_embedding_input_items() {
     assert_eq!(embedding_item_count(&serde_json::json!("single input")), 1);
@@ -45,6 +220,43 @@ fn counts_openai_embedding_input_items() {
         3
     );
     assert_eq!(embedding_item_count(&serde_json::json!([])), 0);
+}
+
+fn embedding_tokens(input: serde_json::Value) -> usize {
+    request_embedding_tokens(&HeaderMap::new(), &input)
+}
+
+#[test]
+fn embedding_token_estimates_follow_input_shape() {
+    assert_eq!(embedding_tokens(serde_json::json!("abcd")), 4);
+    assert_eq!(embedding_tokens(serde_json::json!([1, 2, 3])), 3);
+    assert_eq!(embedding_tokens(serde_json::json!(["alpha", "b"])), 6);
+    assert_eq!(
+        embedding_tokens(serde_json::json!([[1, 2], [3, 4], [5]])),
+        5
+    );
+    assert_eq!(
+        embedding_tokens(serde_json::json!(["abc", [1, 2], true])),
+        6
+    );
+    assert_eq!(embedding_tokens(serde_json::json!({"unexpected": true})), 1);
+}
+
+#[test]
+fn embedding_token_estimates_preserve_empty_batch_item_work() {
+    assert_eq!(embedding_tokens(serde_json::json!(["", "b"])), 2);
+    assert_eq!(embedding_tokens(serde_json::json!([[], [1, 2]])), 3);
+}
+
+#[test]
+fn embedding_token_header_override_clamps_to_nonzero() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-input-tokens", HeaderValue::from_static("0"));
+
+    assert_eq!(
+        request_embedding_tokens(&headers, &serde_json::json!(["alpha", "beta"])),
+        1
+    );
 }
 
 #[test]
@@ -73,6 +285,7 @@ async fn embeddings_endpoint_returns_json_without_stream() {
         health_delay: Duration::ZERO,
         kv_cache: Arc::new(Mutex::new(KvCacheState::new(0))),
         stats_events: test_stats_events(),
+        test_control: TestControlState::default(),
     };
     let app = Router::new()
         .route("/v1/embeddings", post(embeddings))
@@ -223,6 +436,7 @@ async fn chat_completion_retains_prefix_only_after_modeled_prefill_completes() {
         health_delay: Duration::ZERO,
         kv_cache: Arc::new(Mutex::new(KvCacheState::new(1_000))),
         stats_events: test_stats_events(),
+        test_control: TestControlState::default(),
     };
     let observed_cache = state.kv_cache.clone();
     let mut stats_events = state.stats_events.subscribe();
@@ -299,6 +513,7 @@ async fn streaming_response_delays_first_data_frame_until_ttft() {
         health_delay: Duration::ZERO,
         kv_cache: Arc::new(Mutex::new(KvCacheState::new(0))),
         stats_events: test_stats_events(),
+        test_control: TestControlState::default(),
     };
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -356,6 +571,7 @@ async fn streaming_response_exposes_stats_stream_endpoint() {
         health_delay: Duration::ZERO,
         kv_cache: Arc::new(Mutex::new(KvCacheState::new(0))),
         stats_events: test_stats_events(),
+        test_control: TestControlState::default(),
     };
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -449,6 +665,7 @@ async fn responses_endpoint_streams_response_events_without_private_stats_header
         health_delay: Duration::ZERO,
         kv_cache: Arc::new(Mutex::new(KvCacheState::new(10_000))),
         stats_events: test_stats_events(),
+        test_control: TestControlState::default(),
     };
     let app = Router::new()
         .route("/v1/responses", post(responses))
@@ -522,6 +739,7 @@ async fn responses_endpoint_rejects_non_streaming_requests() {
         health_delay: Duration::ZERO,
         kv_cache: Arc::new(Mutex::new(KvCacheState::new(10_000))),
         stats_events: test_stats_events(),
+        test_control: TestControlState::default(),
     };
     let app = Router::new()
         .route("/v1/responses", post(responses))
@@ -604,6 +822,17 @@ async fn read_to_end(stream: &mut tokio::net::TcpStream) -> String {
         .await
         .expect("response should read to end");
     String::from_utf8_lossy(&bytes).to_string()
+}
+
+async fn raw_http_request(addr: std::net::SocketAddr, request: &str) -> String {
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("test client should connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("request should write");
+    read_to_end(&mut stream).await
 }
 
 async fn read_until_contains(

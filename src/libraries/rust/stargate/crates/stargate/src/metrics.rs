@@ -13,7 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
@@ -27,6 +26,7 @@ use prometheus::{
     TextEncoder,
 };
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 pub const DEFAULT_PREFIX: &str = "stargate_";
@@ -148,7 +148,7 @@ impl StargateMetrics {
         let proxy_replay_buffer_bytes = HistogramVec::new(
             HistogramOpts::new(
                 metric_name("proxy_replay_buffer_bytes"),
-                "Replay buffer size for proxied request bodies",
+                "Bytes currently retained for proxied request body replay",
             )
             .buckets(vec![
                 0.0,
@@ -404,15 +404,21 @@ async fn get_metrics(
     ))
 }
 
-pub async fn start_metrics_server(addr: SocketAddr, registry: Arc<Registry>) -> anyhow::Result<()> {
+pub async fn start_metrics_server(
+    listener: TcpListener,
+    registry: Arc<Registry>,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
     let router = Router::new()
         .route("/metrics", get(get_metrics))
         .with_state(Arc::new(MetricsServerState { registry }));
 
-    let listener = TcpListener::bind(addr).await?;
+    let addr = listener.local_addr()?;
     info!(addr = %addr, "metrics server listening");
 
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await?;
     Ok(())
 }
 

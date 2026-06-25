@@ -10,6 +10,26 @@ Stargate is a control plane and HTTP router for inference servers.
 Use [docs/README.md](docs/README.md) as the docs entrypoint.
 Use [local quickstart](docs/getting-started/local-quickstart.md) to run the local stack.
 
+For the local Kubernetes stack:
+
+```bash
+make cluster-kind
+make tilt-up-kind
+```
+
+Stopping the Make-managed Tilt process cleans up its Kubernetes resources,
+namespaces, and instance-scoped CoreDNS rewrite. Calling `tilt up` directly
+bypasses that cleanup wrapper.
+For the CI-style integration run, use
+`python3 scripts/run_tilt.py ci --context kind-kind --timeout 30m`; it performs
+the same teardown after Tilt exits.
+
+In Kubernetes, pod identity and headless DNS provide discovery; they do not
+enable peer relay. The built-in backend peer relay is a default-off,
+development-only CLI option and must not be used in production. Use
+[`stargate-k8s-router`](docs/operations/deployment-shape.md) or a supported
+load-balancer topology for production backend traffic.
+
 ## Read First
 
 | Need | Read |

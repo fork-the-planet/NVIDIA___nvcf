@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -61,16 +62,23 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let endpoint = if args.addr.starts_with("http://") || args.addr.starts_with("https://") {
-        args.addr.clone()
-    } else {
-        format!("http://{}", args.addr)
-    };
+    run_probe_with(&args, |endpoint, request| async move {
+        watch_stargates_once(&endpoint, request).await
+    })
+    .await
+}
+
+async fn run_probe_with<F, Fut>(args: &Args, mut watch_stargates_fn: F) -> Result<()>
+where
+    F: FnMut(String, WatchStargatesRequest) -> Fut,
+    Fut: Future<Output = Result<stargate_proto::pb::WatchStargatesResponse>>,
+{
+    let endpoint = endpoint_from_addr(&args.addr);
 
     let mut last_error = None;
     for attempt in 1..=args.attempts {
-        match watch_stargates_once(&endpoint).await {
-            Ok(response) => match validate_snapshot(&response, &args) {
+        match watch_stargates_fn(endpoint.clone(), WatchStargatesRequest {}).await {
+            Ok(response) => match validate_snapshot(&response, args) {
                 Ok(()) => {
                     let ids: Vec<_> = response
                         .stargates
@@ -109,14 +117,23 @@ async fn main() -> Result<()> {
     )
 }
 
+fn endpoint_from_addr(addr: &str) -> String {
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr.to_string()
+    } else {
+        format!("http://{addr}")
+    }
+}
+
 async fn watch_stargates_once(
     endpoint: &str,
+    request: WatchStargatesRequest,
 ) -> Result<stargate_proto::pb::WatchStargatesResponse> {
     let mut client = StargateControlPlaneClient::connect(endpoint.to_string())
         .await
         .with_context(|| format!("connect to {endpoint}"))?;
     let mut stream = client
-        .watch_stargates(WatchStargatesRequest {})
+        .watch_stargates(request)
         .await
         .context("call WatchStargates")?
         .into_inner();
@@ -225,8 +242,58 @@ fn validate_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stargate_proto::pb::StargateInfo;
-    use stargate_proto::pb::WatchStargatesResponse;
+    use std::pin::Pin;
+
+    use futures::Stream;
+    use stargate_proto::pb::stargate_control_plane_server::{
+        StargateControlPlane, StargateControlPlaneServer,
+    };
+    use stargate_proto::pb::{
+        InferenceServerAck, InferenceServerRegistration, StargateInfo,
+        SubmitClusterCalibrationRequest, SubmitClusterCalibrationResponse, WatchStargatesResponse,
+    };
+    use tokio::net::TcpListener;
+    use tonic::{Request, Response, Status};
+
+    type WatchStargatesStream =
+        Pin<Box<dyn Stream<Item = Result<WatchStargatesResponse, Status>> + Send + 'static>>;
+    type RegisterInferenceServerStream =
+        Pin<Box<dyn Stream<Item = Result<InferenceServerAck, Status>> + Send + 'static>>;
+
+    #[derive(Clone)]
+    struct TestControlPlane {
+        response: WatchStargatesResponse,
+    }
+
+    #[tonic::async_trait]
+    impl StargateControlPlane for TestControlPlane {
+        type WatchStargatesStream = WatchStargatesStream;
+        type RegisterInferenceServerStream = RegisterInferenceServerStream;
+
+        async fn watch_stargates(
+            &self,
+            _request: Request<WatchStargatesRequest>,
+        ) -> Result<Response<Self::WatchStargatesStream>, Status> {
+            let response = self.response.clone();
+            Ok(Response::new(Box::pin(futures::stream::iter([Ok(
+                response,
+            )]))))
+        }
+
+        async fn register_inference_server(
+            &self,
+            _request: Request<tonic::Streaming<InferenceServerRegistration>>,
+        ) -> Result<Response<Self::RegisterInferenceServerStream>, Status> {
+            Err(Status::unimplemented("not needed by watch probe tests"))
+        }
+
+        async fn submit_cluster_calibration(
+            &self,
+            _request: Request<SubmitClusterCalibrationRequest>,
+        ) -> Result<Response<SubmitClusterCalibrationResponse>, Status> {
+            Err(Status::unimplemented("not needed by watch probe tests"))
+        }
+    }
 
     fn args() -> Args {
         Args {
@@ -242,6 +309,127 @@ mod tests {
             attempts: 1,
             interval_ms: 1,
         }
+    }
+
+    fn response_with_stargate(stargate_id: &str) -> WatchStargatesResponse {
+        WatchStargatesResponse {
+            stargates: vec![StargateInfo {
+                stargate_id: stargate_id.to_string(),
+                advertise_addr: format!("{stargate_id}.stargate.external:50071"),
+                http_advertise_addr: String::new(),
+                grpc_pylon_dial_addr: String::new(),
+            }],
+            watch_stargate_urls: Vec::new(),
+        }
+    }
+
+    async fn spawn_watch_server(response: WatchStargatesResponse) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind to a loopback port");
+        let addr = listener
+            .local_addr()
+            .expect("bound listener should expose its local address");
+        let incoming = async_stream::stream! {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _peer_addr)) => yield Ok::<_, std::io::Error>(stream),
+                    Err(error) => {
+                        yield Err(error);
+                        break;
+                    }
+                }
+            }
+        };
+
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(StargateControlPlaneServer::new(TestControlPlane {
+                    response,
+                }))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("test WatchStargates server should run");
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn endpoint_from_addr_preserves_existing_scheme() {
+        assert_eq!(
+            endpoint_from_addr("https://stargate.example:50071"),
+            "https://stargate.example:50071"
+        );
+    }
+
+    #[test]
+    fn endpoint_from_addr_adds_http_scheme_for_host_port() {
+        assert_eq!(
+            endpoint_from_addr("127.0.0.1:50071"),
+            "http://127.0.0.1:50071"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_loop_accepts_valid_snapshot() {
+        let mut args = args();
+        args.expected_ids = vec!["stargate-0".to_string()];
+        args.attempts = 1;
+        let mut calls = 0;
+
+        run_probe_with(&args, |endpoint, _request| {
+            calls += 1;
+            assert_eq!(endpoint, "http://127.0.0.1:50071");
+            std::future::ready(Ok(response_with_stargate("stargate-0")))
+        })
+        .await
+        .expect("expected snapshot should pass");
+
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn probe_loop_reports_last_invalid_snapshot() {
+        let mut args = args();
+        args.expected_ids = vec!["stargate-a".to_string()];
+        args.attempts = 2;
+        args.interval_ms = 0;
+        let mut calls = 0;
+
+        let error = run_probe_with(&args, |_endpoint, _request| {
+            calls += 1;
+            let stargate_id = if calls == 1 {
+                "stargate-b"
+            } else {
+                "stargate-c"
+            };
+            std::future::ready(Ok(response_with_stargate(stargate_id)))
+        })
+        .await
+        .expect_err("invalid snapshots should fail");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("attempt 2/2 returned invalid snapshot"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("missing stargate_id stargate-a"),
+            "unexpected error: {message}"
+        );
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn watch_stargates_once_reads_first_snapshot() {
+        let endpoint = spawn_watch_server(response_with_stargate("stargate-0")).await;
+
+        let response = watch_stargates_once(&endpoint, WatchStargatesRequest {})
+            .await
+            .expect("watch call should read first snapshot");
+
+        assert_eq!(response.stargates[0].stargate_id, "stargate-0");
     }
 
     #[test]

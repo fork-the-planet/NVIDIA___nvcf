@@ -24,30 +24,31 @@ mod quic_http_tunnel;
 mod registration;
 mod request_observer;
 mod request_quality_monitor;
+mod runtime_state;
 mod sse_message_stream;
 mod stats;
 
 pub use bringup::BringupConfig;
 pub use output_token_parser::OutputTokenParserFactory;
-pub use queue_admission::{PylonQueueMismatchRetryConfig, QueueAdmissionTracker};
+pub use queue_admission::PylonQueueMismatchRetryConfig;
 pub use quic_http_tunnel::{
-    PylonRetryConfig, QuicHttpTunnelConfig, QuicHttpTunnelHandle, ReverseQuicTunnelConfig,
-    ReverseQuicTunnelHandle, TunnelError, TunnelForwardingConfig, start_quic_http_tunnel,
-    start_reverse_quic_tunnel,
+    DEFAULT_MAX_SSE_BUFFER_BYTES, PylonRetryConfig, QuicHttpTunnelConfig, QuicHttpTunnelHandle,
+    ReverseQuicTunnelConfig, ReverseQuicTunnelHandle, TunnelError, TunnelForwardingConfig,
+    start_quic_http_tunnel, start_reverse_quic_tunnel,
 };
 pub use registration::{
-    ClientError, CurrentModelStats, InferenceServerRegistrationClient,
-    InferenceServerRegistrationConfig, InferenceServerUpdateChannels,
+    ClientError, InferenceServerRegistrationClient, InferenceServerRegistrationConfig,
 };
 pub use request_observer::{
     RequestObservation, RequestObservationEndpoint, RequestObservationState,
 };
 pub use request_quality_monitor::RequestQualityMonitorConfig;
+pub use runtime_state::{CurrentModelStats, PylonRuntimeState, RequestObservationEvent};
 pub use stats::{
-    EngineStatsStreamConfig, EngineStatsStreamHandle, EngineStatsStreamMode, PylonMetrics,
-    RequestCounterUpdate, RequestCounterUpdateInput, StatsAggregatorUpdate, StatsCollectorConfig,
-    StatsCollectorHandle, StatsUpdateSource, parse_engine_stats_line_for_benchmark,
-    request_observation_channel, start_engine_stats_stream, start_metrics_server,
+    EngineStatsStreamConfig, EngineStatsStreamHandle, EngineStatsStreamMode, MetricsServerHandle,
+    PylonMetrics, RequestCounterUpdate, RequestCounterUpdateInput, StatsAggregatorUpdate,
+    StatsCollectorConfig, StatsCollectorHandle, StatsUpdateSource,
+    parse_engine_stats_line_for_benchmark, start_engine_stats_stream, start_metrics_server,
     start_stats_collector, start_stats_collector_with_engine_stats,
     stats_aggregator_update_channel,
 };

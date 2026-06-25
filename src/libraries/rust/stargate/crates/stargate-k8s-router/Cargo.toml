@@ -41,6 +41,7 @@ rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 stargate-forwarding = { workspace = true }
 stargate-proto = { workspace = true }
+stargate-runtime = { workspace = true }
 stargate-tls = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
@@ -52,3 +53,4 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 hyper-util = { workspace = true }
+tempfile = { workspace = true }
