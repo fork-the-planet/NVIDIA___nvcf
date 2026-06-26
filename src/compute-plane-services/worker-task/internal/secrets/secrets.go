@@ -30,6 +30,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// pollTimeout is the default interval at which the secrets file is polled as a
+// fallback when fsnotify events are not delivered (for example on some network
+// filesystems).
 const pollTimeout = 30 * time.Minute
 
 type secretsData struct {
@@ -39,12 +42,17 @@ type secretsData struct {
 type Secrets struct {
 	data            atomic.Pointer[secretsData]
 	secretsFilePath string
+	// pollInterval is the secrets file poll fallback interval. It defaults to
+	// pollTimeout and is a per-instance field so tests can shorten it without
+	// mutating shared global state.
+	pollInterval time.Duration
 }
 
 // Constructor
 func New(ctx context.Context, secretsFilePath string) (*Secrets, error) {
 	s := &Secrets{
 		secretsFilePath: secretsFilePath,
+		pollInterval:    pollTimeout,
 	}
 
 	if err := s.load(); err != nil {
@@ -93,17 +101,32 @@ func (s *Secrets) rotateSecrets(ctx context.Context) {
 	}
 
 	secretsDir := filepath.Dir(s.secretsFilePath)
-	secretsFileName := filepath.Base(s.secretsFilePath)
 	err = watcher.Add(secretsDir)
 	if err != nil {
 		zap.L().Info("failed to start watcher on secret file", zap.Error(err))
 		return
 	}
 
+	s.watchLoop(ctx, watcher)
+}
+
+// watchLoop consumes fsnotify events and errors for the watched secrets
+// directory, reloading the secrets cache on relevant create/write events and on
+// a periodic poll. It returns when ctx is cancelled or the watcher channels
+// close. It is split out from rotateSecrets so the loop can be exercised with a
+// caller-supplied watcher in tests.
+func (s *Secrets) watchLoop(ctx context.Context, watcher *fsnotify.Watcher) {
+	secretsFileName := filepath.Base(s.secretsFilePath)
+
 	// Poll secret file periodically in case fsnotify is not working on network fs.
-	pollTicker := time.NewTicker(pollTimeout)
+	interval := s.pollInterval
+	if interval <= 0 {
+		interval = pollTimeout
+	}
+	pollTicker := time.NewTicker(interval)
 	defer pollTicker.Stop()
 
+	var err error
 	for {
 		select {
 		case <-ctx.Done():

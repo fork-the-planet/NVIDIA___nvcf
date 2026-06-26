@@ -16,7 +16,10 @@ go_library(
 
 go_test(
     name = "worker_test",
-    srcs = ["worker_test.go"],
+    srcs = [
+        "worker_coverage_test.go",
+        "worker_test.go",
+    ],
     embed = [":worker"],
     deps = [
         "//configs",
@@ -24,5 +27,14 @@ go_test(
         "@com_github_samber_lo//:lo",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_protobuf//types/known/timestamppb",
+        "@org_uber_go_zap//:zap",
+        "@org_uber_go_zap//zapcore",
+        "@org_uber_go_zap//zaptest/observer",
     ],
+)
+
+alias(
+    name = "go_default_library",
+    actual = ":worker",
+    visibility = ["//:__subpackages__"],
 )

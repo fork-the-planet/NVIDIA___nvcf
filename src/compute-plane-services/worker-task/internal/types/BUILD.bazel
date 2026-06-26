@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "types",
@@ -14,4 +14,13 @@ alias(
     name = "go_default_library",
     actual = ":types",
     visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "types_test",
+    srcs = [
+        "errors_test.go",
+        "resultstrategy_test.go",
+    ],
+    embed = [":types"],
 )

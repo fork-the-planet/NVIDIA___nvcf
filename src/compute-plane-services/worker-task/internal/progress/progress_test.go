@@ -163,39 +163,77 @@ func runTest(
 	if err != nil {
 		t.Fatal("failed to start progress monitor")
 	}
-	time.Sleep(500 * time.Millisecond)
+
+	// Read TaskCompleted concurrently. The monitor's 100% path sends on the
+	// unbuffered TaskCompleted channel from inside its watcher/polling
+	// goroutine; if no reader is ready that send blocks and races with Stop()
+	// closing the watcher. A dedicated reader guarantees the completion signal
+	// is always consumed deterministically rather than depending on the main
+	// goroutine happening to reach its receive in time.
+	completed := make(chan error, 1)
+	go func() {
+		select {
+		case e := <-monitor.TaskCompleted:
+			completed <- e
+		case <-time.After(time.Duration(taskTimeout) * time.Second):
+			completed <- fmt.Errorf("expected task completion by now, timed out")
+		}
+	}()
+
+	// If a progress file already exists at Start time, the monitor flushes it
+	// via the pre-watch race-condition guard at the top of monitorProgress.
+	// Wait until that initial flush has been observed before writing new
+	// updates; otherwise a write can overwrite the file before the flush reads
+	// it, losing the pre-written update (replaces the old fixed 500ms sleep).
+	preexistingFlush := 0
+	if _, statErr := os.Stat(progressFile); statErr == nil {
+		preexistingFlush = 1
+	}
 
 	go func() {
 		progressFile := filepath.Join(testDir, "progress")
+		if preexistingFlush > 0 {
+			waitForCountObserved(t, &sendResultLock, &progressMessages, preexistingFlush, 10*time.Second)
+		}
 		for i, p := range progressPercentagesUpdatedToFile {
 			zap.L().Info("writing progress", zap.Uint32("percent complete", p))
 			resultName := taskVersionId
 			if resultHandlingStrategy == types.UPLOAD_STRATEGY {
 				resultName = fmt.Sprintf("%s-%d", taskVersionId, i)
 			}
-			if err = writeProgressMessage(progressFile, taskId, resultName, p); err != nil {
+			// Write the update, then wait until the monitor observes this
+			// percentage before moving on. fsnotify can coalesce or drop an
+			// event when consecutive writes land close together (the source
+			// re-reads only the latest file content per event), which is the
+			// root of the historical flakiness. Rather than rely on a fixed
+			// sleep, re-touch the file until the update is observed: each rewrite
+			// emits a fresh event, so a single coalesced/dropped event cannot
+			// lose the update. Deduplicated updates (same name+percent) are
+			// already-present and return immediately without extra rewrites.
+			rewrite := func() error { return writeProgressMessage(progressFile, taskId, resultName, p) }
+			if err = writeUntilPercentObserved(t, &sendResultLock, &progressMessages, p, rewrite, 10*time.Second); err != nil {
 				errCh <- err
+				return
 			}
 			zap.L().Info("Completed writing", zap.Uint32("percent complete", p))
-			time.Sleep(1 * time.Second)
-		}
-
-		if err = monitor.Stop(); err != nil {
-			errCh <- fmt.Errorf("failed to stop progress monitor")
 		}
 		errCh <- nil
 	}()
 
-	err = <-errCh
-	if err != nil {
+	if err = <-errCh; err != nil {
 		t.Fatal(err)
 	}
 
-	select {
-	case <-monitor.TaskCompleted:
+	// Block until the monitor has reported completion (or timed out) so all
+	// expected messages have been delivered before we assert on them.
+	if err = <-completed; err != nil {
+		t.Error(err)
+	} else {
 		t.Log("monitor successfully reported task completion")
-	case <-time.After(time.Duration(taskTimeout) * time.Second):
-		t.Error("expected task completion by now, timed out")
+	}
+
+	if err = monitor.Stop(); err != nil {
+		t.Fatalf("failed to stop progress monitor")
 	}
 
 	// For race test
@@ -236,6 +274,86 @@ func runTest(
 		if resultHandlingStrategy == types.NO_STRATEGY && progressMessage.ResultName != taskVersionId {
 			t.Fatalf("message result name= %v, want = %v", progressMessage.ResultName, taskVersionId)
 		}
+	}
+}
+
+// waitForCountObserved blocks until at least want progress messages have been
+// captured, polling under the lock instead of sleeping a fixed duration.
+func waitForCountObserved(
+	t *testing.T,
+	lock *sync.RWMutex,
+	messages *[]*pb.ResultMetadataRequest,
+	want int,
+	timeout time.Duration,
+) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		lock.RLock()
+		n := len(*messages)
+		lock.RUnlock()
+		if n >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("timed out waiting for %d observed messages, have %d", want, n)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// percentObserved reports whether a progress message with the given
+// percentComplete has been captured, taking the read lock.
+func percentObserved(lock *sync.RWMutex, messages *[]*pb.ResultMetadataRequest, want uint32) bool {
+	lock.RLock()
+	defer lock.RUnlock()
+	for _, m := range *messages {
+		if m.GetPercentComplete() == want {
+			return true
+		}
+	}
+	return false
+}
+
+// writeUntilPercentObserved drives the monitor deterministically: it writes the
+// update via rewrite() and waits for the monitor to capture a message with the
+// given percentComplete. If the update is not observed promptly it rewrites the
+// file again. Each rewrite emits a fresh fsnotify event, so a coalesced or
+// dropped event cannot silently lose the update. This replaces brittle fixed
+// time.Sleep spacing between writes. Deduplicated updates (already observed)
+// return immediately.
+func writeUntilPercentObserved(
+	t *testing.T,
+	lock *sync.RWMutex,
+	messages *[]*pb.ResultMetadataRequest,
+	want uint32,
+	rewrite func() error,
+	timeout time.Duration,
+) error {
+	t.Helper()
+	if err := rewrite(); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	lastRewrite := time.Now()
+	for {
+		if percentObserved(lock, messages, want) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("timed out waiting for progress percent %d to be observed", want)
+			return nil
+		}
+		// Periodically re-touch the file so a single coalesced/dropped fsnotify
+		// event cannot stall progress.
+		if time.Since(lastRewrite) > 250*time.Millisecond {
+			if err := rewrite(); err != nil {
+				return err
+			}
+			lastRewrite = time.Now()
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

@@ -65,7 +65,7 @@ func TestMain(m *testing.M) {
 		TaskName:                 "test-task",
 		InstanceId:               "test-instance",
 		InstanceTypeName:         "test-instance-type",
-		HealthPort:               8080,
+		HealthPort:               18080,
 		MaxRunTime:               "PT1H",
 		OTELExporterOTLPEndpoint: "http://127.0.0.1:8360",
 		TracingAccessToken:       "fake-tracing-token",

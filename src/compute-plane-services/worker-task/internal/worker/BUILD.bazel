@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "worker",
@@ -31,4 +31,25 @@ alias(
     name = "go_default_library",
     actual = ":worker",
     visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "worker_test",
+    srcs = [
+        "worker_integration_test.go",
+        "worker_newnvctworker_test.go",
+    ],
+    embed = [":worker"],
+    deps = [
+        "//configs",
+        "//internal/progress",
+        "//internal/types",
+        "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/nvkit/logs",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//metering",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//nvct",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//test/testutils",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_uber_go_zap//:zap",
+    ],
 )

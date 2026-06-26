@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "upload",
@@ -24,4 +24,17 @@ alias(
     name = "go_default_library",
     actual = ":upload",
     visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "upload_test",
+    srcs = ["upload_test.go"],
+    embed = [":upload"],
+    deps = [
+        "//internal/secrets",
+        "//pkg/ngc",
+        "@com_github_nvidia_nvcf_src_libraries_go_worker//utils",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )

@@ -6,3 +6,9 @@ go_library(
     importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/worker-llm-credentials/configs",
     visibility = ["//visibility:public"],
 )
+
+alias(
+    name = "go_default_library",
+    actual = ":configs",
+    visibility = ["//visibility:public"],
+)
