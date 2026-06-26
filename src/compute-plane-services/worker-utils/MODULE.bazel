@@ -71,7 +71,6 @@ go_deps.gazelle_override(
     directives = ["gazelle:proto disable_global"],
     path = "github.com/NVIDIA/nvcf/src/libraries/go/lib",
 )
-
 go_deps.gazelle_override(
     build_file_generation = "clean",
     directives = ["gazelle:proto disable_global"],
@@ -93,6 +92,7 @@ use_repo(
     "com_github_hellofresh_health_go_v5",
     "com_github_klauspost_compress",
     "com_github_nats_io_nats_go",
+    "com_github_nats_io_nats_server_v2",
     "com_github_nvidia_nvcf_src_libraries_go_lib",
     "com_github_nvidia_nvcf_src_libraries_go_worker",
     "com_github_panjf2000_ants_v2",
@@ -107,6 +107,7 @@ use_repo(
     "io_opentelemetry_go_otel_trace",
     "org_golang_google_grpc",
     "org_golang_google_protobuf",
+    "org_golang_x_oauth2",
     "org_golang_x_sync",
     "org_uber_go_zap",
 )
