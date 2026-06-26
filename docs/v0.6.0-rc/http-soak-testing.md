@@ -94,9 +94,8 @@ endpoints.
 
 Once deployed, note the following -- you will need them for the k6 script:
 
-- **Function ID** -- the UUID returned by `function create`
-- **Invocation domain** -- the domain after `invocation.` in the function invocation hostname
-- **API key** -- from `./nvcf-cli api-key generate` (begins with `nvapi-`); export it as `$API_KEY`
+- Function ID -- the UUID returned by `function create`
+- API key -- from `./nvcf-cli api-key generate` (begins with `nvapi-`); export it as `$API_KEY`
 
 #### Obtain the gateway address
 
@@ -109,26 +108,24 @@ export GATEWAY_ADDR=$(kubectl get gateway nvcf-gateway -n envoy-gateway \
 echo "Gateway Address: $GATEWAY_ADDR"
 ```
 
-On **AWS EKS** this is an ELB hostname (e.g.
-`a1b2c3d4.us-east-1.elb.amazonaws.com`). For a **local** deployment (Kind,
+On AWS EKS this is an ELB hostname (e.g.
+`a1b2c3d4.us-east-1.elb.amazonaws.com`). For a local deployment (Kind,
 k3d, Docker Desktop) it is typically `localhost` or `127.0.0.1`.
 
-The gateway routes invocation traffic through function-specific hostnames:
+The gateway routes invocation traffic using HTTP host headers:
 
-| Host prefix | Routes to |
+| Host header | Routes to |
 | --- | --- |
 | `api.$GATEWAY_ADDR` | NVCF management API (function CRUD) |
-| `<function-id>.invocation.$GATEWAY_ADDR` | Invocation / inference service |
+| `invocation.$GATEWAY_ADDR` | Invocation / inference service |
 | `api-keys.$GATEWAY_ADDR` | API Keys service |
 
-For the soak test, set **INVOKE_DOMAIN** to the domain after `invocation.`
-in the function invocation hostname. For a self-managed gateway that uses
-`<function-id>.invocation.$GATEWAY_ADDR`, set **INVOKE_DOMAIN** to
-`$GATEWAY_ADDR`.
+For the soak test, set `BASE_URL` to `http://$GATEWAY_ADDR` and `INVOKE_HOST`
+to `invocation.$GATEWAY_ADDR`.
 
 <Tip>
-The CLI saves the function and version IDs automatically. Run
-`./nvcf-cli status` to view them at any time.
+The CLI saves the function ID automatically. Run
+`./nvcf-cli status` to view it at any time.
 
 </Tip>
 
@@ -178,11 +175,12 @@ repository.
  *
  * Total TPS = TPS_PER_FUNC × number of functions.
  *
- * Required env vars: INVOKE_DOMAIN, FUNCTIONS
- * Optional: API_KEY, INVOKE_SCHEME, TPS_PER_FUNC, PRE_VUS, MAX_VUS, REPEATS, DURATION
+ * Required env vars: BASE_URL, INVOKE_HOST, FUNCTIONS
+ * Optional: API_KEY, TPS_PER_FUNC, PRE_VUS, MAX_VUS, REPEATS, DURATION
  *
  * Example:
- *   k6 run -e INVOKE_DOMAIN=$GATEWAY_ADDR \
+ *   k6 run -e BASE_URL=http://$GATEWAY_ADDR \
+ *          -e INVOKE_HOST=invocation.$GATEWAY_ADDR \
  *          -e 'FUNCTIONS=[{"funcId":"uuid1"}]' \
  *          -e DURATION=48h \
  *          -e API_KEY=$API_KEY \
@@ -197,8 +195,9 @@ const invokeLatency = new Trend('invoke_latency_ms');
 const totalRequests = new Counter('total_requests');
 
 // ---------- Required config ----------
-const DURATION      = __ENV.DURATION      || '48h';
-const INVOKE_DOMAIN = __ENV.INVOKE_DOMAIN || '';
+const DURATION    = __ENV.DURATION    || '48h';
+const BASE_URL    = __ENV.BASE_URL    || '';
+const INVOKE_HOST = __ENV.INVOKE_HOST || '';
 
 const FUNCTIONS = (() => {
   const raw = __ENV.FUNCTIONS || '';
@@ -214,12 +213,11 @@ const FUNCTIONS = (() => {
 })();
 
 // ---------- Optional parameters ----------
-const API_KEY       = __ENV.API_KEY       || '';
-const INVOKE_SCHEME = __ENV.INVOKE_SCHEME || 'https';
-const REPEATS       = parseInt(__ENV.REPEATS      || '100', 10);
-const TPS_PER_FUNC  = parseInt(__ENV.TPS_PER_FUNC || '125', 10);
-const PRE_VUS       = parseInt(__ENV.PRE_VUS      || '250', 10);
-const MAX_VUS       = parseInt(__ENV.MAX_VUS      || '500', 10);
+const API_KEY      = __ENV.API_KEY      || '';
+const REPEATS      = parseInt(__ENV.REPEATS      || '100', 10);
+const TPS_PER_FUNC = parseInt(__ENV.TPS_PER_FUNC || '125', 10);
+const PRE_VUS      = parseInt(__ENV.PRE_VUS      || '250', 10);
+const MAX_VUS      = parseInt(__ENV.MAX_VUS      || '500', 10);
 
 export const options = {
   scenarios: {
@@ -244,13 +242,14 @@ export function invoke_all_functions() {
 
   const requests = FUNCTIONS.map((f, i) => ({
     method: 'POST',
-    url: `${INVOKE_SCHEME}://${f.funcId}.invocation.${INVOKE_DOMAIN}/echo`,
+    url: `${BASE_URL}/echo`,
     body: payload,
     params: {
       headers: {
-        'Content-Type':      'application/json',
-        'Authorization':     `Bearer ${API_KEY}`,
-        'Nvcf-Poll-Seconds': '5',
+        'Host':            INVOKE_HOST,
+        'Content-Type':    'application/json',
+        'Authorization':   `Bearer ${API_KEY}`,
+        'Function-Id':     f.funcId,
       },
       tags: { func: `func_${i}` },
     },
@@ -278,8 +277,8 @@ period. For example, multiple functions at 125 TPS each for 48 hours:
 
 ```bash
 k6 run k6-nvcf-http-soak.js \
-  -e INVOKE_SCHEME=https \
-  -e INVOKE_DOMAIN=$GATEWAY_ADDR \
+  -e BASE_URL="http://$GATEWAY_ADDR" \
+  -e INVOKE_HOST="invocation.$GATEWAY_ADDR" \
   -e 'FUNCTIONS=[{"funcId":"<id-1>"},{"funcId":"<id-2>"},{"funcId":"<id-3>"},{"funcId":"<id-4>"}]' \
   -e DURATION=48h \
   -e TPS_PER_FUNC=125 \
@@ -337,11 +336,11 @@ A good rule of thumb: `PRE_VUS ≈ TPS_PER_FUNC × avg_latency_seconds × 2`.
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `INVOKE_DOMAIN` | Domain after `invocation.` in the function invocation hostname | *(required)* |
+| `BASE_URL` | Base URL of the gateway (e.g. `http://$GATEWAY_ADDR`) | *(required)* |
+| `INVOKE_HOST` | Host header for invocation routing (e.g. `invocation.$GATEWAY_ADDR`) | *(required)* |
 | `FUNCTIONS` | JSON array of function objects: `[{"funcId":"…"}, ...]` | *(required)* |
 | `DURATION` | Test duration (e.g. `30s`, `1h`, `48h`) | `48h` |
 | `API_KEY` | `nvapi-*` bearer token (exported from `./nvcf-cli api-key generate`, see above) | *(required)* |
-| `INVOKE_SCHEME` | Invocation URL scheme (`https` for a TLS endpoint, `http` for local) | `https` |
 | `TPS_PER_FUNC` | Requests per second per function | `125` |
 | `PRE_VUS` | Pre-allocated virtual users per function scenario | `250` |
 | `MAX_VUS` | Maximum virtual users per function scenario | `500` |
@@ -378,9 +377,11 @@ Before running the soak test, verify the endpoint works with `curl`:
 export FUNCTION_ID=<your-function-id>
 
 curl --request POST \
-  --url "https://${FUNCTION_ID}.invocation.${GATEWAY_ADDR}/echo" \
+  --url "http://${GATEWAY_ADDR}/echo" \
+  --header "Host: invocation.${GATEWAY_ADDR}" \
   --header "Authorization: Bearer ${API_KEY}" \
   --header "Content-Type: application/json" \
+  --header "Function-Id: ${FUNCTION_ID}" \
   --data '{"message": "hello"}'
 ```
 
