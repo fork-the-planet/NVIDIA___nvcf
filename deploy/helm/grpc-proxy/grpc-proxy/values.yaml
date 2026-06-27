@@ -109,6 +109,13 @@ grpcproxy:
       containerPort: 10083
       protocol: TCP
 
+  # Optional routable grpc-proxy callback endpoint for workers that cannot
+  # reach the grpc-proxy pod IP directly, such as split control-plane /
+  # compute-plane deployments. The chart maps this value to the
+  # SELF_WORKER_FQDN environment variable used by the grpc-proxy binary.
+  # Leave empty to preserve the pod-IP fallback.
+  workerConnectBaseURL: ""
+
   # Additional volumes on the output Deployment definition.
   volumes: []
 

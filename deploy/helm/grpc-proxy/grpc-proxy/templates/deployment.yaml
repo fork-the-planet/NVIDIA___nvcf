@@ -70,6 +70,13 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
             {{- end }}
+            {{- if and .Values.grpcproxy.workerConnectBaseURL (hasKey .Values.grpcproxy.env "SELF_WORKER_FQDN") }}
+            {{- fail "set either grpcproxy.workerConnectBaseURL or grpcproxy.env.SELF_WORKER_FQDN, not both" }}
+            {{- end }}
+            {{- with .Values.grpcproxy.workerConnectBaseURL }}
+            - name: SELF_WORKER_FQDN
+              value: {{ . | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.grpcproxy.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

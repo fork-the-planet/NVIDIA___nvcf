@@ -305,7 +305,13 @@ func getVersion() string {
 func getConnectPaths(config Config) (invocation.ConnectPaths, error) {
 	proxyPaths := invocation.ConnectPaths{}
 	if config.EnableHTTP1Connect {
-		if config.PodIP != "" {
+		if config.SelfWorkerFqdn != "" {
+			workerProxyPath, err := proxyPath(config.SelfWorkerFqdn)
+			if err != nil {
+				return proxyPaths, err
+			}
+			proxyPaths.HTTP1 = workerProxyPath
+		} else if config.PodIP != "" {
 			proxyPaths.HTTP1 = fmt.Sprintf("http://%s:10086/v1/proxy", config.PodIP)
 		}
 	}
@@ -334,6 +340,17 @@ func getConnectPaths(config Config) (invocation.ConnectPaths, error) {
 		return proxyPaths, fmt.Errorf("no proxy paths configured")
 	}
 	return proxyPaths, nil
+}
+
+func proxyPath(baseURL string) (string, error) {
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	if parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return "", fmt.Errorf("proxy URL must include scheme and host: %s", baseURL)
+	}
+	return url.JoinPath(parsedURL.String(), "/v1/proxy")
 }
 
 func setupTLS(config Config) (*tls.Config, error) {

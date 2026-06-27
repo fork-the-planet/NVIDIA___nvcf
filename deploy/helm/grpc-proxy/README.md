@@ -75,6 +75,7 @@ Important settings to review before deployment:
 - `grpcproxy.deployment.*` for replica count, autoscaling, and pod placement when running in Deployment mode
 - `grpcproxy.daemonset.*` for tolerations, node selectors, and update strategy when running in DaemonSet mode
 - `grpcproxy.config.*` for service endpoints, NATS connection settings, and tracing configuration
+- `grpcproxy.workerConnectBaseURL` for split deployments where workers need a routable HTTP/1 CONNECT callback endpoint instead of the grpc-proxy pod IP. The chart maps this value to `SELF_WORKER_FQDN` for the grpc-proxy container.
 - `grpcproxy.vault.*` for JWT authentication path, role, and audience values used by the Vault Agent injector
 
 The default values include development-oriented placeholders. Override them before using the chart in any shared or production environment.
