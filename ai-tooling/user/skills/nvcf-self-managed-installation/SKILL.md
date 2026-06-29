@@ -32,7 +32,7 @@ Operational guide for the `nvcf-self-managed-stack` helmfile bundle used to depl
 
 ## Instructions
 
-Use this skill for install, upgrade, or teardown work in `nvcf-self-managed-stack`; validate tooling first, follow the documented helmfile flow, and prefer targeted troubleshooting over ad hoc chart edits.
+Use this skill for install, upgrade, or teardown work in `nvcf-self-managed-stack`; validate tooling first, follow the documented helmfile flow, and prefer targeted troubleshooting over ad hoc chart edits. For `functionType: "LLM"` deployments, read [LLM Function Enablement](references/helmfile-structure.md#llm-function-enablement) before applying the stack.
 
 ## Prerequisites
 

@@ -151,18 +151,103 @@ From lowest to highest priority:
 - `<service>.nodeSelector` (if enabled)
 - `<service>.env.*` (observability settings)
 
-### LLM API Gateway / LLM Request Router
-- `llm.enabled`
-- `llm.gateway.replicaCount`
-- `llm.gateway.auth.grpcInsecure`
-- `llm.requestRouter.replicaCount`
-- `llm.requestRouter.loadBalancer`
-- `ingress.gatewayApi.routes.llmInvocation.routeAnnotations`
-- Global image registry/repository, image pull secrets, node selectors, and tracing settings are mapped into the LLM chart values.
+### LLM Function Enablement
 
-**Not passed through**: `llm.gateway.image.*`, `llm.requestRouter.image.*`, `resourcePreset`, `resources`, or any other arbitrary key. These must be set via `global.yaml.gotmpl` or release inline `values:` blocks.
+Enable the LLM addon before creating or invoking functions with
+`functionType: "LLM"`. The addon deploys `llm-request-router` and
+`llm-api-gateway`, adds the `llm.invocation.<domain>` route when Gateway API
+ingress is enabled, and configures workers to use the LLM sidecar. The Helmfile
+condition is `addons.llm.enabled`. Do not use the obsolete `llm.enabled` path.
 
-For sticky LLM routing, `llm.requestRouter.loadBalancer.config` can embed
+For a single-node isolated test cluster, add this configuration to
+`environments/<env>.yaml` before applying the stack:
+
+```yaml
+addons:
+  llm:
+    enabled: true
+    gateway:
+      replicaCount: 1
+      auth:
+        grpcInsecure: true
+      metrics:
+        serviceMonitor:
+          enabled: false
+    requestRouter:
+      replicaCount: 1
+      metrics:
+        serviceMonitor:
+          enabled: false
+      loadBalancer:
+        config: |
+          {
+            "default": "power-of-two",
+            "request_algorithms": {
+              "power-of-two": "power-of-two",
+              "round-robin": "round-robin",
+              "random": "random",
+              "groq-multiregion": "groq-multiregion"
+            }
+          }
+
+agentConfig:
+  mergeConfig: |
+    cluster:
+      validationPolicy:
+        name: Unrestricted
+    workload:
+      stargateQUICInsecure: true
+```
+
+Use `replicaCount: 1` only for local or single-node test clusters. For shared
+or production clusters, use the required replica count and TLS-capable service
+configuration. `addons.llm.gateway.auth.grpcInsecure` and
+`workload.stargateQUICInsecure` enable plaintext transports. Do not use them in
+production.
+
+The request-router configuration uses hyphenated algorithm IDs, while function
+models use underscored `routingMethod` values. Include every non-default
+algorithm used by a function in `request_algorithms`, or invocation can fail
+with HTTP `400` before a backend is selected.
+
+If the sidecar image is mirrored outside the stack's default image registry and
+repository, set the generated worker sidecar image explicitly:
+
+```yaml
+api:
+  env:
+    NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE: <registry>/<repository>/pylon:0.2.1
+```
+
+Render and apply the updated control-plane environment, then refresh the
+compute-plane stack for every registered GPU cluster so NVCA receives
+`agentConfig.mergeConfig`:
+
+```bash
+HELMFILE_ENV=<env> helmfile template
+HELMFILE_ENV=<env> helmfile sync
+nvcf-cli self-hosted compute-plane install \
+  --cluster-name <cluster-name> \
+  --kube-context <compute-kube-context> \
+  --values deploy/stacks/nvcf-compute-plane/out/<cluster-name>-register-values.yaml
+```
+
+Existing LLM function pods keep their existing sidecar arguments. Recreate or
+redeploy those functions after the compute-plane refresh. Verify the control
+plane, route, and worker sidecar:
+
+```bash
+kubectl get deploy -n nvcf llm-api-gateway llm-request-router
+kubectl get pods -n nvcf | grep -E 'llm-api-gateway|llm-request-router'
+kubectl get httproute -A | grep llm
+kubectl -n nvcf-backend get pod <function-pod> \
+  -o jsonpath='{range .spec.containers[?(@.name=="llm-worker")].args[*]}{.}{"\\n"}{end}'
+```
+
+For local plaintext clusters, the `llm-worker` args must include
+`--quic-insecure`.
+
+For sticky LLM routing, `addons.llm.requestRouter.loadBalancer.config` can embed
 Stargate JSON. The public gateway header is `x-multi-turn-session-id`, but
 Stargate only consumes the internal `x-cache-affinity-key`. Sticky backend
 selection requires a cache-affinity-aware algorithm: `groq-multiregion` with
