@@ -27,6 +27,7 @@ control_plane_lb_container="${CONTROL_PLANE_LB_CONTAINER:-k3d-${control_plane_cl
 domain="${CONTROL_PLANE_DOMAIN:-nvcf-control-plane.test}"
 http_port="${CONTROL_PLANE_LB_HTTP_PORT:-80}"
 grpc_port="${CONTROL_PLANE_LB_GRPC_PORT:-9090}"
+grpc_worker_port="${CONTROL_PLANE_LB_GRPC_WORKER_PORT:-10086}"
 nats_port="${CONTROL_PLANE_LB_NATS_PORT:-4222}"
 network_name="k3d-${cluster_name}"
 
@@ -51,6 +52,7 @@ fi
 echo "Configuring compute aliases for ${domain} via ${control_plane_lb_container} (${lb_ip})"
 echo "  HTTP service port 8080 -> control-plane load balancer container port ${http_port}"
 echo "  gRPC service port 9090 -> control-plane load balancer container port ${grpc_port}"
+echo "  gRPC worker service port 10086 -> control-plane load balancer container port ${grpc_worker_port}"
 echo "  NATS service port 4222 -> control-plane load balancer container port ${nats_port}"
 
 yaml="$(cat <<YAML
@@ -94,6 +96,19 @@ subsets:
         protocol: TCP
       - name: grpc
         port: ${grpc_port}
+        protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: grpc
+  namespace: nvcf
+subsets:
+  - addresses:
+      - ip: ${lb_ip}
+    ports:
+      - name: worker-tcp
+        port: ${grpc_worker_port}
         protocol: TCP
 ---
 apiVersion: v1

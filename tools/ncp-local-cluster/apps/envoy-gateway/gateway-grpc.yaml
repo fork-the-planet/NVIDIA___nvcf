@@ -30,3 +30,9 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+    - name: worker-tcp
+      protocol: TCP
+      port: 10086
+      allowedRoutes:
+        namespaces:
+          from: All

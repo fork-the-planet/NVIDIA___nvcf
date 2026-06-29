@@ -8,6 +8,7 @@ resources:
   - namespaces.yaml
   - service-ess.yaml
   - service-api.yaml
+  - service-grpc.yaml
   - service-nvct-api.yaml
   - service-invocation.yaml
   - service-sis.yaml

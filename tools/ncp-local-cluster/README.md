@@ -65,9 +65,9 @@ Addon placement:
 
 The compute-plane clusters get local aliases for worker-facing control-plane
 service DNS names: API, API gRPC, NVCT API, ESS, invocation, SIS, ReVal, and
-NATS. Those aliases route through the control-plane k3d load balancer so pods
-can use the expected in-cluster service names while the traffic crosses local
-k3d clusters.
+NATS, plus the grpc-proxy worker CONNECT endpoint. Those aliases route through
+the control-plane k3d load balancer so pods can use the expected in-cluster
+service names while the traffic crosses local k3d clusters.
 
 Create the default split topology, with one control-plane cluster and one
 compute-plane cluster:
@@ -135,8 +135,9 @@ Multi-cluster mode uses `k3d-config-control-plane.yaml` for the control-plane
 cluster and `k3d-config-compute-plane.yaml` for compute-plane clusters. The
 compute-plane config intentionally avoids host port mappings so multiple
 compute clusters can run at the same time. The control-plane config maps host
-ports `8080`, `8443`, `9090`, `10081`, and `4222` for HTTP, HTTPS,
-worker-facing API gRPC, stack-owned grpc-proxy TCP, and NATS respectively;
+ports `8080`, `8443`, `9090`, `10081`, `10086`, and `4222` for HTTP,
+HTTPS, worker-facing API gRPC, stack-owned grpc-proxy client TCP,
+grpc-proxy worker TCP, and NATS respectively;
 stop or destroy any existing cluster or local process that already owns those
 ports before creating the control-plane cluster.
 
@@ -149,6 +150,7 @@ make build-and-deploy-multicluster \
   CONTROL_PLANE_HTTPS_PORT=18443 \
   CONTROL_PLANE_GRPC_PORT=19090 \
   CONTROL_PLANE_GRPC_PROXY_PORT=20081 \
+  CONTROL_PLANE_GRPC_WORKER_PORT=20086 \
   CONTROL_PLANE_NATS_PORT=14222
 ```
 

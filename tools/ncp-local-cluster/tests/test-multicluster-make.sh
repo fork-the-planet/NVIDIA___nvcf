@@ -137,6 +137,12 @@ fi
 if ! grep -q '\${CONTROL_PLANE_GRPC_PROXY_PORT}:10081' "$ROOT_DIR/k3d-config-control-plane.yaml"; then
   fail "control-plane k3d config must expose CONTROL_PLANE_GRPC_PROXY_PORT to Gateway port 10081"
 fi
+if ! grep -q '\${CONTROL_PLANE_GRPC_WORKER_PORT}:10086' "$ROOT_DIR/k3d-config-control-plane.yaml"; then
+  fail "control-plane k3d config must expose CONTROL_PLANE_GRPC_WORKER_PORT to Gateway port 10086"
+fi
+if ! grep -q '10081:10081' "$ROOT_DIR/k3d-config.yaml"; then
+  fail "single-cluster k3d config must expose the stack-owned grpc-gw TCP listener on host port 10081"
+fi
 if ! grep -q 'invocationServiceURL: http://invocation.nvcf.svc.cluster.local:8080' "$ROOT_DIR/../../deploy/stacks/self-managed/environments/local.yaml"; then
   fail "local stack values must advertise the invocation service DNS worker endpoint"
 fi
@@ -146,6 +152,12 @@ if ! grep -q 'service-nvct-api.yaml' "$ROOT_DIR/apps/compute-control-plane-endpo
 fi
 if ! grep -q 'targetPort: grpc' "$ROOT_DIR/apps/compute-control-plane-endpoints/service-nvct-api.yaml"; then
   fail "compute NVCT API alias Service must expose the worker gRPC port"
+fi
+if ! grep -q 'service-grpc.yaml' "$ROOT_DIR/apps/compute-control-plane-endpoints/kustomization.yaml"; then
+  fail "compute control-plane endpoint aliases must include the grpc-proxy worker Service"
+fi
+if ! grep -q 'targetPort: worker-tcp' "$ROOT_DIR/apps/compute-control-plane-endpoints/service-grpc.yaml"; then
+  fail "compute grpc-proxy alias Service must expose the worker TCP port"
 fi
 
 if ! grep -q 'name: nats' "$ROOT_DIR/apps/envoy-gateway/gateway.yaml"; then
@@ -159,6 +171,9 @@ if ! grep -R -q 'protocol: HTTP' "$ROOT_DIR/apps/envoy-gateway/gateway-grpc.yaml
 fi
 if ! grep -R -q 'name: grpc-gw' "$ROOT_DIR/apps/envoy-gateway"; then
   fail "control-plane Gateway must define the stack-owned grpc-gw TCP listener"
+fi
+if ! grep -R -q 'name: worker-tcp' "$ROOT_DIR/apps/envoy-gateway/gateway-grpc.yaml"; then
+  fail "control-plane Gateway must define the grpc-proxy worker TCP listener"
 fi
 if ! grep -q 'kubectl apply -k .*apps/envoy-gateway' "$ROOT_DIR/scripts/setup-gateway-api.sh"; then
   fail "gateway setup must apply the full envoy-gateway kustomization"
@@ -189,8 +204,17 @@ fi
 if ! grep -q 'CONTROL_PLANE_GRPC_PROXY_PORT="$(CONTROL_PLANE_GRPC_PROXY_PORT)"' "$ROOT_DIR/Makefile"; then
   fail "Makefile must pass CONTROL_PLANE_GRPC_PROXY_PORT to the control-plane k3d config"
 fi
+if ! grep -q 'CONTROL_PLANE_GRPC_WORKER_PORT ?= 10086' "$ROOT_DIR/Makefile"; then
+  fail "Makefile must define the host port for the grpc-proxy worker TCP listener"
+fi
+if ! grep -q 'CONTROL_PLANE_GRPC_WORKER_PORT="$(CONTROL_PLANE_GRPC_WORKER_PORT)"' "$ROOT_DIR/Makefile"; then
+  fail "Makefile must pass CONTROL_PLANE_GRPC_WORKER_PORT to the control-plane k3d config"
+fi
 if ! grep -q 'CONTROL_PLANE_LB_NATS_PORT=4222' "$ROOT_DIR/Makefile"; then
   fail "Makefile must pass the control-plane NATS container port to endpoint configuration"
+fi
+if ! grep -q 'CONTROL_PLANE_LB_GRPC_WORKER_PORT=10086' "$ROOT_DIR/Makefile"; then
+  fail "Makefile must pass the grpc-proxy worker container port to endpoint configuration"
 fi
 dns_target="$(awk '/^configure-compute-control-plane-dns:/{show=1} /^deploy-compute-control-plane-endpoints:/{show=0} show{print}' "$ROOT_DIR/Makefile")"
 if grep -q 'CLUSTER_NAME' <<<"$dns_target"; then
@@ -252,7 +276,7 @@ if grep -q "sis.nvcf-control-plane.test" <<<"$rendered_routes"; then
   fail "custom control-plane routes must not keep the default domain"
 fi
 
-endpoints_yaml="$(CONTROL_PLANE_DOMAIN="$custom_domain" CONTROL_PLANE_LB_IP=172.18.0.7 CONTROL_PLANE_LB_HTTP_PORT=18080 CONTROL_PLANE_LB_GRPC_PORT=19090 CONTROL_PLANE_LB_NATS_PORT=14222 CLUSTER_NAME=ncp-local-compute-1 "$ROOT_DIR/scripts/configure-control-plane-endpoints.sh" --dry-run)"
+endpoints_yaml="$(CONTROL_PLANE_DOMAIN="$custom_domain" CONTROL_PLANE_LB_IP=172.18.0.7 CONTROL_PLANE_LB_HTTP_PORT=18080 CONTROL_PLANE_LB_GRPC_PORT=19090 CONTROL_PLANE_LB_GRPC_WORKER_PORT=20086 CONTROL_PLANE_LB_NATS_PORT=14222 CLUSTER_NAME=ncp-local-compute-1 "$ROOT_DIR/scripts/configure-control-plane-endpoints.sh" --dry-run)"
 if ! grep -q "ip: 172.18.0.7" <<<"$endpoints_yaml"; then
   fail "compute endpoint dry-run must point at the control-plane load balancer container IP"
 fi
@@ -267,6 +291,9 @@ if ! grep -A16 "name: nvct-api" <<<"$endpoints_yaml" | grep -q "port: 19090"; th
 fi
 if ! grep -q "port: 19090" <<<"$endpoints_yaml"; then
   fail "compute gRPC endpoint dry-run must use CONTROL_PLANE_LB_GRPC_PORT"
+fi
+if ! grep -A10 "name: grpc" <<<"$endpoints_yaml" | grep -q "port: 20086"; then
+  fail "compute grpc-proxy worker endpoint dry-run must use CONTROL_PLANE_LB_GRPC_WORKER_PORT"
 fi
 if ! grep -q "port: 14222" <<<"$endpoints_yaml"; then
   fail "compute NATS endpoint dry-run must use CONTROL_PLANE_LB_NATS_PORT"
