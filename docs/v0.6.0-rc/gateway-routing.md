@@ -105,8 +105,8 @@ EOF
 
 ### Create Gateway
 
-Create the Gateway resource with an HTTP listener on port 80 and a TCP listener
-on port 10081 for gRPC.
+Create the Gateway resource with an HTTP listener on port 80, a TCP listener on
+port 10081 for gRPC, and a TCP listener on port 4222 for NATS.
 
 <Note>
 The `annotations` section is cloud-provider specific and controls how the
@@ -146,6 +146,15 @@ spec:
   - name: tcp
     protocol: TCP
     port: 10081
+    allowedRoutes:
+      namespaces:
+        from: Selector
+        selector:
+          matchLabels:
+            nvcf/platform: "true"
+  - name: nats
+    protocol: TCP
+    port: 4222
     allowedRoutes:
       namespaces:
         from: Selector
@@ -243,11 +252,11 @@ There is no service mesh requirement. Envoy Gateway is not a service mesh. It is
 Any Gateway API implementation you choose must support:
 
 1. `HTTPRoute` for HTTP/HTTPS routing with hostname matching
-2. `TCPRoute` for gRPC routing (requires experimental Gateway API CRDs)
+2. `TCPRoute` for gRPC and NATS routing (requires experimental Gateway API CRDs)
 3. Cross-namespace routing for routes in one namespace referencing services in another
 
 <Warning>
-TCPRoute is experimental. Some Gateway API implementations may have limited or no TCPRoute support. Verify your chosen implementation supports TCPRoute before deploying. If it doesn't, gRPC invocations won't work through the gateway.
+TCPRoute is experimental. Some Gateway API implementations may have limited or no TCPRoute support. Verify your chosen implementation supports TCPRoute before deploying. If it doesn't, gRPC invocations and NVCA NATS connections won't work through the gateway.
 
 </Warning>
 
@@ -261,7 +270,8 @@ To use a different Gateway API implementation instead of Envoy Gateway:
 
 3. Create a `GatewayClass` for your controller
 
-4. Create a `Gateway` with `http` (port 80) and `tcp` (port 10081) listeners
+4. Create a `Gateway` with `http` (port 80), `tcp` (port 10081), and `nats`
+   (port 4222) listeners
 
 5. Update your install configuration to reference your Gateway:
 
@@ -278,6 +288,10 @@ To use a different Gateway API implementation instead of Envoy Gateway:
            name: your-gateway-name       # Can be same Gateway with different listener
            namespace: your-namespace
            listenerName: tcp             # TCP listener name for gRPC
+         nats:
+           name: your-gateway-name       # Can be same Gateway with different listener
+           namespace: your-namespace
+           listenerName: nats            # TCP listener name for NATS
    ```
 
 The `nvcf-gateway-routes` chart will create HTTPRoutes and TCPRoutes that attach to your specified Gateway.
@@ -296,7 +310,7 @@ If you have a specific requirement that prevents using Gateway API, you would ne
 1. Disable `nvcf-gateway-routes` in your helmfile
 2. Create your own Ingress or Service resources for each NVCF service
 3. Configure hostname routing manually
-4. Set up a separate TCP load balancer for gRPC on port 10081
+4. Set up TCP load balancers for gRPC on port 10081 and NATS on port 4222
 
 ## Gateway Architecture
 
@@ -311,7 +325,8 @@ These resources must be created manually before deploying the control plane:
 - Namespaces with `nvcf/platform=true` labels
 - Gateway API controller installation (Envoy Gateway, Istio, Traefik, etc.)
 - `GatewayClass` resource
-- `Gateway` resource with `http` (port 80) and `tcp` (port 10081) listeners
+- `Gateway` resource with `http` (port 80), `tcp` (port 10081), and `nats`
+  (port 4222) listeners
 
 ### Resources created by nvcf-gateway-routes
 
@@ -321,6 +336,7 @@ When you deploy the control plane via helmfile, the `nvcf-gateway-routes` chart 
 - Optional LLM invocation HTTPRoute when the `llmInvocation` route is enabled
 - Optional Vanity Gateway HTTPRoute only when the stack package includes the addon and the `vanityGateway` route is enabled
 - `TCPRoute` for gRPC
+- Optional `TCPRoute` for NATS when the `nats` route is enabled
 - `ReferenceGrants` for cross-namespace routing permissions
 
 These routes attach to the Gateway you prepared in [Gateway quickstart](./gateway-routing.md#gateway-quickstart).
@@ -335,6 +351,7 @@ These routes attach to the Gateway you prepared in [Gateway quickstart](./gatewa
 | LLM Invocation | `llm.invocation.<domain>` | 80 | OpenAI-compatible LLM invocation routes such as `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` |
 | Vanity Gateway | `vanity.<domain>` | 80 | Optional vanity host/path routing to `vanity-gateway.nvcf:8080`, only in stack packages that include the addon |
 | gRPC | N/A (TCP routing, no hostname matching) | 10081 | gRPC function invocations |
+| NATS | N/A (TCP routing, no hostname matching) | 4222 | NVCA messaging when the NATS route is enabled |
 
 <Note>
 The `<domain>` is your Gateway's load balancer address (e.g., `a1b2c3d4.us-west-2.elb.amazonaws.com`) or your custom domain. The helmfile deployment automatically configures the HTTPRoute hostnames using this value from your environment configuration.
@@ -380,10 +397,13 @@ hosts.
 
 ### How Routing Works
 
-1. The Gateway's LoadBalancer service exposes ports 80 (HTTP) and 10081 (gRPC) externally.
+1. The Gateway's LoadBalancer service exposes ports 80 (HTTP), 10081 (gRPC),
+   and 4222 (NATS) externally.
 2. HTTP requests arrive at port 80. The Gateway inspects the `Host` header and matches it against HTTPRoute hostnames.
 3. The matching HTTPRoute forwards the request to the appropriate backend service (e.g., `api-keys` service on port 8080).
 4. gRPC requests arrive at port 10081. The TCPRoute forwards all traffic directly to the `grpc` service. No hostname matching is required.
+5. NATS connections arrive at port 4222. When enabled, the NATS TCPRoute
+   forwards traffic directly to the NATS service.
 
 <Tip>
 gRPC doesn't need Host headers because it uses a dedicated TCP listener on port 10081. The gateway routes all traffic on that port directly to the gRPC service without hostname matching.
@@ -421,19 +441,20 @@ kubectl get httproute -A -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.
 If Vanity Gateway is disabled or your stack package does not include the addon,
 the `vanity-gateway` HTTPRoute is not expected.
 
-### Verify gRPC TCPRoute
+### Verify TCPRoutes
 
 ```bash
-# Check gRPC routing is configured
+# Check gRPC and NATS routing is configured
 kubectl get tcproute -A
 # Expected output:
 # NAMESPACE       NAME   AGE
 # envoy-gateway   grpc   19h
+# envoy-gateway   nats   19h  # when the NATS route is enabled
 
-# Verify the gateway exposes port 10081
+# Verify the gateway exposes ports 10081 and 4222
 kubectl get svc -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gateway-name=nvcf-gateway \
   -o jsonpath='{.items[0].spec.ports[*].port}'
-# Expected output includes: 80 10081
+# Expected output includes: 80 10081 4222
 ```
 
 ### Test Connectivity
@@ -582,6 +603,10 @@ ingress:
         name: nvcf-gateway
         namespace: envoy-gateway
         listenerName: tcp
+      nats:
+        name: nvcf-gateway
+        namespace: envoy-gateway
+        listenerName: nats
 ```
 
 Redeploy to update the HTTPRoute hostnames:
