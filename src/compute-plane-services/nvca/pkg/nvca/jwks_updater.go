@@ -25,12 +25,15 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core"
@@ -49,6 +52,8 @@ type JWKSUpdater struct {
 	k8sClient  *http.Client
 	oidcClient *http.Client
 	icmsClient *http.Client
+	// k8sSATokenPath defaults to k8sSATokenPath and is overrideable in tests.
+	k8sSATokenPath string
 }
 
 // JWKSUpdaterOptions configures a JWKSUpdater.
@@ -92,6 +97,7 @@ func newJWKSUpdater(opts JWKSUpdaterOptions, caCertPath string) (*JWKSUpdater, e
 		icmsClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		k8sSATokenPath: k8sSATokenPath,
 	}, nil
 }
 
@@ -154,6 +160,15 @@ type oidcDiscoveryConfig struct {
 
 type jwtIssuerClaims struct {
 	Issuer string `json:"iss"`
+}
+
+type jwtHeader struct {
+	KeyID string `json:"kid"`
+}
+
+type projectedTokenMetadata struct {
+	Issuer string
+	KeyID  string
 }
 
 // newK8sHTTPClient creates an HTTP client that trusts the in-cluster K8s API
@@ -275,24 +290,64 @@ func (u *JWKSUpdater) checkAndPush(ctx context.Context) {
 	}
 }
 
+// fetchJWKS prefers the projected-token issuer JWKS because that is the key set
+// external verifiers should use for the current service-account token. When the
+// issuer is the in-cluster Kubernetes API server, discovery/JWKS may require the
+// mounted Kubernetes service-account token; NVCA only sends that token to
+// recognized in-cluster API server issuers. The in-cluster Kubernetes JWKS is
+// only a guarded fallback for issuer reachability failures, and only when it
+// contains the current projected token kid. All other issuer errors fail closed
+// so NVCA does not push a stale or mismatched JWKS to ICMS.
 func (u *JWKSUpdater) fetchJWKS(ctx context.Context) ([]byte, error) {
 	log := core.GetLogger(ctx)
-	issuerURL, err := issuerURLFromJWTFile(u.tokenPath)
-	if err == nil && issuerURL != "" {
-		jwksData, err := u.fetchJWKSFromIssuer(ctx, issuerURL)
-		if err == nil {
-			return jwksData, nil
-		}
-		return nil, fmt.Errorf("fetch JWKS from projected token issuer %q: %w", issuerURL, err)
-	} else if err != nil {
-		log.WithError(err).Warn("Failed to read issuer from projected token, falling back to K8s API server")
+	tokenMetadata, err := projectedTokenMetadataFromJWTFile(u.tokenPath)
+	if err != nil {
+		return nil, err
+	}
+	if tokenMetadata.Issuer == "" {
+		return nil, fmt.Errorf("projected token missing issuer")
 	}
 
-	return u.fetchJWKSFromK8s(ctx)
+	jwksData, err := u.fetchJWKSFromIssuer(ctx, tokenMetadata.Issuer)
+	if err == nil {
+		return jwksData, nil
+	}
+	if !isIssuerReachabilityError(err) {
+		return nil, fmt.Errorf("fetch JWKS from projected token issuer %q: %w", tokenMetadata.Issuer, err)
+	}
+	if tokenMetadata.KeyID == "" {
+		return nil, fmt.Errorf("fetch JWKS from projected token issuer %q: %w; not falling back to internal K8s JWKS because projected token has no kid", tokenMetadata.Issuer, err)
+	}
+
+	log.WithError(err).WithField("kid", tokenMetadata.KeyID).Warn(
+		"Projected token issuer JWKS is unreachable; trying guarded K8s API JWKS fallback")
+
+	internalJWKS, fallbackErr := u.fetchJWKSFromK8s(ctx)
+	if fallbackErr != nil {
+		return nil, fmt.Errorf("fetch JWKS from projected token issuer %q: %w; guarded K8s JWKS fallback failed: %v", tokenMetadata.Issuer, err, fallbackErr)
+	}
+	containsKid, containsErr := jwksContainsKeyID(internalJWKS, tokenMetadata.KeyID)
+	if containsErr != nil {
+		return nil, fmt.Errorf("fetch JWKS from projected token issuer %q: %w; validate guarded K8s JWKS fallback: %v", tokenMetadata.Issuer, err, containsErr)
+	}
+	if !containsKid {
+		return nil, fmt.Errorf("fetch JWKS from projected token issuer %q: %w; internal K8s JWKS does not contain projected token kid %q", tokenMetadata.Issuer, err, tokenMetadata.KeyID)
+	}
+
+	log.WithField("kid", tokenMetadata.KeyID).Warn(
+		"Using internal K8s JWKS fallback because it contains the current projected token kid")
+	return internalJWKS, nil
+}
+
+func (u *JWKSUpdater) k8sSATokenFile() string {
+	if u.k8sSATokenPath != "" {
+		return u.k8sSATokenPath
+	}
+	return k8sSATokenPath
 }
 
 func (u *JWKSUpdater) fetchJWKSFromK8s(ctx context.Context) ([]byte, error) {
-	saToken, err := os.ReadFile(k8sSATokenPath)
+	saToken, err := os.ReadFile(u.k8sSATokenFile())
 	if err != nil {
 		return nil, fmt.Errorf("read K8s SA token for JWKS fetch: %w", err)
 	}
@@ -331,11 +386,7 @@ func (u *JWKSUpdater) fetchJWKSFromIssuer(ctx context.Context, issuerURL string)
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create OIDC discovery request: %w", err)
-	}
-	resp, err := client.Do(req)
+	resp, usedK8sAuth, err := u.doIssuerRequest(ctx, client, issuerURL, discoveryURL, false)
 	if err != nil {
 		return nil, fmt.Errorf("fetch OIDC discovery document: %w", err)
 	}
@@ -363,11 +414,7 @@ func (u *JWKSUpdater) fetchJWKSFromIssuer(ctx context.Context, issuerURL string)
 		return nil, err
 	}
 
-	jwksReq, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create issuer JWKS request: %w", err)
-	}
-	jwksResp, err := client.Do(jwksReq)
+	jwksResp, _, err := u.doIssuerRequest(ctx, client, issuerURL, jwksURL, usedK8sAuth)
 	if err != nil {
 		return nil, fmt.Errorf("fetch issuer JWKS: %w", err)
 	}
@@ -382,6 +429,69 @@ func (u *JWKSUpdater) fetchJWKSFromIssuer(ctx context.Context, issuerURL string)
 		return nil, fmt.Errorf("read issuer JWKS response: %w", err)
 	}
 	return jwksData, nil
+}
+
+func (u *JWKSUpdater) doIssuerRequest(ctx context.Context, client *http.Client, issuerURL, requestURL string, useK8sAuth bool) (*http.Response, bool, error) {
+	resp, err := u.doSingleIssuerRequest(ctx, client, requestURL, useK8sAuth)
+	if err != nil || useK8sAuth || !shouldRetryIssuerRequestWithK8sAuth(issuerURL, resp.StatusCode) {
+		return resp, useK8sAuth, err
+	}
+
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	resp, err = u.doSingleIssuerRequest(ctx, client, requestURL, true)
+	if err != nil {
+		return nil, true, fmt.Errorf("retry with K8s service-account token: %w", err)
+	}
+	return resp, true, nil
+}
+
+func (u *JWKSUpdater) doSingleIssuerRequest(ctx context.Context, client *http.Client, requestURL string, useK8sAuth bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create OIDC request: %w", err)
+	}
+	if useK8sAuth {
+		if err := u.addK8sAuth(req); err != nil {
+			return nil, err
+		}
+	}
+	return client.Do(req)
+}
+
+func (u *JWKSUpdater) addK8sAuth(req *http.Request) error {
+	saToken, err := os.ReadFile(u.k8sSATokenFile())
+	if err != nil {
+		return fmt.Errorf("read K8s SA token for issuer fetch: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(saToken)))
+	return nil
+}
+
+func shouldRetryIssuerRequestWithK8sAuth(issuerURL string, statusCode int) bool {
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden {
+		return false
+	}
+	return isInClusterKubernetesIssuer(issuerURL)
+}
+
+func isInClusterKubernetesIssuer(issuerURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(issuerURL))
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	switch host {
+	case "kubernetes.default.svc", "kubernetes.default.svc.cluster.local":
+		return true
+	}
+
+	kubernetesServiceHost := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))), ".")
+	return kubernetesServiceHost != "" && host == kubernetesServiceHost
 }
 
 func oidcDiscoveryURL(issuerURL string) (string, error) {
@@ -449,22 +559,83 @@ func resolveOIDCJWKSURL(issuerURL, jwksURI string) (string, error) {
 	return base.ResolveReference(jwksURL).String(), nil
 }
 
-func issuerURLFromJWTFile(tokenPath string) (string, error) {
+func isIssuerReachabilityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) {
+		return true
+	}
+	if os.IsTimeout(err) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		// Private clusters may be unable to resolve an otherwise valid projected-token issuer.
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return isIssuerReachabilityError(urlErr.Err)
+	}
+	return false
+}
+
+func jwksContainsKeyID(jwksData []byte, keyID string) (bool, error) {
+	if strings.TrimSpace(keyID) == "" {
+		return false, fmt.Errorf("projected token kid is empty")
+	}
+	var jwks struct {
+		Keys []struct {
+			KeyID string `json:"kid"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(jwksData, &jwks); err != nil {
+		return false, fmt.Errorf("decode JWKS: %w", err)
+	}
+	for _, key := range jwks.Keys {
+		if key.KeyID == keyID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func projectedTokenMetadataFromJWTFile(tokenPath string) (projectedTokenMetadata, error) {
 	tokenBytes, err := os.ReadFile(tokenPath)
 	if err != nil {
-		return "", fmt.Errorf("read projected token: %w", err)
+		return projectedTokenMetadata{}, fmt.Errorf("read projected token: %w", err)
 	}
 	parts := strings.Split(strings.TrimSpace(string(tokenBytes)), ".")
 	if len(parts) < 2 {
-		return "", fmt.Errorf("parse projected token: expected JWT with at least two segments")
+		return projectedTokenMetadata{}, fmt.Errorf("parse projected token: expected JWT with at least two segments")
+	}
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return projectedTokenMetadata{}, fmt.Errorf("decode projected token header: %w", err)
+	}
+	var header jwtHeader
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return projectedTokenMetadata{}, fmt.Errorf("unmarshal projected token header: %w", err)
 	}
 	claimsBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("decode projected token claims: %w", err)
+		return projectedTokenMetadata{}, fmt.Errorf("decode projected token claims: %w", err)
 	}
 	var claims jwtIssuerClaims
 	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
-		return "", fmt.Errorf("unmarshal projected token claims: %w", err)
+		return projectedTokenMetadata{}, fmt.Errorf("unmarshal projected token claims: %w", err)
 	}
-	return strings.TrimSpace(claims.Issuer), nil
+	return projectedTokenMetadata{
+		Issuer: strings.TrimSpace(claims.Issuer),
+		KeyID:  strings.TrimSpace(header.KeyID),
+	}, nil
 }
