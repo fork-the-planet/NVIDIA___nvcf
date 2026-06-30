@@ -798,6 +798,13 @@ func checkConfigurableReachability(state *ValidationState, cfg *ReachabilityConf
 	hasCritical := false
 	allCriticalOK := true
 
+	// Per-endpoint results for the metrics pipeline. The agent emits one
+	// Prometheus gauge per entry; the map key becomes the `endpoint=...`
+	// label value.
+	if state.EndpointResults == nil {
+		state.EndpointResults = make(map[string]EndpointResult, len(cfg.Endpoints))
+	}
+
 	for _, ep := range cfg.Endpoints {
 		target := toEndpoint(ep)
 		display := target.DisplayAddr()
@@ -819,6 +826,7 @@ func checkConfigurableReachability(state *ValidationState, cfg *ReachabilityConf
 		// indistinguishable from a real connectivity failure.
 		if reason := unprobableReason(target); reason != "" {
 			allOK = false
+			state.EndpointResults[ep.Name] = EndpointResult{Reachable: false, Critical: ep.Critical}
 			msg := fmt.Sprintf("  %s: %s — %s (treated as unreachable)", ep.Name, display, reason)
 			if ep.Critical {
 				allCriticalOK = false
@@ -830,9 +838,11 @@ func checkConfigurableReachability(state *ValidationState, cfg *ReachabilityConf
 		}
 
 		if TestEndpoint(target) {
+			state.EndpointResults[ep.Name] = EndpointResult{Reachable: true, Critical: ep.Critical}
 			printSuccess(log, fmt.Sprintf("  %s: %s - Reachable", ep.Name, display))
 		} else {
 			allOK = false
+			state.EndpointResults[ep.Name] = EndpointResult{Reachable: false, Critical: ep.Critical}
 			if ep.Critical {
 				allCriticalOK = false
 				printError(log, fmt.Sprintf("  %s: %s - Not Reachable (critical)", ep.Name, display))
@@ -851,7 +861,7 @@ func checkConfigurableReachability(state *ValidationState, cfg *ReachabilityConf
 	if allOK {
 		printSuccess(log, "All endpoint reachability checks passed")
 	} else if !allCriticalOK {
-		printError(log, "Some critical endpoints are not reachable")
+		printError(log, "One or more critical endpoints are not reachable")
 		// Don't assume egress is the cause — DNS resolution failures (typo
 		// in hostname) and wrong-environment URLs (e.g. prod endpoint on a
 		// staging cluster) look identical to a real egress block here.
@@ -862,9 +872,9 @@ func checkConfigurableReachability(state *ValidationState, cfg *ReachabilityConf
 				"staging vs. production URL), and (2) cluster egress permits "+
 				"traffic to it (NetworkPolicy, firewall, proxy).")
 	} else {
-		printWarning(log, "Some endpoints are not reachable (non-critical)")
+		printWarning(log, "One or more endpoints are not reachable (non-critical)")
 		state.Warnings = append(state.Warnings,
-			"Reachability: Some endpoints are not reachable")
+			"Reachability: One or more endpoints not reachable")
 	}
 }
 

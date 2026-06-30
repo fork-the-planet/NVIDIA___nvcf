@@ -52,6 +52,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
+	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/clustervalidator"
 	nvidiaiov1 "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/apis/nvcf/v1"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/featureflag"
 	nvcaoperatorerrors "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/operator/internal/errors"
@@ -1877,6 +1878,16 @@ func (bc *BackendK8sCache) setupNVCADeployment(ctx context.Context, original *nv
 	nvcaContainer.VolumeMounts = append(nvcaContainer.VolumeMounts, corev1.VolumeMount{
 		Name:      ReValCacheVolumeName,
 		MountPath: ReValCacheDir,
+	})
+
+	// Tell the agent which namespace the cluster-validator writes its
+	// summary ConfigMap to (the operator/validator namespace), so the
+	// agent's metrics reconciler watches the right namespace. The agent
+	// runs in a different namespace (the system namespace) than the
+	// validator, so it cannot infer this from its own pod.
+	nvcaContainer.Env = append(nvcaContainer.Env, corev1.EnvVar{
+		Name:  clustervalidator.SummaryConfigMapNamespaceEnv,
+		Value: bc.operatorNamespace,
 	})
 
 	// Add OAuth authentication environment variables.

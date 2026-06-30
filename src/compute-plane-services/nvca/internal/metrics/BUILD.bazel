@@ -48,6 +48,7 @@ go_test(
     ],
     embed = [":metrics"],
     deps = [
+        "//internal/clustervalidator",
         "//internal/metrics/gctypes",
         "//internal/metrics/modelcachetypes",
         "//internal/metrics/workloadtypes",

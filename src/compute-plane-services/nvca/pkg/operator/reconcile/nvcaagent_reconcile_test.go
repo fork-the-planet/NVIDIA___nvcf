@@ -43,6 +43,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
+	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/clustervalidator"
 	nvidiaiov1 "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/apis/nvcf/v1"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/featureflag"
 	nvcaoptypes "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/operator/types"
@@ -415,6 +416,12 @@ func TestSetupNVCADeployment(t *testing.T) {
 	assert.Empty(t, nvcaContainer.Command)
 	assert.Equal(t, []string{"/usr/bin/nvca", "--config", "/var/run/nvca/config.yaml"}, nvcaContainer.Args)
 	assert.Equal(t, []corev1.EnvVar{
+		{
+			// Injected first so the agent's metrics reconciler watches the
+			// operator/validator namespace for the cluster-validator summary.
+			Name:  clustervalidator.SummaryConfigMapNamespaceEnv,
+			Value: bc.operatorNamespace,
+		},
 		{
 			Name: auth.ClientIDEnv,
 			ValueFrom: &corev1.EnvVarSource{
@@ -840,7 +847,13 @@ func TestSetupNVCADeployment_Vault(t *testing.T) {
 	assert.Equal(t, []string{"/usr/bin/nvca", "--config", "/var/run/nvca/config.yaml"}, nvcaContainer.Args)
 	// When Vault is enabled, OAuth credentials come from ClientSecretsEnvFile (Vault agent output),
 	// not from SecretKeyRef - so no OAUTH_CLIENT_ID env var is added (fixes "secret oauth-client-id not found").
-	assert.Empty(t, nvcaContainer.Env)
+	// The only env var present is the always-injected validator-summary namespace.
+	assert.Equal(t, []corev1.EnvVar{
+		{
+			Name:  clustervalidator.SummaryConfigMapNamespaceEnv,
+			Value: bc.operatorNamespace,
+		},
+	}, nvcaContainer.Env)
 	assert.Equal(t, []corev1.VolumeMount{
 		{
 			Name:      NGCServiceAPIKeySecretName,

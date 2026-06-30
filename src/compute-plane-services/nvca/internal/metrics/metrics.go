@@ -20,6 +20,8 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,6 +73,31 @@ const (
 
 	// Cluster attribute metrics
 	KataRuntimeIsolationEnabledMetricName = "nvca_kata_runtime_isolation_enabled"
+
+	// Cluster-validator metrics — populated by a SharedInformer that
+	// watches the cluster-validator-summary ConfigMap. The dynamic-cardinality
+	// metrics (per endpoint / per netpol pair) are prune-on-update so only
+	// the latest run's labels are exposed at any moment.
+	ClusterValidatorReadyMetricName             = "nvca_cluster_validator_ready"
+	ClusterValidatorCheckStatusMetricName       = "nvca_cluster_validator_check_status"
+	ClusterValidatorEndpointReachableMetricName = "nvca_cluster_validator_endpoint_reachable"
+	ClusterValidatorNetpolPairPassedMetricName  = "nvca_cluster_validator_netpol_pair_passed" //nolint:gosec // metric name literal, not a credential
+	ClusterValidatorLastRunTimestampMetricName  = "nvca_cluster_validator_last_run_timestamp_seconds"
+	ClusterValidatorLastRunDurationMetricName   = "nvca_cluster_validator_last_run_duration_seconds"
+
+	// Cluster-validator label keys
+	ClusterValidatorCheckLabel      = "check"
+	ClusterValidatorEndpointLabel   = "endpoint"
+	ClusterValidatorNetpolPairLabel = "pair"
+	ClusterValidatorDirectionLabel  = "direction"
+	ClusterValidatorPolicySideLabel = "policy_side"
+	ClusterValidatorCriticalLabel   = "critical"
+
+	// Cluster-validator netpol policy-side label values. The direction
+	// label values ("a_to_b"/"b_to_a") originate from the summary wire
+	// format and flow through as map keys.
+	clusterValidatorPolicySideEgress  = "egress"
+	clusterValidatorPolicySideIngress = "ingress"
 
 	// Workload result metrics
 	WorkloadResultTotalMetricName = "nvca_workload_result_total"
@@ -240,6 +267,23 @@ type Metrics struct {
 	// Cluster attribute metrics
 	KataRuntimeIsolationEnabled *prometheus.GaugeVec
 
+	// Cluster-validator metrics — see SetClusterValidatorSummary() for the
+	// update protocol. The dynamic-cardinality vectors (Endpoint, NetpolPair)
+	// are prune-on-update so only the current run's label values are
+	// exposed; Prometheus's TSDB retains historical points via normal scrape
+	// history.
+	ClusterValidatorReady             *prometheus.GaugeVec
+	ClusterValidatorCheckStatus       *prometheus.GaugeVec
+	ClusterValidatorEndpointReachable *prometheus.GaugeVec
+	ClusterValidatorNetpolPairPassed  *prometheus.GaugeVec
+	ClusterValidatorLastRunTimestamp  *prometheus.GaugeVec
+	ClusterValidatorLastRunDuration   *prometheus.GaugeVec
+	// clusterValidatorLastEmitted tracks label tuples emitted by the last
+	// reconcile so the next update can prune stale series. Guarded by
+	// clusterValidatorMu.
+	clusterValidatorLastEmitted *clusterValidatorEmittedSet
+	clusterValidatorMu          sync.Mutex
+
 	// Workload result metrics
 	WorkloadResultTotal *prometheus.CounterVec
 
@@ -290,6 +334,12 @@ func (m *Metrics) Destroy() {
 	prometheus.Unregister(m.GCCleanerRunTotal)
 	prometheus.Unregister(m.ModelCacheResultTotal)
 	prometheus.Unregister(m.KataRuntimeIsolationEnabled)
+	prometheus.Unregister(m.ClusterValidatorReady)
+	prometheus.Unregister(m.ClusterValidatorCheckStatus)
+	prometheus.Unregister(m.ClusterValidatorEndpointReachable)
+	prometheus.Unregister(m.ClusterValidatorNetpolPairPassed)
+	prometheus.Unregister(m.ClusterValidatorLastRunTimestamp)
+	prometheus.Unregister(m.ClusterValidatorLastRunDuration)
 	prometheus.Unregister(m.WorkloadResultTotal)
 	prometheus.Unregister(m.UpstreamRequestTotal)
 	prometheus.Unregister(m.SchedulerWorkloadCount)
@@ -595,6 +645,58 @@ func NewDefaultMetrics(ncaID, clusterName, clusterGroup, version string, opts ..
 	}, withDefaultLabels())
 	// Initialize to 0 (disabled) so it appears on first Prometheus scrape
 	m.KataRuntimeIsolationEnabled.WithLabelValues(m.WithDefaultLabelValues()...).Set(0)
+
+	// Cluster-validator metrics. Fixed-cardinality vectors (Ready,
+	// LastRun*, CheckStatus per known check) are initialized to zero so
+	// they appear on the first Prometheus scrape — same pattern as
+	// KataRuntimeIsolationEnabled above. Dynamic-cardinality vectors
+	// (EndpointReachable, NetpolPairPassed) only appear after the first
+	// reconcile fires from a real ConfigMap update.
+	m.ClusterValidatorReady = promFactory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ClusterValidatorReadyMetricName,
+		Help: "Cluster-validator overall verdict (1=NVCF-Ready, 0=NVCF-Not-Ready). " +
+			"Driven by the most recent run's verdictReady field.",
+	}, withDefaultLabels())
+	m.ClusterValidatorCheckStatus = promFactory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ClusterValidatorCheckStatusMetricName,
+		Help: "Per-check status from the latest cluster-validator run " +
+			"(1=passed, 0=failed/skipped). The set of check names is fixed; see CheckKey* constants.",
+	}, withDefaultLabels(ClusterValidatorCheckLabel))
+	m.ClusterValidatorEndpointReachable = promFactory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ClusterValidatorEndpointReachableMetricName,
+		Help: "Reachability of each user-configured endpoint from the latest cluster-validator run " +
+			"(1=reachable, 0=not reachable). Label value `endpoint` is the user-supplied name; " +
+			"`critical=true` means the endpoint failure flips the cluster verdict. " +
+			"Series are pruned when an endpoint is removed from config.",
+	}, withDefaultLabels(ClusterValidatorEndpointLabel, ClusterValidatorCriticalLabel))
+	m.ClusterValidatorNetpolPairPassed = promFactory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ClusterValidatorNetpolPairPassedMetricName,
+		Help: "Directional NetworkPolicy coverage from the latest cluster-validator run " +
+			"(1=allowed, 0=blocked). Label `pair` is the user-supplied name; `direction` is " +
+			"`a_to_b` or `b_to_a`; `policy_side` is `egress` (the source namespace's egress) or " +
+			"`ingress` (the destination namespace's ingress); `critical=true` means the pair " +
+			"failure flips the cluster verdict. Overall pair coverage is `min by (pair) (...)`. " +
+			"Series are pruned when a pair is removed from config.",
+	}, withDefaultLabels(
+		ClusterValidatorNetpolPairLabel,
+		ClusterValidatorCriticalLabel,
+		ClusterValidatorDirectionLabel,
+		ClusterValidatorPolicySideLabel,
+	))
+	m.ClusterValidatorLastRunTimestamp = promFactory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ClusterValidatorLastRunTimestampMetricName,
+		Help: "Unix timestamp (seconds) of the latest cluster-validator run. " +
+			"Operators alert on staleness via `time() - <metric> > <threshold>`.",
+	}, withDefaultLabels())
+	m.ClusterValidatorLastRunDuration = promFactory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ClusterValidatorLastRunDurationMetricName,
+		Help: "Wall-clock duration (seconds) of the latest cluster-validator run.",
+	}, withDefaultLabels())
+
+	// Initialize the fixed-cardinality cluster-validator gauges to 0 so they
+	// appear on the first Prometheus scrape — same "absent metric" pattern as
+	// KataRuntimeIsolationEnabled. Each run updates these series in place.
+	m.emitClusterValidatorBaseline()
 
 	// Workload result metric (uses default labels)
 	m.WorkloadResultTotal = promFactory.NewCounterVec(prometheus.CounterOpts{
@@ -995,4 +1097,253 @@ func (m *Metrics) RecordUpstreamRequest(operation string, err error) {
 		httpCode = fmt.Sprintf("%d", code)
 	}
 	m.UpstreamRequestTotal.WithLabelValues(m.WithDefaultLabelValues(operation, "failure", httpCode)...).Inc()
+}
+
+// -----------------------------------------------------------------------------
+// Cluster-validator metric helpers
+// -----------------------------------------------------------------------------
+
+// clusterValidatorCheckKeys returns the canonical list of CheckStatus
+// label values for init-to-zero. MUST stay in sync with
+// internal/clustervalidator/summary.go's AllCheckKeys. Drift is caught
+// by TestClusterValidatorCheckKeysSync.
+func clusterValidatorCheckKeys() []string {
+	return []string{
+		"control_plane",
+		"worker_nodes_all_ready",
+		"webhooks",
+		"network_policies_supported",
+		"smb_csi",
+		"endpoint_reachability",
+		"gpu_resources",
+		"gpu_operator",
+		"configurable_netpol",
+		"netpol_enforcement",
+	}
+}
+
+// ClusterValidatorSummary is the agent-facing view of one cluster-validator
+// run. The reconciler in pkg/nvca builds this from the ConfigMap payload
+// (via clustervalidator.ParseSummary) and hands it to
+// Metrics.SetClusterValidatorSummary.
+type ClusterValidatorSummary struct {
+	RanAtUnixSec    int64   // epoch seconds; the LastRunTimestamp metric value
+	DurationSeconds float64 // the LastRunDuration metric value
+	VerdictReady    bool
+	Checks          map[string]bool
+	Endpoints       map[string]ClusterValidatorEndpoint
+	NetpolPairs     map[string]ClusterValidatorNetpolPair
+}
+
+// ClusterValidatorEndpoint mirrors clustervalidator.EndpointStatus but
+// kept here so the metrics package has no upward dependency on
+// clustervalidator.
+type ClusterValidatorEndpoint struct {
+	Reachable bool
+	Critical  bool
+}
+
+// ClusterValidatorNetpolPair mirrors clustervalidator.PairStatus. Directions
+// is keyed by direction ("a_to_b"/"b_to_a"); each entry yields two metric
+// series (egress and ingress policy sides).
+type ClusterValidatorNetpolPair struct {
+	Passed     bool
+	Critical   bool
+	Directions map[string]ClusterValidatorNetpolDirection
+}
+
+// ClusterValidatorNetpolDirection mirrors clustervalidator.DirectionStatus.
+type ClusterValidatorNetpolDirection struct {
+	EgressAllowed  bool
+	IngressAllowed bool
+}
+
+// clusterValidatorEmittedSet records every label tuple the last reconcile
+// emitted, so the next update can DeleteLabelValues() series that aren't
+// present in the new summary. Bounded cardinality at /metrics is the
+// whole point of this struct.
+type clusterValidatorEmittedSet struct {
+	checks      map[string]struct{}                  // set of check keys
+	endpoints   map[string]clusterValidatorRow       // endpoint name → (critical) for prune
+	netpolPairs map[string]clusterValidatorNetpolRow // pair name → (critical, emitted sides) for prune
+}
+
+type clusterValidatorRow struct{ critical string }
+
+// clusterValidatorNetpolRow records, per pair, the critical flag plus every
+// (direction, policy_side) tuple emitted for it, so the next run can prune
+// the exact series it created.
+type clusterValidatorNetpolRow struct {
+	critical string
+	sides    []clusterValidatorNetpolSide
+}
+
+type clusterValidatorNetpolSide struct{ direction, policySide string }
+
+func newClusterValidatorEmittedSet() *clusterValidatorEmittedSet {
+	return &clusterValidatorEmittedSet{
+		checks:      make(map[string]struct{}),
+		endpoints:   make(map[string]clusterValidatorRow),
+		netpolPairs: make(map[string]clusterValidatorNetpolRow),
+	}
+}
+
+// SetClusterValidatorSummary atomically updates every cluster-validator
+// metric from a single run's summary. The protocol:
+//  1. Compute the new label tuples we're about to emit.
+//  2. For every label tuple from the previous run that is NOT in the
+//     new set, DeleteLabelValues() so stale series stop appearing at
+//     /metrics. (Prometheus's TSDB retains historical scrapes — the
+//     data isn't lost; it just stops being re-emitted.)
+//  3. Set the new gauges with the new label values.
+//  4. Remember the new tuples so the next reconcile can prune them.
+//
+// Nil-safe: if m is nil OR the summary is nil, this returns silently.
+// Safe for concurrent use: it acquires m.clusterValidatorMu itself, so
+// callers must NOT hold the lock when calling it.
+func (m *Metrics) SetClusterValidatorSummary(s *ClusterValidatorSummary) {
+	if m == nil || s == nil {
+		return
+	}
+	m.clusterValidatorMu.Lock()
+	defer m.clusterValidatorMu.Unlock()
+
+	if m.clusterValidatorLastEmitted == nil {
+		m.clusterValidatorLastEmitted = newClusterValidatorEmittedSet()
+	}
+	prior := m.clusterValidatorLastEmitted
+	current := newClusterValidatorEmittedSet()
+
+	// Cluster-level gauges carry only the default labels, so each run updates
+	// the same series in place — no per-run series churn.
+	m.ClusterValidatorReady.WithLabelValues(m.WithDefaultLabelValues()...).Set(boolToFloat(s.VerdictReady))
+	m.ClusterValidatorLastRunTimestamp.WithLabelValues(m.WithDefaultLabelValues()...).Set(float64(s.RanAtUnixSec))
+	m.ClusterValidatorLastRunDuration.WithLabelValues(m.WithDefaultLabelValues()...).Set(s.DurationSeconds)
+
+	// CheckStatus: prune the prior run's checks, then emit the current set. A
+	// conditional check that did not run this time is left absent rather than
+	// reporting a stale value.
+	for check := range prior.checks {
+		m.ClusterValidatorCheckStatus.DeleteLabelValues(m.WithDefaultLabelValues(check)...)
+	}
+	for check, passed := range s.Checks {
+		m.ClusterValidatorCheckStatus.WithLabelValues(m.WithDefaultLabelValues(check)...).Set(boolToFloat(passed))
+		current.checks[check] = struct{}{}
+	}
+
+	// EndpointReachable: prune the prior endpoints, then emit the current set
+	// so an endpoint removed from config stops appearing.
+	for name, row := range prior.endpoints {
+		m.ClusterValidatorEndpointReachable.DeleteLabelValues(
+			m.WithDefaultLabelValues(name, row.critical)...)
+	}
+	for name, ep := range s.Endpoints {
+		crit := strconv.FormatBool(ep.Critical)
+		m.ClusterValidatorEndpointReachable.
+			WithLabelValues(m.WithDefaultLabelValues(name, crit)...).
+			Set(boolToFloat(ep.Reachable))
+		current.endpoints[name] = clusterValidatorRow{critical: crit}
+	}
+
+	// NetpolPairPassed: directional — up to 4 series per pair
+	// (direction × policy_side). Prune the prior run's tuples, then emit and
+	// record the current ones so a pair removed from config stops appearing.
+	for name, row := range prior.netpolPairs {
+		for _, side := range row.sides {
+			m.ClusterValidatorNetpolPairPassed.DeleteLabelValues(
+				m.WithDefaultLabelValues(name, row.critical, side.direction, side.policySide)...)
+		}
+	}
+	for name, pair := range s.NetpolPairs {
+		crit := strconv.FormatBool(pair.Critical)
+		sides := make([]clusterValidatorNetpolSide, 0, len(pair.Directions)*2)
+		for direction, d := range pair.Directions {
+			m.ClusterValidatorNetpolPairPassed.
+				WithLabelValues(m.WithDefaultLabelValues(
+					name, crit, direction, clusterValidatorPolicySideEgress)...).
+				Set(boolToFloat(d.EgressAllowed))
+			m.ClusterValidatorNetpolPairPassed.
+				WithLabelValues(m.WithDefaultLabelValues(
+					name, crit, direction, clusterValidatorPolicySideIngress)...).
+				Set(boolToFloat(d.IngressAllowed))
+			sides = append(sides,
+				clusterValidatorNetpolSide{direction: direction, policySide: clusterValidatorPolicySideEgress},
+				clusterValidatorNetpolSide{direction: direction, policySide: clusterValidatorPolicySideIngress})
+		}
+		current.netpolPairs[name] = clusterValidatorNetpolRow{critical: crit, sides: sides}
+	}
+
+	m.clusterValidatorLastEmitted = current
+}
+
+// ResetClusterValidatorMetrics drops every emitted cluster-validator
+// series and resets the cluster-level gauges to zero. Called by the agent when
+// it observes the explicit cluster-validator-metrics-reset ConfigMap — an
+// operator-initiated one-shot signal to clear the metrics to baseline.
+// Deleting the summary ConfigMap does NOT trigger this: last-known-good is
+// preserved on delete.
+func (m *Metrics) ResetClusterValidatorMetrics() {
+	if m == nil {
+		return
+	}
+	m.clusterValidatorMu.Lock()
+	defer m.clusterValidatorMu.Unlock()
+
+	m.pruneClusterValidatorEmitted()
+
+	// Re-emit the init-to-zero baseline so /metrics doesn't go quiet on the
+	// cluster-validator gauges.
+	m.emitClusterValidatorBaseline()
+}
+
+// pruneClusterValidatorEmitted deletes every series recorded in
+// clusterValidatorLastEmitted (the prior run, or the init-to-zero
+// baseline). Caller must hold clusterValidatorMu.
+func (m *Metrics) pruneClusterValidatorEmitted() {
+	prior := m.clusterValidatorLastEmitted
+	if prior == nil {
+		return
+	}
+	m.ClusterValidatorReady.DeleteLabelValues(m.WithDefaultLabelValues()...)
+	m.ClusterValidatorLastRunTimestamp.DeleteLabelValues(m.WithDefaultLabelValues()...)
+	m.ClusterValidatorLastRunDuration.DeleteLabelValues(m.WithDefaultLabelValues()...)
+	for check := range prior.checks {
+		m.ClusterValidatorCheckStatus.DeleteLabelValues(m.WithDefaultLabelValues(check)...)
+	}
+	for name, row := range prior.endpoints {
+		m.ClusterValidatorEndpointReachable.DeleteLabelValues(
+			m.WithDefaultLabelValues(name, row.critical)...)
+	}
+	for name, row := range prior.netpolPairs {
+		for _, side := range row.sides {
+			m.ClusterValidatorNetpolPairPassed.DeleteLabelValues(
+				m.WithDefaultLabelValues(name, row.critical, side.direction, side.policySide)...)
+		}
+	}
+}
+
+// emitClusterValidatorBaseline sets the fixed-cardinality cluster-validator
+// gauges to 0 so they appear on the first Prometheus scrape (same "absent
+// metric" pattern as the other init-to-zero gauges), and records the emitted
+// check keys in clusterValidatorLastEmitted. Each real run updates these series
+// in place. Caller must hold clusterValidatorMu (NewDefaultMetrics runs
+// single-threaded at construction).
+func (m *Metrics) emitClusterValidatorBaseline() {
+	m.ClusterValidatorReady.WithLabelValues(m.WithDefaultLabelValues()...).Set(0)
+	m.ClusterValidatorLastRunTimestamp.WithLabelValues(m.WithDefaultLabelValues()...).Set(0)
+	m.ClusterValidatorLastRunDuration.WithLabelValues(m.WithDefaultLabelValues()...).Set(0)
+
+	baseline := newClusterValidatorEmittedSet()
+	for _, check := range clusterValidatorCheckKeys() {
+		m.ClusterValidatorCheckStatus.WithLabelValues(m.WithDefaultLabelValues(check)...).Set(0)
+		baseline.checks[check] = struct{}{}
+	}
+	m.clusterValidatorLastEmitted = baseline
+}
+
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }

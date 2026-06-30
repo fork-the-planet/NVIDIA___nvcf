@@ -72,6 +72,13 @@ spec:
                       fieldPath: metadata.namespace
                 - name: VALIDATOR_CONFIG_NAME
                   value: {{ $cv.configMapName | quote }}
+                # Namespace the NVCA agent watches for the metrics summary; kept
+                # separate from the config namespace so a config-namespace
+                # override can't redirect metrics.
+                - name: VALIDATOR_SUMMARY_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
               resources:
                 requests:
                   cpu: {{ $cv.resources.requests.cpu | quote }}

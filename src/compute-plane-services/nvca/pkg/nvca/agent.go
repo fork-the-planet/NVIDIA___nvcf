@@ -1009,6 +1009,19 @@ func (a *Agent) Start(ctx context.Context) error {
 		return err
 	}
 
+	// Start the cluster-validator summary reconciler. This watches the
+	// well-known summary ConfigMap in the operator/validator namespace
+	// and republishes its content as Prometheus metrics on the agent's
+	// /metrics endpoint. Failures here are non-fatal — metrics are an
+	// SLI, not a gate.
+	if a.metrics != nil {
+		validatorNS := resolveValidatorSummaryNamespace()
+		validatorReconciler := NewValidatorSummaryReconciler(k8sclients.K8s, validatorNS, a.metrics)
+		if startErr := validatorReconciler.Start(ctx); startErr != nil {
+			log.WithError(startErr).Warn("cluster-validator summary reconciler failed to start; metrics will be unavailable")
+		}
+	}
+
 	infraOverheadGetter := enforce.NewInfraOverheadGetter(a.FeatureFlagFetcher, a.Config, enforce.GetRuntimeClassK8sClient(k8sclients.K8s))
 
 	log.Info("Configuring backendk8scache")

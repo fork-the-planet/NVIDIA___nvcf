@@ -46,6 +46,7 @@ go_library(
     importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/operator/reconcile",
     visibility = ["//visibility:public"],
     deps = [
+        "//internal/clustervalidator",
         "//pkg/apis/nvcf/v1:nvcf",
         "//pkg/client/clientset/versioned/scheme",
         "//pkg/client/informers/externalversions",
@@ -157,6 +158,7 @@ go_test(
     # fresh execution.
     tags = ["external"],
     deps = [
+        "//internal/clustervalidator",
         "//pkg/apis/nvca/v2beta1",
         "//pkg/apis/nvcf/v1:nvcf",
         "//pkg/client/clientset/versioned/fake",

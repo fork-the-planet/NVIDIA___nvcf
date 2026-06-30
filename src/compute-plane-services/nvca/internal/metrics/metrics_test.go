@@ -31,6 +31,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/clustervalidator"
 	metricsgctypes "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/metrics/gctypes"
 	modelcachetypes "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/metrics/modelcachetypes"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/internal/metrics/workloadtypes"
@@ -2242,4 +2243,188 @@ func TestRecordUpstreamRequestNilSafety(t *testing.T) {
 	var m *Metrics
 	assert.NotPanics(t, func() { m.RecordUpstreamRequest(UpstreamOperationHeartbeat, nil) })
 	assert.NotPanics(t, func() { m.RecordUpstreamRequest(UpstreamOperationHeartbeat, fmt.Errorf("error")) })
+}
+
+// gatherClusterValidatorSeries returns every series for a cluster-validator
+// metric family, so tests can assert which series are exposed.
+func gatherClusterValidatorSeries(t *testing.T, reg *prometheus.Registry, name string) []*promdto.Metric {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == name {
+			return mf.Metric
+		}
+	}
+	return nil
+}
+
+func labelValue(m *promdto.Metric, key string) string {
+	for _, l := range m.Label {
+		if l.GetName() == key {
+			return l.GetValue()
+		}
+	}
+	return ""
+}
+
+func hasLabel(m *promdto.Metric, key string) bool {
+	for _, l := range m.Label {
+		if l.GetName() == key {
+			return true
+		}
+	}
+	return false
+}
+
+// TestClusterValidatorMetrics_BaselineThenUpdateInPlace verifies the gauges
+// start at the init-to-zero baseline and that a real run updates the same
+// series in place. The metrics carry no run_timestamp label, so there is no
+// per-run series churn.
+func TestClusterValidatorMetrics_BaselineThenUpdateInPlace(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	ctx := WithDefaultMetrics(context.Background(), "nca-1", "c1", "g1", "v1", WithRegisterer(reg))
+	m := FromContext(ctx)
+	require.NotNil(t, m)
+	t.Cleanup(func() { m.Destroy() })
+
+	// At init: exactly one baseline series at 0, with no run_timestamp label.
+	ready := gatherClusterValidatorSeries(t, reg, ClusterValidatorReadyMetricName)
+	require.Len(t, ready, 1)
+	assert.False(t, hasLabel(ready[0], "run_timestamp"), "metrics must not carry a run_timestamp label")
+	assert.Equal(t, 0.0, ready[0].GetGauge().GetValue())
+
+	// First real run updates the same series in place.
+	m.SetClusterValidatorSummary(&ClusterValidatorSummary{
+		RanAtUnixSec:    1781175999,
+		DurationSeconds: 90.8,
+		VerdictReady:    true,
+		Checks: map[string]bool{
+			"control_plane": true,
+			"smb_csi":       true,
+		},
+		Endpoints: map[string]ClusterValidatorEndpoint{
+			"NGC API": {Reachable: true, Critical: true},
+		},
+	})
+
+	ready = gatherClusterValidatorSeries(t, reg, ClusterValidatorReadyMetricName)
+	require.Len(t, ready, 1, "ready stays a single series, updated in place")
+	assert.False(t, hasLabel(ready[0], "run_timestamp"))
+	assert.Equal(t, 1.0, ready[0].GetGauge().GetValue())
+
+	// LastRunTimestamp exposes the run time as a value (not a label).
+	lrt := gatherClusterValidatorSeries(t, reg, ClusterValidatorLastRunTimestampMetricName)
+	require.Len(t, lrt, 1)
+	assert.Equal(t, float64(1781175999), lrt[0].GetGauge().GetValue())
+}
+
+// TestClusterValidatorMetrics_RunUpdatesInPlaceAndPrunes confirms a new run
+// overwrites the fixed gauges in place (no accumulation) and prunes
+// config-driven series the new run no longer reports.
+func TestClusterValidatorMetrics_RunUpdatesInPlaceAndPrunes(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	ctx := WithDefaultMetrics(context.Background(), "nca-1", "c1", "g1", "v1", WithRegisterer(reg))
+	m := FromContext(ctx)
+	require.NotNil(t, m)
+	t.Cleanup(func() { m.Destroy() })
+
+	// Run 1: ready, with one configured endpoint.
+	m.SetClusterValidatorSummary(&ClusterValidatorSummary{
+		RanAtUnixSec: 1, VerdictReady: true,
+		Checks:    map[string]bool{"control_plane": true},
+		Endpoints: map[string]ClusterValidatorEndpoint{"NGC API": {Reachable: true, Critical: true}},
+	})
+	// Run 2: not ready, endpoint removed from config.
+	m.SetClusterValidatorSummary(&ClusterValidatorSummary{
+		RanAtUnixSec: 2, VerdictReady: false,
+		Checks: map[string]bool{"control_plane": false},
+	})
+
+	ready := gatherClusterValidatorSeries(t, reg, ClusterValidatorReadyMetricName)
+	require.Len(t, ready, 1, "ready is a single series updated in place")
+	assert.Equal(t, 0.0, ready[0].GetGauge().GetValue(), "in-place update reflects the latest run")
+
+	assert.Empty(t, gatherClusterValidatorSeries(t, reg, ClusterValidatorEndpointReachableMetricName),
+		"an endpoint removed from config must be pruned")
+}
+
+// TestClusterValidatorMetrics_ResetRestoresBaseline confirms the explicit
+// reset returns the gauges to the init-to-zero baseline.
+func TestClusterValidatorMetrics_ResetRestoresBaseline(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	ctx := WithDefaultMetrics(context.Background(), "nca-1", "c1", "g1", "v1", WithRegisterer(reg))
+	m := FromContext(ctx)
+	require.NotNil(t, m)
+	t.Cleanup(func() { m.Destroy() })
+
+	m.SetClusterValidatorSummary(&ClusterValidatorSummary{
+		RanAtUnixSec: 1, VerdictReady: true,
+		Checks: map[string]bool{"control_plane": true},
+	})
+	m.ResetClusterValidatorMetrics()
+
+	ready := gatherClusterValidatorSeries(t, reg, ClusterValidatorReadyMetricName)
+	require.Len(t, ready, 1, "reset must restore a single baseline series")
+	assert.Equal(t, 0.0, ready[0].GetGauge().GetValue())
+}
+
+// TestClusterValidatorCheckKeysSync guards the two hand-maintained check-key
+// lists against drift: the init-to-zero baseline in metrics
+// (clusterValidatorCheckKeys) must expose exactly the same checks the validator
+// emits (clustervalidator.AllCheckKeys). If they diverge, the baseline would
+// initialize a different set than real runs produce — a silent metric gap.
+func TestClusterValidatorCheckKeysSync(t *testing.T) {
+	assert.ElementsMatch(t, clustervalidator.AllCheckKeys, clusterValidatorCheckKeys(),
+		"clusterValidatorCheckKeys() must match clustervalidator.AllCheckKeys; "+
+			"when adding a CheckKey* constant, update both lists")
+}
+
+// TestClusterValidatorMetrics_NetpolDirectionalSeries confirms each pair
+// emits one series per (direction, policy_side) carrying that side's
+// allow/deny status, and that the prior run's tuples are pruned.
+func TestClusterValidatorMetrics_NetpolDirectionalSeries(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	ctx := WithDefaultMetrics(context.Background(), "nca-1", "c1", "g1", "v1", WithRegisterer(reg))
+	m := FromContext(ctx)
+	require.NotNil(t, m)
+	t.Cleanup(func() { m.Destroy() })
+
+	m.SetClusterValidatorSummary(&ClusterValidatorSummary{
+		RanAtUnixSec: 1, VerdictReady: false,
+		NetpolPairs: map[string]ClusterValidatorNetpolPair{
+			"agent-to-api": {
+				Passed:   false,
+				Critical: true,
+				Directions: map[string]ClusterValidatorNetpolDirection{
+					"a_to_b": {EgressAllowed: true, IngressAllowed: true},
+					"b_to_a": {EgressAllowed: true, IngressAllowed: false},
+				},
+			},
+		},
+	})
+
+	series := gatherClusterValidatorSeries(t, reg, ClusterValidatorNetpolPairPassedMetricName)
+	require.Len(t, series, 4, "one series per direction × policy_side")
+
+	type key struct{ direction, side string }
+	got := make(map[key]float64, 4)
+	for _, s := range series {
+		assert.Equal(t, "agent-to-api", labelValue(s, ClusterValidatorNetpolPairLabel))
+		assert.Equal(t, "true", labelValue(s, ClusterValidatorCriticalLabel))
+		assert.False(t, hasLabel(s, "run_timestamp"), "netpol series must not carry a run_timestamp label")
+		got[key{labelValue(s, ClusterValidatorDirectionLabel), labelValue(s, ClusterValidatorPolicySideLabel)}] =
+			s.GetGauge().GetValue()
+	}
+	assert.Equal(t, 1.0, got[key{"a_to_b", "egress"}])
+	assert.Equal(t, 1.0, got[key{"a_to_b", "ingress"}])
+	assert.Equal(t, 1.0, got[key{"b_to_a", "egress"}])
+	assert.Equal(t, 0.0, got[key{"b_to_a", "ingress"}], "b_to_a ingress is the blocked side")
+
+	// A later run that drops the pair must prune every directional series.
+	m.SetClusterValidatorSummary(&ClusterValidatorSummary{
+		RanAtUnixSec: 2, VerdictReady: true,
+	})
+	assert.Empty(t, gatherClusterValidatorSeries(t, reg, ClusterValidatorNetpolPairPassedMetricName),
+		"netpol series from the prior run must be pruned when the pair is gone")
 }

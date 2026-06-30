@@ -1229,6 +1229,115 @@ sum by (http_status) (rate(nvca_upstream_request_total{operation="heartbeat", st
 
 ---
 
+## Cluster-Validator Metrics
+
+The cluster-validator runs as a short-lived process (init container + CronJob) so it cannot serve a `/metrics` endpoint directly. Instead, it writes a structured summary to a well-known ConfigMap at the end of every run, and the NVCA agent's long-lived `/metrics` endpoint republishes the values as gauges. The fixed-cardinality gauges are updated in place on each new ConfigMap update, so a run does not mint a fresh series set (no TSDB churn). Config-driven series (per-endpoint and per-netpol-pair) can come and go as the customer changes their network checks; the agent prunes any such series that the latest run no longer reports. The run time itself is exposed as the value of `nvca_cluster_validator_last_run_timestamp_seconds`, not as a label.
+
+### `nvca_cluster_validator_ready`
+
+Overall verdict for the latest cluster-validator run. **This is the load-bearing SLI metric** for cluster-readiness alerting.
+
+- **Type**: Gauge
+- **Value**: 1 if the run passed all critical checks (NVCF-Ready), 0 otherwise (NVCF-Not-Ready)
+- **Labels**: default labels only (initialized to 0 until the first run completes)
+
+### `nvca_cluster_validator_check_status`
+
+Per-check status from the latest run. The check set is fixed (~10 entries; see `CheckKey*` constants in `internal/clustervalidator/summary.go`).
+
+- **Type**: Gauge
+- **Value**: 1 = passed, 0 = failed (or not-run; the `check` label is omitted entirely when a check was skipped)
+- **Labels**: default labels + `check`
+
+> **Alerting caveat — absent vs. zero for optional checks.** Three checks are
+> *conditional*: `endpoint_reachability`, `configurable_netpol`, and
+> `netpol_enforcement` only run when a network-checks ConfigMap is configured.
+> They are pre-initialized to `0` in the init-to-zero baseline so they
+> appear on the first scrape, but on the **first real run of a cluster that has
+> no network-checks config** they are pruned and **not re-emitted** — they go
+> *absent*, not `0` (the validator omits a check it didn't run so "not run" is
+> distinguishable from "ran and failed"). Write alerts on these three with an
+> `absent()` guard, not a bare `== 0`, e.g.
+> `absent(nvca_cluster_validator_check_status{check="endpoint_reachability"}) or nvca_cluster_validator_check_status{check="endpoint_reachability"} == 0`.
+> The seven always-run checks (control_plane, worker_nodes_all_ready, webhooks,
+> network_policies_supported, smb_csi, gpu_resources, gpu_operator) are always
+> present and safe to alert on with `== 0`.
+
+### `nvca_cluster_validator_endpoint_reachable`
+
+Per-endpoint reachability for the user-configured `reachability.endpoints` list. Variable cardinality, but pruned on each new run.
+
+- **Type**: Gauge
+- **Value**: 1 if reachable, 0 otherwise
+- **Labels**: default labels + `endpoint` (user-supplied name) + `critical` (`"true"`/`"false"`)
+
+### `nvca_cluster_validator_netpol_pair_passed`
+
+Directional NetworkPolicy coverage for the user-configured `networkPolicies.pairs` list. Each pair emits up to four series — one per `direction` × `policy_side` — so an operator can see exactly which side is blocked rather than just "the pair failed".
+
+- **Type**: Gauge
+- **Value**: 1 if that side allows the traffic, 0 if blocked
+- **Labels**: default labels + `pair` (user-supplied name) + `direction` (`a_to_b`/`b_to_a`) + `policy_side` (`egress` = the source namespace's egress, `ingress` = the destination namespace's ingress) + `critical`
+- **Overall pair coverage**: `min by (pair) (nvca_cluster_validator_netpol_pair_passed)` (1 only when all four sides allow)
+
+> A `0` always means a real policy block. When a direction cannot be evaluated before reaching policy rules (a namespace in the pair does not exist, or an API error occurs), that direction's series are omitted rather than emitted as `0`, so they never misreport a policy block. The pair still fails (`nvca_cluster_validator_check_status{check="configurable_netpol"}` is `0`) and the validator's recommendation names the real cause.
+
+```promql
+# Which side of a pair is blocked?
+nvca_cluster_validator_netpol_pair_passed == 0
+
+# Overall: did each pair pass end-to-end on the latest run?
+min by (pair) (nvca_cluster_validator_netpol_pair_passed)
+```
+
+### `nvca_cluster_validator_last_run_timestamp_seconds`
+
+Unix timestamp (seconds) of the latest cluster-validator run. The canonical staleness signal — alert on `time() - <metric> > <threshold>` to catch a validator pod that has stopped running entirely.
+
+- **Type**: Gauge
+- **Labels**: default labels only
+
+### `nvca_cluster_validator_last_run_duration_seconds`
+
+Wall-clock duration of the latest run.
+
+- **Type**: Gauge
+- **Labels**: default labels only
+
+### Example PromQL
+
+```promql
+# Current SLI
+nvca_cluster_validator_ready
+
+# Which checks regressed between the last two runs?
+( nvca_cluster_validator_check_status offset 3h ) - nvca_cluster_validator_check_status
+
+# Alert: any critical endpoint unreachable on the latest run
+nvca_cluster_validator_endpoint_reachable{critical="true"} == 0
+
+# Alert: validator hasn't run in 6h (CronJob or pod stuck).
+# The `> 0` guard excludes the "never ran" baseline (the metric is 0 until the
+# first run); without it the alert fires immediately on a fresh deployment,
+# since time() - 0 is always far greater than the threshold.
+(time() - nvca_cluster_validator_last_run_timestamp_seconds > 21600)
+  and nvca_cluster_validator_last_run_timestamp_seconds > 0
+```
+
+### Edge cases
+
+| Scenario | Effect on metrics |
+|---|---|
+| Agent boots before any validator run | Fixed-cardinality gauges at 0. No config-driven (endpoint/netpol) series until first run. |
+| Agent restart after a successful run | Reconciler's initial List delivers an Add event; metrics populated immediately. |
+| Validator pod panics mid-run | ConfigMap not updated; last-good metrics retained. Operator detects via `_last_run_timestamp_seconds` staleness. |
+| Summary ConfigMap deleted | Last-good metrics **preserved** — an accidental delete (kubectl, GC sweep, reinstall) must not wipe the SLI. Genuine staleness is caught by the `_last_run_timestamp_seconds` alert. |
+| Explicit metrics reset requested | Create a ConfigMap named `cluster-validator-metrics-reset` in the summary namespace. The agent resets all fixed gauges to the zero baseline (and prunes config-driven series) and then deletes that ConfigMap (consumes the one-shot signal). |
+| Malformed JSON / unknown schemaVersion | Last-good metrics preserved (no transient blip surfaces as SLI failure). |
+| Endpoint removed from customer config | Its `_endpoint_reachable` series pruned on next run; new endpoints appear. |
+
+---
+
 ## Metric Cardinality
 
 The following metrics have dynamic cardinality based on cluster configuration:
@@ -1251,6 +1360,7 @@ The following metrics have dynamic cardinality based on cluster configuration:
   - Orphaned resource cleanup: number of resource types × status values (low, typically 2-4 series)
   - Cleaner runs: number of cleaner names × status values (low, typically 2-4 series)
 - **Cluster attribute metrics**: 1 series per cluster (Kata runtime isolation enabled/disabled)
+- **Cluster-validator metrics**: fixed-cardinality vectors (`nvca_cluster_validator_ready`, `_last_run_timestamp_seconds`, `_last_run_duration_seconds`) yield 1 series each and are updated in place on every run (no per-run churn). `_check_status` yields ~10 series (one per built-in check). `_endpoint_reachable` is bounded by the customer's `networkChecks` config (typically <20 entries); `_netpol_pair_passed` is bounded by 4 × the number of configured pairs (direction × policy_side). Config-driven series are pruned when the latest run no longer reports them.
 - **Upstream request metric** (`nvca_upstream_request_total`): 6 series fixed (3 operations × 2 statuses, pre-initialized)
 - **Scheduler workload count** (`nvca_scheduler_workload_count`): 4 series fixed (2 schedulers × 2 workload kinds, pre-initialized)
 
