@@ -24,6 +24,8 @@ navigation:
         path: ../../docs/v0.6.0-rc/image-mirroring.md
       - page: Helmfile Installation
         path: ../../docs/v0.6.0-rc/helmfile-installation.md
+      - page: CSP End-to-End Example
+        path: ../../docs/v0.6.0-rc/csp-end-to-end-example-installation.md
       - section: Standalone Deployment
         skip-slug: true
         contents:
