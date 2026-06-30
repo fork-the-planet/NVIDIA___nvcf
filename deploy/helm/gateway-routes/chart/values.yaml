@@ -65,6 +65,17 @@ nvcfGatewayRoutes:
         namespace: nvcf
         port: 8080
       routeAnnotations: {}
+      # Optional GRPCRoute for worker-facing NVCF API gRPC traffic.
+      grpc:
+        enabled: false
+        name: nvcf-api-grpc
+        hostnames:
+          - "api.{{ .Values.nvcfGatewayRoutes.domain }}"
+        backend:
+          name: api
+          namespace: nvcf
+          port: 9090
+        routeAnnotations: {}
     
     # NVCT API HTTPRoute
     nvctApi:
@@ -77,6 +88,17 @@ nvcfGatewayRoutes:
         namespace: nvcf
         port: 8080
       routeAnnotations: {}
+      # Optional GRPCRoute for worker-facing NVCT API gRPC traffic.
+      grpc:
+        enabled: false
+        name: nvct-api-grpc
+        hostnames:
+          - "tasks.{{ .Values.nvcfGatewayRoutes.domain }}"
+        backend:
+          name: nvct-api
+          namespace: nvcf
+          port: 9090
+        routeAnnotations: {}
 
     # API Keys HTTPRoute
     apiKeys:

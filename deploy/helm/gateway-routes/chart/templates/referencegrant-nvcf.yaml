@@ -48,10 +48,12 @@ spec:
     - group: gateway.networking.k8s.io
       kind: TCPRoute
       namespace: {{ .Values.nvcfGatewayRoutes.gateways.grpc.namespace }}
+    - group: gateway.networking.k8s.io
+      kind: GRPCRoute
+      namespace: {{ .Values.nvcfGatewayRoutes.gateways.shared.namespace }}
   # TO Services in nvcf namespace
   to:
     - group: ""
       kind: Service
 {{- end }}
-
 

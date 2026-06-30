@@ -58,6 +58,8 @@ Important settings to review before deployment:
 - `nvcfGatewayRoutes.gateways.grpc.*` for the TCP Gateway name, namespace, and listener
 - `nvcfGatewayRoutes.gateways.nats.*` for the NATS TCP Gateway name, namespace, and listener
 - `nvcfGatewayRoutes.routes.<route>.enabled` to toggle individual routes
+- `nvcfGatewayRoutes.routes.nvcfApi.grpc.enabled` and
+  `nvcfGatewayRoutes.routes.nvctApi.grpc.enabled` to expose API gRPC routes
 - `nvcfGatewayRoutes.routes.<http-route>.hostnames` to override the templated HTTP route hostnames
 - `nvcfGatewayRoutes.routes.<route>.backend.{name,namespace,port}` to point a route at the correct backend service
 - `nvcfGatewayRoutes.routes.<route>.routeAnnotations` to add annotations consumed by external controllers (e.g. external-dns, cert-manager)
@@ -72,7 +74,9 @@ Enabled `HTTPRoute` entries must not share a resolved hostname because each `HTT
 | Route | Kind | Default hostname | Backend |
 | --- | --- | --- | --- |
 | `nvcfApi` | HTTPRoute | `api.<domain>` | `api.nvcf:8080` |
+| `nvcfApi.grpc` | GRPCRoute (disabled by default) | `api.<domain>` | `api.nvcf:9090` |
 | `nvctApi` | HTTPRoute | `tasks.<domain>` | `nvct-api.nvcf:8080` |
+| `nvctApi.grpc` | GRPCRoute (disabled by default) | `tasks.<domain>` | `nvct-api.nvcf:9090` |
 | `apiKeys` | HTTPRoute | `api-keys.<domain>` | `api-keys.api-keys:8080` |
 | `invocation` | HTTPRoute | `*.invocation.<domain>` and `invocation.<domain>` | `invocation.nvcf:8080` |
 | `llmApiGateway` | HTTPRoute | `llm.<domain>` | `llm-api-gateway.nvcf:8080` |
