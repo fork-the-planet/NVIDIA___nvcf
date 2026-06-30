@@ -22,6 +22,7 @@ load("//rules/oci:transition.bzl", "multi_arch")
 
 DEFAULT_BASE = "@ubuntu_noble"
 DEFAULT_PLATFORMS = [
+    "//platforms:linux_arm64",
     "//platforms:linux_x86_64",
 ]
 

@@ -49,3 +49,7 @@ build:debug --compilation_mode=dbg
 build:debug -s
 build:release --compilation_mode=opt
 build:release --strip=always
+
+# Build pure-Go static binaries (CGO_ENABLED=0) so cross-compilation to
+# linux/arm64 works for the multi-arch image index. Matches the umbrella .bazelrc.
+build --@rules_go//go/config:pure
