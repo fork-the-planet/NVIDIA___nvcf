@@ -159,6 +159,11 @@ Use `GATEWAY_ADDR` as `global.domain` in your environment file. Use the Gateway
 names, namespaces, and listener names from Gateway quickstart in
 `ingress.gatewayApi.gateways`.
 
+Split or multi-cluster gRPC invocation is not enabled by default. If you need
+workers in a compute cluster to reach grpc-proxy in the control-plane cluster,
+complete [gRPC Invocation Enablement](./grpc-invocation-enablement.md) before
+you deploy or sync the control plane.
+
 <Warning>
 The Gateway address is embedded throughout your deployment. The `domain` value
 in your environment file, the Gateway API HTTPRoutes/TCPRoutes, and service

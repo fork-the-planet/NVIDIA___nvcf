@@ -8,6 +8,10 @@ In self-hosted deployments, the gRPC route is exposed on the Gateway TCP
 listener. See [Gateway Routing](./gateway-routing.md) for listener and DNS
 configuration.
 
+Self-hosted split or multi-cluster deployments require additional enablement
+before workers can reach the grpc-proxy callback endpoint. See
+[gRPC Invocation Enablement](./grpc-invocation-enablement.md).
+
 ## Invocation Path
 
 ![gRPC invocation path](images/nvcf-grpc-invocation-path.svg)

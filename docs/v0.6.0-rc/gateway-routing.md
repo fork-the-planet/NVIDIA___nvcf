@@ -164,6 +164,34 @@ spec:
 EOF
 ```
 
+### gRPC worker callback listener
+
+Split or multi-cluster gRPC invocation needs an additional TCP listener for the
+worker callback path. Add this listener only when enabling split or
+multi-cluster gRPC invocation.
+
+```yaml
+  - name: worker-tcp
+    protocol: TCP
+    port: 10086
+    allowedRoutes:
+      namespaces:
+        from: Selector
+        selector:
+          matchLabels:
+            nvcf/platform: "true"
+```
+
+The listener name must match
+`ingress.gatewayApi.routes.grpcWorker.listenerName`.
+
+<Warning>
+The `grpcWorker` route is beta in 0.6.0. Enable it only when the control-plane
+grpc-proxy runs one replica and the grpc-proxy HPA is disabled. Multiple
+grpc-proxy replicas are not supported by this shared TCPRoute.
+
+</Warning>
+
 ### Capture Gateway values
 
 Wait for the Gateway to be programmed and export the values used by the install
@@ -252,7 +280,8 @@ There is no service mesh requirement. Envoy Gateway is not a service mesh. It is
 Any Gateway API implementation you choose must support:
 
 1. `HTTPRoute` for HTTP/HTTPS routing with hostname matching
-2. `TCPRoute` for gRPC and NATS routing (requires experimental Gateway API CRDs)
+2. `TCPRoute` for gRPC invocation, optional split or multi-cluster gRPC
+   invocation, and NATS routing (requires experimental Gateway API CRDs)
 3. Cross-namespace routing for routes in one namespace referencing services in another
 
 <Warning>
@@ -271,7 +300,8 @@ To use a different Gateway API implementation instead of Envoy Gateway:
 3. Create a `GatewayClass` for your controller
 
 4. Create a `Gateway` with `http` (port 80), `tcp` (port 10081), and `nats`
-   (port 4222) listeners
+   (port 4222) listeners. Add `worker-tcp` (port 10086) only when enabling
+   split or multi-cluster gRPC invocation.
 
 5. Update your install configuration to reference your Gateway:
 
@@ -310,7 +340,8 @@ If you have a specific requirement that prevents using Gateway API, you would ne
 1. Disable `nvcf-gateway-routes` in your helmfile
 2. Create your own Ingress or Service resources for each NVCF service
 3. Configure hostname routing manually
-4. Set up TCP load balancers for gRPC on port 10081 and NATS on port 4222
+4. Set up TCP load balancers for gRPC on port 10081, optional split or
+   multi-cluster gRPC invocation on port 10086, and NATS on port 4222
 
 ## Gateway Architecture
 
@@ -327,6 +358,8 @@ These resources must be created manually before deploying the control plane:
 - `GatewayClass` resource
 - `Gateway` resource with `http` (port 80), `tcp` (port 10081), and `nats`
   (port 4222) listeners
+- Optional `worker-tcp` (port 10086) listener for split or multi-cluster gRPC
+  invocation
 
 ### Resources created by nvcf-gateway-routes
 
@@ -336,6 +369,8 @@ When you deploy the control plane via helmfile, the `nvcf-gateway-routes` chart 
 - Optional LLM invocation HTTPRoute when the `llmInvocation` route is enabled
 - Optional Vanity Gateway HTTPRoute only when the stack package includes the addon and the `vanityGateway` route is enabled
 - `TCPRoute` for gRPC
+- Optional `TCPRoute` for split or multi-cluster gRPC invocation when the
+  `grpcWorker` route is enabled
 - Optional `TCPRoute` for NATS when the `nats` route is enabled
 - `ReferenceGrants` for cross-namespace routing permissions
 
@@ -351,6 +386,7 @@ These routes attach to the Gateway you prepared in [Gateway quickstart](./gatewa
 | LLM Invocation | `llm.invocation.<domain>` | 80 | OpenAI-compatible LLM invocation routes such as `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` |
 | Vanity Gateway | `vanity.<domain>` | 80 | Optional vanity host/path routing to `vanity-gateway.nvcf:8080`, only in stack packages that include the addon |
 | gRPC | N/A (TCP routing, no hostname matching) | 10081 | gRPC function invocations |
+| gRPC worker callback | N/A (TCP routing, no hostname matching) | 10086 | HTTP/1 CONNECT callback from workers to grpc-proxy when the beta `grpcWorker` route is enabled |
 | NATS | N/A (TCP routing, no hostname matching) | 4222 | NVCA messaging when the NATS route is enabled |
 
 <Note>

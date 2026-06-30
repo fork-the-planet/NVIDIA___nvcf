@@ -25,6 +25,8 @@ navigation:
         path: ../../docs/user/image-mirroring.md
       - page: Helmfile Installation
         path: ../../docs/user/helmfile-installation.md
+      - page: gRPC Invocation Enablement
+        path: ../../docs/user/grpc-invocation-enablement.md
       - section: Standalone Deployment
         skip-slug: true
         contents:
