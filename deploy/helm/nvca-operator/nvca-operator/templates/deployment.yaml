@@ -60,6 +60,12 @@ spec:
       terminationGracePeriodSeconds: {{ ((.Values.gracefulShutdown).terminationGracePeriodSeconds) | default 600 }}
       {{- if (include "nvcaop.clusterValidatorEnabled" .) }}
       {{- $cv := include "nvcaop.clusterValidatorConfig" . | fromYaml }}
+      # This init container runs under the operator ServiceAccount
+      # (serviceAccountName above), which already has configmaps
+      # get/create/update in this namespace via role.yaml, so its summary
+      # write succeeds. The separate cluster-validator ServiceAccount and
+      # ClusterRole in rbac.yaml grant the same configmaps verbs for the
+      # CronJob, which runs as that SA.
       initContainers:
       - name: cluster-validator
         image: {{ include "nvcaop.clusterValidatorRepository" (dict "imageRepository" $cv.image.repository "defaultRepository" .Values.image.repository) }}:{{ default .Chart.Version $cv.image.tag }}
@@ -71,6 +77,13 @@ spec:
               fieldPath: metadata.namespace
         - name: VALIDATOR_CONFIG_NAME
           value: {{ $cv.configMapName | quote }}
+        # Namespace the NVCA agent watches for the metrics summary; kept
+        # separate from the config namespace so a config-namespace override
+        # can't redirect metrics.
+        - name: VALIDATOR_SUMMARY_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         resources:
           requests:
             cpu: {{ $cv.resources.requests.cpu | quote }}
