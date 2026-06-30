@@ -161,10 +161,16 @@ spec:
             httpGet:
               path: /healthz
               port: http
+            timeoutSeconds: {{ ((.Values.probes).liveness).timeoutSeconds | default 5 }}
+            periodSeconds: {{ ((.Values.probes).liveness).periodSeconds | default 10 }}
+            failureThreshold: {{ ((.Values.probes).liveness).failureThreshold | default 6 }}
           readinessProbe:
             httpGet:
               path: /healthz
               port: http
+            timeoutSeconds: {{ ((.Values.probes).readiness).timeoutSeconds | default 3 }}
+            periodSeconds: {{ ((.Values.probes).readiness).periodSeconds | default 10 }}
+            failureThreshold: {{ ((.Values.probes).readiness).failureThreshold | default 3 }}
           volumeMounts:
             - name: cache
               mountPath: /container_cache
