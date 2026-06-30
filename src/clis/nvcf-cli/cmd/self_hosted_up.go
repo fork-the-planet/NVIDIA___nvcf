@@ -559,14 +559,15 @@ func (r *selfHostedUpRun) createClusterRegistration(stackPath string, p6Start ti
 			})
 		}
 	}
-	resp, err := cc.RegisterCluster(r.ctx, selfhosted.RegisterRequest{
+	registerReq := selfhosted.RegisterRequest{
 		ClusterName:    upClusterName,
 		NCAID:          registration.NCAID,
 		Region:         registration.Region,
 		JWKS:           jwks,
 		OIDCIssuer:     oidcIssuer,
 		IdentitySource: registration.IdentitySource,
-	})
+	}
+	resp, err := r.registerClusterWithRetry(cc, registerReq)
 	if err != nil {
 		wrapped := fmt.Errorf("cluster register: %w", err)
 		r.emitFailure(selfhosted.Failure{Phase: selfhosted.PhaseRegister, Err: wrapped, HTTPStatus: httpStatusFromErr(err)}, p6Start)
@@ -575,6 +576,71 @@ func (r *selfHostedUpRun) createClusterRegistration(stackPath string, p6Start ti
 	registration.ClusterID = resp.ClusterID
 	registration.ClusterGroupID = resp.ClusterGroupID
 	return registration, r.writeRegistrationValues(stackPath, icmsURL, registration, p6Start)
+}
+
+// registerClusterWithRetry implements the SRD §9.4 one-shot 401 auto-remint
+// contract for the register phase: if SIS returns 401, clear the cached token
+// (preserving the OIDC fingerprint), re-mint via init, and retry the register
+// call exactly once. The second 401 (or any non-401 error) is returned to the
+// caller so the existing phase_failed emission path handles it.
+//
+// The retry is suppressed when --token=$JWT was supplied: the operator chose
+// the token explicitly and a silent re-mint would invalidate that intent.
+// Per SRD §9.4 final paragraph, no HTTP 429 backoff is applied here — API Keys
+// rate-limiting is handled by authGatePhase5.
+func (r *selfHostedUpRun) registerClusterWithRetry(cc selfhosted.ClusterClient, req selfhosted.RegisterRequest) (*selfhosted.RegisterResponse, error) {
+	resp, err := cc.RegisterCluster(r.ctx, req)
+	if err == nil {
+		return resp, nil
+	}
+	if !isHTTP401Err(err) {
+		return nil, err
+	}
+	if selfHostedToken != "" {
+		// Operator supplied --token=$JWT; do not silently re-mint and override
+		// their explicit choice. Surface the 401 to the existing failure path.
+		return nil, err
+	}
+	_ = r.sink.Emit(r.ctx, progress.LastProgress{
+		Num:     6,
+		Detail:  "register returned 401; clearing cached token and retrying after re-init",
+		At:      time.Now().UTC(),
+		Context: kubectxFor(6),
+	})
+	sm := state.NewStateManager()
+	if loadErr := sm.Load(); loadErr == nil {
+		sm.ClearTokens()
+		_ = sm.Save()
+	}
+	if remintErr := runSelfHostedInit(r.ctx); remintErr != nil {
+		return nil, fmt.Errorf("re-mint admin token after 401: %w", remintErr)
+	}
+	retryCC, err := newClusterClientForSelfHosted(resolveICMSURL(selfHostedICMSURL))
+	if err != nil {
+		return nil, fmt.Errorf("rebuild cluster client after token re-mint: %w", err)
+	}
+	defer retryCC.Close()
+	return retryCC.RegisterCluster(r.ctx, req)
+}
+
+// isHTTP401Err returns true when err looks like an HTTP 401 from the SIS
+// client. httpStatusFromErr does not recognize the client's "SIS API error %d"
+// format, so we match both that shape and the generic "401" token explicitly.
+func isHTTP401Err(err error) bool {
+	if err == nil {
+		return false
+	}
+	if httpStatusFromErr(err) == 401 {
+		return true
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "SIS API error 401") {
+		return true
+	}
+	if strings.Contains(msg, " 401 ") || strings.HasSuffix(msg, " 401") {
+		return true
+	}
+	return false
 }
 
 func (r *selfHostedUpRun) writeRegistrationValues(stackPath, icmsURL string, registration upClusterRegistration, p6Start time.Time) error {

@@ -33,8 +33,14 @@ import (
 // newClusterClientForSelfHosted is a package-level seam so unit tests can
 // inject a fake without hitting a real ICMS endpoint. Production callers use the
 // default factory; tests assign a closure that returns a fakeClusterClient.
+//
+// The factory threads selfHostedToken (the --token flag) into the underlying
+// *client.Config. When --token is supplied by a CI/non-interactive caller, the
+// admin JWT must be used as the Bearer on cluster-management requests. Without
+// this plumbing the SIS register call would race the auth-gate and hit /v1
+// with no Authorization header.
 var newClusterClientForSelfHosted = func(icmsURL string) (selfhosted.ClusterClient, error) {
-	return selfhosted.NewClusterClient(icmsURL)
+	return selfhosted.NewClusterClientWithToken(icmsURL, selfHostedToken)
 }
 
 // loadClusterIdentityConfig is a package-level seam so unit tests can verify

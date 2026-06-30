@@ -519,7 +519,7 @@ func TestComputePlaneRegisterWritesNVCAValuesAndHandoffCommands(t *testing.T) {
 
 	require.NoError(t, rootCmd.Execute())
 
-	valuesPath := filepath.Join(stackDir, "out", "gpu-a-nvca-values.yaml")
+	valuesPath := filepath.Join(stackDir, "out", "gpu-a-register-values.yaml")
 	body, err := os.ReadFile(valuesPath)
 	require.NoError(t, err)
 	values := string(body)
@@ -686,6 +686,51 @@ releases:
 		assert.Empty(t, chart)
 		assert.Empty(t, version)
 		assert.Contains(t, err.Error(), "compute-plane chart reference not found in stack")
+	})
+}
+
+func TestReadNVCAValuesMetadata(t *testing.T) {
+	t.Run("clean values file decodes successfully", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "gpu-a-nvca-values.yaml")
+		body := "clusterName: gpu-a\nclusterID: cid-123\nclusterGroupID: cg-456\nncaID: nvcf-default\nregion: us-west-1\n"
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+
+		meta, err := readNVCAValuesMetadata(path)
+		require.NoError(t, err)
+		assert.Equal(t, "gpu-a", meta.ClusterName)
+		assert.Equal(t, "nvcf-default", meta.NCAID)
+	})
+
+	t.Run("lowercase ncaId alias still accepted", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "gpu-b-nvca-values.yaml")
+		body := "clusterName: gpu-b\nncaId: nca-from-values\n"
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+
+		meta, err := readNVCAValuesMetadata(path)
+		require.NoError(t, err)
+		assert.Equal(t, "gpu-b", meta.ClusterName)
+		assert.Equal(t, "nca-from-values", meta.NCAID)
+	})
+
+	t.Run("typo in known field surfaces a decode error", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "typo-nvca-values.yaml")
+		// cluterID is a typo of clusterID; strict decode must reject it
+		// instead of silently producing an empty cluster identity.
+		body := "clusterName: gpu-c\ncluterID: cid-typo\nncaID: nvcf-default\n"
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+
+		_, err := readNVCAValuesMetadata(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cluterID")
+	})
+
+	t.Run("missing file returns a read error", func(t *testing.T) {
+		_, err := readNVCAValuesMetadata(filepath.Join(t.TempDir(), "missing.yaml"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reading values file")
 	})
 }
 

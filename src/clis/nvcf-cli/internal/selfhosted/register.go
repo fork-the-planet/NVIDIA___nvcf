@@ -131,11 +131,23 @@ type clusterClientAdapter struct {
 // NewClusterClient constructs a ClusterClient backed by the production
 // internal/client.Client. If sisURL is empty it falls back to
 // config.BaseHTTPURL loaded from the standard Viper sources (env vars, config
-// file, state file) — the same path used by every other CLI subcommand.
+// file, state file), the same path used by every other CLI subcommand.
 func NewClusterClient(sisURL string) (ClusterClient, error) {
+	return NewClusterClientWithToken(sisURL, "")
+}
+
+// NewClusterClientWithToken is like NewClusterClient but overrides the loaded
+// admin JWT with the supplied token when non-empty. Used by self-hosted up
+// and install when callers pass --token=<jwt> to skip nvcf-cli init in
+// CI/non-interactive flows. An empty token preserves the LoadConfig result so
+// existing behavior is unchanged.
+func NewClusterClientWithToken(sisURL, token string) (ClusterClient, error) {
 	cfg, err := client.LoadConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load client config: %w", err)
+	}
+	if token != "" {
+		cfg.Token = token
 	}
 	c, err := client.NewClient(cfg)
 	if err != nil {

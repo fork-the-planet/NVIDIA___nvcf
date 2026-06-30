@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1407,6 +1408,288 @@ func TestNamespacePodsReadySkipsTerminalPods(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ready)
 	assert.Empty(t, reason)
+}
+
+// sequencedClusterClient is a test double for selfhosted.ClusterClient that
+// returns a programmable sequence of (response, error) pairs from
+// RegisterCluster. It is used to drive the SRD §9.4 401-retry tests.
+type sequencedClusterClient struct {
+	registerCalls   int
+	registerResults []sequencedRegisterResult
+	lastRequest     selfhosted.RegisterRequest
+}
+
+type sequencedRegisterResult struct {
+	resp *selfhosted.RegisterResponse
+	err  error
+}
+
+func (s *sequencedClusterClient) RegisterCluster(_ context.Context, req selfhosted.RegisterRequest) (*selfhosted.RegisterResponse, error) {
+	s.lastRequest = req
+	idx := s.registerCalls
+	s.registerCalls++
+	if idx >= len(s.registerResults) {
+		return nil, fmt.Errorf("sequencedClusterClient: no result for call %d", idx)
+	}
+	r := s.registerResults[idx]
+	return r.resp, r.err
+}
+
+func (s *sequencedClusterClient) DeleteClusterByName(_ context.Context, _, _ string) (int, error) {
+	return 0, nil
+}
+
+func (s *sequencedClusterClient) DeleteCluster(_ context.Context, _ string) error { return nil }
+
+func (s *sequencedClusterClient) Close() error { return nil }
+
+// newRegisterRetryRun builds a minimal selfHostedUpRun suitable for exercising
+// registerClusterWithRetry directly. The sink discards events and ctx is fresh.
+func newRegisterRetryRun() *selfHostedUpRun {
+	return &selfHostedUpRun{
+		ctx:  context.Background(),
+		sink: nullSink{},
+	}
+}
+
+// TestIsHTTP401Err covers the message shapes the SIS client emits on 401 so
+// future client refactors that change the wrapping format trip this guard.
+func TestIsHTTP401Err(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"sis api error format", errors.New("SIS API error 401: unauthorized"), true},
+		{"wrapped sis api error", fmt.Errorf("cluster register: %w", errors.New("SIS API error 401: unauthorized")), true},
+		{"http prefix", errors.New("HTTP 401 unauthorized"), true},
+		{"status prefix", errors.New("status 401"), true},
+		{"403 not 401", errors.New("SIS API error 403: forbidden"), false},
+		{"500 not 401", errors.New("SIS API error 500: internal"), false},
+		{"generic without code", errors.New("connection refused"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isHTTP401Err(tc.err))
+		})
+	}
+}
+
+// TestRegisterClusterWithRetry_First401AutoRecoverySucceeds verifies the
+// SRD §9.4 happy path: when SIS returns 401 on the first attempt, the
+// orchestrator clears the cached token, runs init to re-mint, and retries
+// the register call. The second attempt succeeds and the response is returned.
+func TestRegisterClusterWithRetry_First401AutoRecoverySucceeds(t *testing.T) {
+	// Persist a token so we can observe ClearTokens running.
+	stateDir := t.TempDir()
+	t.Setenv("HOME", stateDir)
+	sm := state.NewStateManager()
+	require.NoError(t, sm.Load())
+	s := sm.GetState()
+	s.Token = "stale-token"
+	s.TokenExpiration = time.Now().Add(time.Hour)
+	s.SelfHostedAuth = &state.SelfHostedAuth{
+		Token:     "stale-token",
+		ExpiresAt: time.Now().Add(time.Hour),
+		Fingerprint: &state.FingerprintRef{
+			IssuerURL:       "https://cp.test",
+			JWKSKid:         "key-1",
+			APIKeysEndpoint: "https://cp.test/api-keys",
+		},
+	}
+	require.NoError(t, sm.Save())
+
+	selfHostedToken = ""
+	t.Cleanup(func() { selfHostedToken = "" })
+
+	initCalls := 0
+	prevInit := runSelfHostedInit
+	t.Cleanup(func() { runSelfHostedInit = prevInit })
+	runSelfHostedInit = func(context.Context) error {
+		initCalls++
+		return nil
+	}
+
+	cc := &sequencedClusterClient{
+		registerResults: []sequencedRegisterResult{
+			{nil, errors.New("SIS API error 401: token revoked")},
+			{&selfhosted.RegisterResponse{ClusterID: "cid-ok", ClusterGroupID: "grp-ok"}, nil},
+		},
+	}
+	prevClientFactory := newClusterClientForSelfHosted
+	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
+	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) {
+		return cc, nil
+	}
+
+	resp, err := newRegisterRetryRun().registerClusterWithRetry(cc, selfhosted.RegisterRequest{ClusterName: "test"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "cid-ok", resp.ClusterID)
+	assert.Equal(t, 2, cc.registerCalls, "register must be retried exactly once after 401")
+	assert.Equal(t, 1, initCalls, "runSelfHostedInit must be invoked once between attempts")
+
+	// ClearTokens must have run: Token field is empty but SelfHostedAuth
+	// fingerprint is preserved.
+	sm2 := state.NewStateManager()
+	require.NoError(t, sm2.Load())
+	s2 := sm2.GetState()
+	assert.Empty(t, s2.Token, "cached Token must be cleared")
+	require.NotNil(t, s2.SelfHostedAuth)
+	require.NotNil(t, s2.SelfHostedAuth.Fingerprint)
+	assert.Equal(t, "key-1", s2.SelfHostedAuth.Fingerprint.JWKSKid, "fingerprint must be preserved across ClearTokens")
+}
+
+func TestRegisterClusterWithRetry_RebuildsClusterClientAfterRemint(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("HOME", stateDir)
+
+	selfHostedToken = ""
+	t.Cleanup(func() { selfHostedToken = "" })
+
+	selfHostedICMSURL = "https://icms.example"
+	t.Cleanup(func() { selfHostedICMSURL = "" })
+
+	initCalls := 0
+	prevInit := runSelfHostedInit
+	t.Cleanup(func() { runSelfHostedInit = prevInit })
+	runSelfHostedInit = func(context.Context) error {
+		initCalls++
+		return nil
+	}
+
+	initialCC := &sequencedClusterClient{
+		registerResults: []sequencedRegisterResult{
+			{nil, errors.New("SIS API error 401: token expired")},
+			{nil, errors.New("stale client reused")},
+		},
+	}
+	retryCC := &sequencedClusterClient{
+		registerResults: []sequencedRegisterResult{
+			{&selfhosted.RegisterResponse{ClusterID: "cid-fresh", ClusterGroupID: "grp-fresh"}, nil},
+		},
+	}
+
+	factoryCalls := 0
+	prevClientFactory := newClusterClientForSelfHosted
+	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
+	newClusterClientForSelfHosted = func(icmsURL string) (selfhosted.ClusterClient, error) {
+		factoryCalls++
+		assert.Equal(t, selfHostedICMSURL, icmsURL)
+		return retryCC, nil
+	}
+
+	resp, err := newRegisterRetryRun().registerClusterWithRetry(initialCC, selfhosted.RegisterRequest{ClusterName: "test"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "cid-fresh", resp.ClusterID)
+	assert.Equal(t, 1, initCalls, "runSelfHostedInit must be invoked once before rebuilding the client")
+	assert.Equal(t, 1, factoryCalls, "retry must rebuild the client so it can read the reminted credential")
+	assert.Equal(t, 1, initialCC.registerCalls, "stale client must not be reused after remint")
+	assert.Equal(t, 1, retryCC.registerCalls, "fresh client must perform the retry")
+}
+
+// TestRegisterClusterWithRetry_Second401IsTerminal verifies that a 401 on the
+// retry attempt is propagated to the caller (so the existing phase_failed
+// emission path runs) and that no third attempt is made.
+func TestRegisterClusterWithRetry_Second401IsTerminal(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("HOME", stateDir)
+
+	selfHostedToken = ""
+	t.Cleanup(func() { selfHostedToken = "" })
+
+	initCalls := 0
+	prevInit := runSelfHostedInit
+	t.Cleanup(func() { runSelfHostedInit = prevInit })
+	runSelfHostedInit = func(context.Context) error {
+		initCalls++
+		return nil
+	}
+
+	cc := &sequencedClusterClient{
+		registerResults: []sequencedRegisterResult{
+			{nil, errors.New("SIS API error 401: unauthorized")},
+			{nil, errors.New("SIS API error 401: still unauthorized")},
+		},
+	}
+	prevClientFactory := newClusterClientForSelfHosted
+	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
+	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) {
+		return cc, nil
+	}
+
+	resp, err := newRegisterRetryRun().registerClusterWithRetry(cc, selfhosted.RegisterRequest{ClusterName: "test"})
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "401", "second 401 must surface to caller")
+	assert.Equal(t, 2, cc.registerCalls, "exactly two register attempts on persistent 401 (no infinite loop)")
+	assert.Equal(t, 1, initCalls, "init must run exactly once between attempts")
+}
+
+// TestRegisterClusterWithRetry_TokenFlagSkipsRetry verifies that when the
+// operator supplied --token=$JWT, a 401 surfaces immediately as a hard
+// failure and no init/remint is invoked. The operator's explicit token must
+// not be silently invalidated by an auto-remint.
+func TestRegisterClusterWithRetry_TokenFlagSkipsRetry(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("HOME", stateDir)
+
+	selfHostedToken = "operator-supplied-jwt"
+	t.Cleanup(func() { selfHostedToken = "" })
+
+	initCalls := 0
+	prevInit := runSelfHostedInit
+	t.Cleanup(func() { runSelfHostedInit = prevInit })
+	runSelfHostedInit = func(context.Context) error {
+		initCalls++
+		return nil
+	}
+
+	cc := &sequencedClusterClient{
+		registerResults: []sequencedRegisterResult{
+			{nil, errors.New("SIS API error 401: unauthorized")},
+		},
+	}
+
+	resp, err := newRegisterRetryRun().registerClusterWithRetry(cc, selfhosted.RegisterRequest{ClusterName: "test"})
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Equal(t, 1, cc.registerCalls, "no retry when --token is supplied")
+	assert.Equal(t, 0, initCalls, "init must not run when operator supplied an explicit token")
+}
+
+// TestRegisterClusterWithRetry_NonAuthErrorIsNotRetried verifies that non-401
+// errors (e.g. 5xx, 409, network errors) propagate to the caller on the first
+// attempt without triggering a retry — the auth-gate contract is 401-only.
+func TestRegisterClusterWithRetry_NonAuthErrorIsNotRetried(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("HOME", stateDir)
+
+	selfHostedToken = ""
+	t.Cleanup(func() { selfHostedToken = "" })
+
+	initCalls := 0
+	prevInit := runSelfHostedInit
+	t.Cleanup(func() { runSelfHostedInit = prevInit })
+	runSelfHostedInit = func(context.Context) error {
+		initCalls++
+		return nil
+	}
+
+	cc := &sequencedClusterClient{
+		registerResults: []sequencedRegisterResult{
+			{nil, errors.New("SIS API error 500: internal server error")},
+		},
+	}
+
+	resp, err := newRegisterRetryRun().registerClusterWithRetry(cc, selfhosted.RegisterRequest{ClusterName: "test"})
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "500")
+	assert.Equal(t, 1, cc.registerCalls, "non-401 errors must not trigger a retry")
+	assert.Equal(t, 0, initCalls, "init must not run for non-401 errors")
 }
 
 func TestEnsureNamespaceWaitsForTerminatingNamespaceBeforeRecreate(t *testing.T) {

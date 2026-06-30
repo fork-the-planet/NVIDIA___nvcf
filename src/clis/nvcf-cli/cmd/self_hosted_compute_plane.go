@@ -18,6 +18,7 @@ limitations under the License.
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -144,14 +145,37 @@ func readNVCAValuesMetadata(path string) (nvcaValuesMetadata, error) {
 	if err != nil {
 		return nvcaValuesMetadata{}, fmt.Errorf("reading values file: %w", err)
 	}
-	var values map[string]any
-	if err := yaml.Unmarshal(body, &values); err != nil {
+	// Strict-decode against the canonical nvca.Values schema (with a lowercase
+	// ncaId alias preserved for backward compatibility) so a typo in a known
+	// field (for example clusterName mistyped as cluterName) surfaces as an
+	// error rather than silently producing an empty cluster identity. The CLI
+	// writes this same schema in writeComputePlaneNVCAValues, so any extra
+	// keys indicate either a typo or a chart override that should live in a
+	// separate helmfile values overlay rather than this file.
+	var values nvcaValuesMetadataDoc
+	decoder := yaml.NewDecoder(bytes.NewReader(body))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&values); err != nil {
 		return nvcaValuesMetadata{}, fmt.Errorf("parsing values file: %w", err)
 	}
 	return nvcaValuesMetadata{
-		ClusterName: stringMapValue(values, "clusterName"),
-		NCAID:       firstNonEmpty(stringMapValue(values, "ncaID"), stringMapValue(values, "ncaId")),
+		ClusterName: values.ClusterName,
+		NCAID:       firstNonEmpty(values.NCAID, values.NCAIDLower),
 	}, nil
+}
+
+// nvcaValuesMetadataDoc is the strict-decode shape for the nvca-operator
+// values file. It mirrors nvca.Values but also accepts the lowercase ncaId
+// alias the CLI has historically tolerated. Unknown keys fail decode so
+// operator typos do not silently zero out cluster identity.
+type nvcaValuesMetadataDoc struct {
+	ClusterName    string                 `yaml:"clusterName,omitempty"`
+	ClusterID      string                 `yaml:"clusterID,omitempty"`
+	ClusterGroupID string                 `yaml:"clusterGroupID,omitempty"`
+	NCAID          string                 `yaml:"ncaID,omitempty"`
+	NCAIDLower     string                 `yaml:"ncaId,omitempty"`
+	Region         string                 `yaml:"region,omitempty"`
+	SelfManaged    nvca.SelfManagedValues `yaml:"selfManaged,omitempty"`
 }
 
 func stringMapValue(values map[string]any, key string) string {
