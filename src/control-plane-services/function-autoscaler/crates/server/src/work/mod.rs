@@ -22,7 +22,9 @@ use crate::metrics;
 use crate::models::NodeHealth;
 use crate::nvcf_api::nvcf_client::NvcfApiService;
 use crate::nvcf_api::{DeploymentInfo, NvcfApiError};
-use crate::scaling::{get_desired_instances, ScalingDecision, ScalingSettings};
+use crate::scaling::{
+    decide_scaling, sanitize_utilization, MetricSource, ScalingInputs, ScalingSettings,
+};
 use crate::{
     cassandra::cassandra_service::CassandraServiceManager,
     timeseries_db::timeseries_db_client::TimeseriesDbClient,
@@ -319,6 +321,122 @@ async fn get_current_worker_count_from_timeseries_db(
     Ok(None)
 }
 
+/// Resolve the current instance count and which metric family drives scaling.
+/// Worker metrics are the default; when no worker series exists at query time
+/// (BYOC and other CP-only functions) we fall back to control-plane metrics.
+/// Instance-count lookups never abort the cycle — failures degrade to 0.
+async fn resolve_current_instances(
+    timeseries_db_client: &TimeseriesDbClient,
+    function_id: &Uuid,
+    function_version_id: &Uuid,
+    nca_id: &str,
+    env: &str,
+    ignore_env: bool,
+) -> (usize, MetricSource) {
+    match get_current_worker_count_from_timeseries_db(
+        timeseries_db_client,
+        function_id,
+        function_version_id,
+        nca_id,
+        env,
+        ignore_env,
+    )
+    .await
+    {
+        Ok(Some(n)) => (n, MetricSource::WorkerThreads),
+        Ok(None) => {
+            tracing::info!(
+                "No worker series for {}:{} (nca_id={}); falling back to control-plane metrics",
+                function_id,
+                function_version_id,
+                nca_id
+            );
+            let n = get_byoc_instance_count(
+                timeseries_db_client,
+                function_id,
+                function_version_id,
+                env,
+                ignore_env,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "CP fallback instance count failed for {}:{} (nca_id={}), using 0: {}",
+                    function_id,
+                    function_version_id,
+                    nca_id,
+                    e
+                );
+                0
+            });
+            (n, MetricSource::ControlPlane)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "TimeseriesDb worker count failed for {}:{} (nca_id={}), using 0: {}",
+                function_id,
+                function_version_id,
+                nca_id,
+                e
+            );
+            (0, MetricSource::WorkerThreads)
+        }
+    }
+}
+
+/// Gather everything the scaling decision needs from the timeseries DB into a
+/// single sanitized struct. After this returns, the decision is identical for
+/// every metric source (see `scaling::decide_scaling`). Utilization is
+/// sanitized here, so downstream logic never sees NaN/Inf or unsorted points.
+async fn gather_scaling_inputs(
+    timeseries_db_client: &TimeseriesDbClient,
+    function_id: &Uuid,
+    function_version_id: &Uuid,
+    nca_id: &str,
+    env: &str,
+    ignore_env: bool,
+    scaling_settings: &ScalingSettings,
+) -> Result<ScalingInputs> {
+    let (current_instances, metric_source) = resolve_current_instances(
+        timeseries_db_client,
+        function_id,
+        function_version_id,
+        nca_id,
+        env,
+        ignore_env,
+    )
+    .await;
+
+    let raw_utilization = get_function_utilization_history(
+        timeseries_db_client,
+        function_id,
+        function_version_id,
+        env,
+        metric_source.uses_control_plane_metrics(),
+        ignore_env,
+        scaling_settings.lookback.as_secs() as i64 / 60,
+        scaling_settings.utilization_window_seconds,
+    )
+    .await?;
+    let utilization_samples = sanitize_utilization(raw_utilization);
+
+    let recent_invocations = get_recently_invoked_functions(
+        timeseries_db_client,
+        Some(*function_version_id),
+        scaling_settings.scale_to_zero_idle_timeout.as_secs() as i64 / 60,
+        env,
+        ignore_env,
+    )
+    .await?;
+
+    Ok(ScalingInputs {
+        metric_source,
+        current_instances,
+        utilization_samples,
+        recently_invoked: !recent_invocations.is_empty(),
+    })
+}
+
 // Function that creates or removes our node entry in Cassandra based on readiness.
 // When healthy we insert (or refresh TTL); when unhealthy we delete so we're not in the
 // healthy_nodes list and get no bucket assignment (no processing).
@@ -462,193 +580,77 @@ async fn make_scaling_requests_for_table(
                     // after each NVCF API call). None means we haven't successfully called NVCF yet.
                     let cached: Option<FunctionCachedState> = function_state_cache
                         .get(&(function.function_id, function.function_version_id));
-
-                    // Resolve the metric path for this function. Worker metrics are the default;
-                    // when no worker series exists at query time (BYOC and other CP-only functions)
-                    // we fall back to control-plane metrics.
-                    let nca_id_str = function.nca_id.as_str();
-                    let (current_instances, uses_cp_metrics) =
-                        match get_current_worker_count_from_timeseries_db(
-                            &timeseries_db_client,
-                            &function.function_id,
-                            &function.function_version_id,
-                            nca_id_str,
-                            &env,
-                            ignore_env,
-                        )
-                        .await
-                        {
-                            Ok(Some(n)) => (n, false),
-                            Ok(None) => {
-                                // No worker series — fall back to control-plane metrics.
-                                tracing::info!(
-                                    "No worker series for {}:{} (nca_id={}); falling back to control-plane metrics",
-                                    function.function_id,
-                                    function.function_version_id,
-                                    nca_id_str
-                                );
-                                let n = match get_byoc_instance_count(
-                                    &timeseries_db_client,
-                                    &function.function_id,
-                                    &function.function_version_id,
-                                    &env,
-                                    ignore_env,
-                                )
-                                .await
-                                {
-                                    Ok(n) => n,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "CP fallback instance count failed for {}:{} (nca_id={}), using 0: {}",
-                                            function.function_id,
-                                            function.function_version_id,
-                                            nca_id_str,
-                                            e
-                                        );
-                                        0
-                                    }
-                                };
-                                (n, true)
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "TimeseriesDb worker count failed for {}:{} (nca_id={}), using 0: {}",
-                                    function.function_id,
-                                    function.function_version_id,
-                                    nca_id_str,
-                                    e
-                                );
-                                (0, false)
-                            }
-                        };
-
-                    tracing::info!(
-                        "Current instances for {}:{} = {} (uses_cp_metrics: {}, source: {})",
-                        function.function_id,
-                        function.function_version_id,
-                        current_instances,
-                        uses_cp_metrics,
-                        if uses_cp_metrics { "TimeseriesDb nvcf_function_instances_current" } else { "TimeseriesDb nvcf_worker_service_worker_thread_count_total" }
-                    );
-
-                    // Get utilization history for scaling calculation
-                    let utilization_history = get_function_utilization_history(
-                        &timeseries_db_client,
-                        &function.function_id,
-                        &function.function_version_id,
-                        &env,
-                        uses_cp_metrics,
-                        ignore_env,
-                        scaling_settings.lookback.as_secs() as i64 / 60,
-                        scaling_settings.utilization_window_seconds,
-                    ).await?;
-
-                    // Check for recent invocations (30-minute timeout for scale-to-zero)
-                    let recent_invocations = get_recently_invoked_functions(
-                        &timeseries_db_client,
-                        Some(function.function_version_id),
-                        scaling_settings.scale_to_zero_idle_timeout.as_secs() as i64 / 60,
-                        env.as_str(),
-                        ignore_env,
-                    ).await?;
-
-                    // Always compute utilization first — needed for both scaling decisions and scale-to-zero guard
                     let last_predicted_instance_count = cached
                         .as_ref()
                         .and_then(|c| c.last_predicted_desired_instance_count)
                         .unwrap_or(0) as usize;
 
-                    let scaling_base_instances = match current_instances {
-                        0 if last_predicted_instance_count > 0 => {
-                            tracing::info!(
-                                "Function {}:{} has {} requested instances but 0 active - waiting for workers to come up",
-                                function.function_id, function.function_version_id, last_predicted_instance_count
-                            );
-                            return Ok(());
-                        }
-                        0 => 1,
-                        n => n,
-                    };
+                    // Acquire all metrics into one sanitized struct, then run the single
+                    // decision path that is shared by every metric source. NaN handling,
+                    // metric-source selection, and scale-to-zero all live behind these calls.
+                    let inputs = gather_scaling_inputs(
+                        &timeseries_db_client,
+                        &function.function_id,
+                        &function.function_version_id,
+                        function.nca_id.as_str(),
+                        &env,
+                        ignore_env,
+                        &scaling_settings,
+                    )
+                    .await?;
+                    let current_instances = inputs.current_instances;
+
+                    tracing::info!(
+                        "Scaling inputs for {}:{} - current_instances: {}, source: {:?}, samples: {}, recently_invoked: {}",
+                        function.function_id,
+                        function.function_version_id,
+                        inputs.current_instances,
+                        inputs.metric_source,
+                        inputs.utilization_samples.len(),
+                        inputs.recently_invoked,
+                    );
 
                     let policy = scaling_settings
                         .get_policy_for_function(&function.function_version_id)
                         .await;
-                    let scaling_decision = if let Some(decision) = get_desired_instances(
-                        utilization_history.clone(),
-                        &policy,
-                        scaling_base_instances,
-                        scaling_settings.decay_factor,
-                    ) {
-                        tracing::debug!(
-                            "Scaling decision for function {}:{} - current_instances: {}, scaling_base: {}, desired_instances: {}, average_utilization: {:.6}%",
-                            function.function_id, function.function_version_id,
-                            current_instances, scaling_base_instances, decision.desired_instances, decision.average_utilization
-                        );
-                        decision
-                    } else {
-                        tracing::warn!(
-                            "Failed to calculate scaling decision for function {}:{}, using fallback",
-                            function.function_id,
-                            function.function_version_id
-                        );
-                        ScalingDecision {
-                            desired_instances: last_predicted_instance_count.max(1),
-                            average_utilization: 0.0,
-                        }
-                    };
 
-                    // Scale-to-zero: only if no recent invocations AND utilization is below scale-down threshold.
-                    // This prevents killing active workers when the invocation metric has gaps.
-                    let (raw_desired_instance_count, utilization) = if recent_invocations.is_empty()
-                        && scaling_decision.average_utilization < policy.thresholds.scale_down_threshold
-                    {
-                        if current_instances >= 1 {
-                            tracing::info!(
-                                "Function {}:{} has no invocations in 30 minutes and low utilization ({:.1}% < {:.1}%) - scaling to 0",
-                                function.function_id,
-                                function.function_version_id,
-                                scaling_decision.average_utilization,
-                                policy.thresholds.scale_down_threshold,
-                            );
-                        } else {
-                            tracing::info!(
-                                "Function {}:{} has 0 instances with no invocations - staying at 0",
-                                function.function_id,
-                                function.function_version_id,
-                            );
-                        }
-                        (0, Some(scaling_decision.average_utilization as f64))
-                    } else if recent_invocations.is_empty() {
-                        // No invocations but utilization is still high — don't scale to zero, use utilization-based decision
+                    let Some(decision) = decide_scaling(
+                        &inputs,
+                        &policy,
+                        scaling_settings.decay_factor,
+                        last_predicted_instance_count,
+                    ) else {
                         tracing::info!(
-                            "Function {}:{} has no invocations in 30 minutes but utilization is {:.1}% (>= {:.1}%) - NOT scaling to zero",
+                            "Function {}:{} reports 0 active instances but {} were requested last cycle - skipping until the new workers report in",
                             function.function_id,
                             function.function_version_id,
-                            scaling_decision.average_utilization,
-                            policy.thresholds.scale_down_threshold,
+                            last_predicted_instance_count
                         );
-                        (
-                            scaling_decision.desired_instances as i32,
-                            Some(scaling_decision.average_utilization as f64),
-                        )
-                    } else {
-                        (
-                            scaling_decision.desired_instances as i32,
-                            Some(scaling_decision.average_utilization as f64),
-                        )
+                        return Ok(());
                     };
 
-                    let desired_instance_count = if raw_desired_instance_count < 0 {
-                        tracing::warn!(
-                            "Negative desired instance count ({}) for function {}:{}, clamping to 0",
-                            raw_desired_instance_count,
+                    tracing::info!(
+                        "Scaling decision for {}:{} - current: {}, desired: {}, avg_utilization: {:.6}% (recently_invoked: {})",
+                        function.function_id,
+                        function.function_version_id,
+                        current_instances,
+                        decision.desired_instances,
+                        decision.average_utilization,
+                        inputs.recently_invoked,
+                    );
+                    // desired == 0 is only reachable via decide_scaling's scale-to-zero
+                    // override; log the reason explicitly so it is greppable in prod.
+                    if decision.desired_instances == 0 {
+                        tracing::info!(
+                            "Function {}:{} scaling to 0 - idle (no invocations in window) and utilization {:.1}% < scale-down threshold {:.1}%",
                             function.function_id,
-                            function.function_version_id
+                            function.function_version_id,
+                            decision.average_utilization,
+                            policy.thresholds.scale_down_threshold,
                         );
-                        0
-                    } else {
-                        raw_desired_instance_count
-                    };
+                    }
+                    let desired_instance_count = decision.desired_instances as i32;
+                    let utilization = Some(decision.average_utilization as f64);
 
                     tracing::debug!(
                         "Recording metrics for function {}:{} - current: {}, desired: {}, utilization: {}",
@@ -773,7 +775,203 @@ fn should_skip_scaling_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeseries_db::TimeseriesDbSettings;
     use uuid::Uuid;
+
+    // ---- Helpers for the metric-acquisition tests ----
+
+    /// Tiny retry budget so error paths resolve in milliseconds, not seconds.
+    fn fast_backoff() -> backon::ExponentialBuilder {
+        backon::ExponentialBuilder::default()
+            .with_max_times(1)
+            .with_min_delay(StdDuration::from_millis(1))
+            .with_max_delay(StdDuration::from_millis(2))
+    }
+
+    /// A TimeseriesDb client (auth disabled) pointed at a mockito server.
+    fn ts_client(url: String) -> TimeseriesDbClient {
+        let config = TimeseriesDbSettings {
+            timeseries_db_url: url,
+            disable_auth: true,
+            env: "stg".to_string(),
+            ignore_env: true,
+            backoff: Some(fast_backoff()),
+            ..Default::default()
+        };
+        TimeseriesDbClient::new(&config, None).expect("build test client")
+    }
+
+    /// A VictoriaMetrics matrix response with a single series and one sample.
+    /// `metric_fields` is the raw JSON body of the `metric` object.
+    fn vm_series(metric_fields: &str, value: &str) -> String {
+        format!(
+            r#"{{"status":"success","data":{{"resultType":"matrix","result":[{{"metric":{{{metric_fields}}},"values":[[1700000000,"{value}"]]}}]}}}}"#
+        )
+    }
+
+    /// A VictoriaMetrics matrix response with no series (empty result).
+    fn vm_empty() -> String {
+        r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#.to_string()
+    }
+
+    /// Worker series present -> use worker metrics, no control-plane fallback.
+    #[tokio::test]
+    async fn test_resolve_uses_worker_metrics_when_series_present() {
+        let mut server = mockito::Server::new_async().await;
+        let _wc = server
+            .mock("GET", "/api/v1/query_range")
+            .match_query(mockito::Matcher::Regex("worker_thread_count_total".into()))
+            .with_status(200)
+            .with_body(vm_series(
+                r#""function_id":"f","function_version_id":"v""#,
+                "3",
+            ))
+            .create_async()
+            .await;
+
+        let client = ts_client(server.url());
+        let (n, src) = resolve_current_instances(
+            &client,
+            &Uuid::new_v4(),
+            &Uuid::new_v4(),
+            "nca",
+            "stg",
+            true,
+        )
+        .await;
+
+        assert_eq!(n, 3);
+        assert_eq!(src, MetricSource::WorkerThreads);
+    }
+
+    /// No worker series -> fall back to control-plane (BYOC) instance count.
+    #[tokio::test]
+    async fn test_resolve_falls_back_to_control_plane_when_no_worker_series() {
+        let fid = Uuid::new_v4();
+        let fvid = Uuid::new_v4();
+        let mut server = mockito::Server::new_async().await;
+        let _wc = server
+            .mock("GET", "/api/v1/query_range")
+            .match_query(mockito::Matcher::Regex("worker_thread_count_total".into()))
+            .with_status(200)
+            .with_body(vm_empty())
+            .create_async()
+            .await;
+        let _byoc = server
+            .mock("GET", "/api/v1/query_range")
+            .match_query(mockito::Matcher::Regex(
+                "nvcf_function_instances_current".into(),
+            ))
+            .with_status(200)
+            .with_body(vm_series(
+                &format!(r#""function_id":"{fid}","function_version_id":"{fvid}""#),
+                "7",
+            ))
+            .create_async()
+            .await;
+
+        let client = ts_client(server.url());
+        let (n, src) = resolve_current_instances(&client, &fid, &fvid, "nca", "stg", true).await;
+
+        assert_eq!(n, 7);
+        assert_eq!(src, MetricSource::ControlPlane);
+    }
+
+    /// No worker series and the BYOC query fails -> control-plane with 0 instances.
+    #[tokio::test]
+    async fn test_resolve_control_plane_zero_when_byoc_query_fails() {
+        let mut server = mockito::Server::new_async().await;
+        let _wc = server
+            .mock("GET", "/api/v1/query_range")
+            .match_query(mockito::Matcher::Regex("worker_thread_count_total".into()))
+            .with_status(200)
+            .with_body(vm_empty())
+            .create_async()
+            .await;
+        let _byoc = server
+            .mock("GET", "/api/v1/query_range")
+            .match_query(mockito::Matcher::Regex(
+                "nvcf_function_instances_current".into(),
+            ))
+            .with_status(500)
+            .with_body("boom")
+            .create_async()
+            .await;
+
+        let client = ts_client(server.url());
+        let (n, src) = resolve_current_instances(
+            &client,
+            &Uuid::new_v4(),
+            &Uuid::new_v4(),
+            "nca",
+            "stg",
+            true,
+        )
+        .await;
+
+        assert_eq!(n, 0);
+        assert_eq!(src, MetricSource::ControlPlane);
+    }
+
+    /// Worker-count query itself errors -> default to 0 instances on the worker path.
+    #[tokio::test]
+    async fn test_resolve_worker_query_error_defaults_to_zero() {
+        let mut server = mockito::Server::new_async().await;
+        let _wc = server
+            .mock("GET", "/api/v1/query_range")
+            .match_query(mockito::Matcher::Regex("worker_thread_count_total".into()))
+            .with_status(500)
+            .with_body("boom")
+            .create_async()
+            .await;
+
+        let client = ts_client(server.url());
+        let (n, src) = resolve_current_instances(
+            &client,
+            &Uuid::new_v4(),
+            &Uuid::new_v4(),
+            "nca",
+            "stg",
+            true,
+        )
+        .await;
+
+        assert_eq!(n, 0);
+        assert_eq!(src, MetricSource::WorkerThreads);
+    }
+
+    /// Happy path: worker count, utilization, and recent invocations are gathered
+    /// and sanitized into one ScalingInputs. A single response satisfies every
+    /// query (count, utilization, invocation), so we assert the assembled shape.
+    #[tokio::test]
+    async fn test_gather_scaling_inputs_assembles_worker_path() {
+        let fid = Uuid::new_v4();
+        let fvid = Uuid::new_v4();
+        let mut server = mockito::Server::new_async().await;
+        let body = vm_series(
+            &format!(r#""function_id":"{fid}","function_version_id":"{fvid}","nca_id":"nca""#),
+            "5",
+        );
+        let _all = server
+            .mock("GET", "/api/v1/query_range")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(body)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let client = ts_client(server.url());
+        let settings = ScalingSettings::default();
+        let inputs = gather_scaling_inputs(&client, &fid, &fvid, "nca", "stg", true, &settings)
+            .await
+            .expect("gather inputs");
+
+        assert_eq!(inputs.current_instances, 5);
+        assert_eq!(inputs.metric_source, MetricSource::WorkerThreads);
+        assert_eq!(inputs.utilization_samples, vec![5.0]);
+        assert!(inputs.recently_invoked);
+    }
 
     #[tokio::test]
     async fn test_deployment_info_includes_enqueued_timestamp() {
