@@ -80,6 +80,7 @@ go_test(
     deps = [
         "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/icms-translate/translate/common",
         "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/imagecredential",
+        "@com_github_sirupsen_logrus//:logrus",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",
