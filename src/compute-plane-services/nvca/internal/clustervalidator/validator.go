@@ -44,6 +44,7 @@ type ValidationState struct {
 	GPUOperatorInstalled     bool
 	K8sVersion               string
 	TotalNodes               string
+	ContainerRuntime         string
 	Recommendations          []string
 	Warnings                 []string
 
@@ -307,6 +308,9 @@ func printSummary(state *ValidationState) error {
 		log.Info("Validated Cluster:")
 		printInfo(log, fmt.Sprintf("  Kubernetes Version: %s", state.K8sVersion))
 		printInfo(log, fmt.Sprintf("  Total Nodes: %s", state.TotalNodes))
+		if state.ContainerRuntime != "" {
+			printInfo(log, fmt.Sprintf("  Container Runtime: %s", state.ContainerRuntime))
+		}
 	} else {
 		log.Infof("%s╔═══════════════════════════════════════════════════════════╗%s", colorRed, colorReset)
 		log.Infof("%s║              %s  Cluster is NVCF-Not-Ready  %s              ║%s", colorRed, iconCross, iconCross, colorReset)

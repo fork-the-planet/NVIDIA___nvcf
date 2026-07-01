@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -63,7 +64,52 @@ func checkPrerequisites(ctx context.Context, client kubernetes.Interface, state 
 	}
 	printInfo(log, fmt.Sprintf("  Total nodes: %s", state.TotalNodes))
 
+	// Report the container runtime(s) across nodes so operators can confirm
+	// runtime compatibility during pre-flight. Diagnostic only — it does not
+	// affect the verdict.
+	if err == nil && len(nodes.Items) > 0 {
+		state.ContainerRuntime = summarizeContainerRuntimes(nodes.Items)
+		printInfo(log, fmt.Sprintf("  Container runtime: %s", state.ContainerRuntime))
+	}
+
 	return nil
+}
+
+// summarizeContainerRuntimes returns a deterministic, human-readable summary of
+// the container runtime versions across nodes. When every node reports the same
+// runtime it returns just that value (e.g. "containerd://1.7.27"); for a
+// mixed-runtime cluster it lists each distinct runtime with its node count
+// (e.g. "containerd://1.7.27 (2), cri-o://1.30.0 (1)"). A node with an empty
+// ContainerRuntimeVersion is reported as "unknown".
+func summarizeContainerRuntimes(nodes []corev1.Node) string {
+	if len(nodes) == 0 {
+		return "unknown"
+	}
+
+	counts := make(map[string]int, len(nodes))
+	for i := range nodes {
+		runtime := nodes[i].Status.NodeInfo.ContainerRuntimeVersion
+		if runtime == "" {
+			runtime = "unknown"
+		}
+		counts[runtime]++
+	}
+
+	runtimes := make([]string, 0, len(counts))
+	for runtime := range counts {
+		runtimes = append(runtimes, runtime)
+	}
+	sort.Strings(runtimes)
+
+	if len(runtimes) == 1 {
+		return runtimes[0]
+	}
+
+	parts := make([]string, 0, len(runtimes))
+	for _, runtime := range runtimes {
+		parts = append(parts, fmt.Sprintf("%s (%d)", runtime, counts[runtime]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // checkControlPlaneHealth verifies cluster health using three signals:

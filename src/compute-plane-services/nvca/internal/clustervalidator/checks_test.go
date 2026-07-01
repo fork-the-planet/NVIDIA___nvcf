@@ -72,6 +72,65 @@ func TestCheckPrerequisites_NoNodes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "0", state.TotalNodes)
 	assert.NotEmpty(t, state.K8sVersion)
+	// No nodes -> no runtime line is emitted.
+	assert.Empty(t, state.ContainerRuntime)
+}
+
+func nodeWithRuntime(name, runtime string) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: corev1.NodeStatus{
+			NodeInfo: corev1.NodeSystemInfo{ContainerRuntimeVersion: runtime},
+		},
+	}
+}
+
+func TestSummarizeContainerRuntimes(t *testing.T) {
+	tests := []struct {
+		name  string
+		nodes []corev1.Node
+		want  string
+	}{
+		{name: "no nodes", nodes: nil, want: "unknown"},
+		{
+			name: "uniform runtime collapses to a single value",
+			nodes: []corev1.Node{
+				*nodeWithRuntime("n1", "containerd://1.7.27"),
+				*nodeWithRuntime("n2", "containerd://1.7.27"),
+			},
+			want: "containerd://1.7.27",
+		},
+		{
+			name: "mixed runtimes list per-runtime counts, sorted",
+			nodes: []corev1.Node{
+				*nodeWithRuntime("n1", "containerd://1.7.27"),
+				*nodeWithRuntime("n2", "cri-o://1.30.0"),
+				*nodeWithRuntime("n3", "containerd://1.7.27"),
+			},
+			want: "containerd://1.7.27 (2), cri-o://1.30.0 (1)",
+		},
+		{
+			name:  "empty runtime reported as unknown",
+			nodes: []corev1.Node{*nodeWithRuntime("n1", "")},
+			want:  "unknown",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, summarizeContainerRuntimes(tt.nodes))
+		})
+	}
+}
+
+func TestCheckPrerequisites_ReportsContainerRuntime(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		nodeWithRuntime("node-1", "containerd://1.7.27"),
+		nodeWithRuntime("node-2", "containerd://1.7.27"),
+	)
+	state := &ValidationState{Log: testLog()}
+	require.NoError(t, checkPrerequisites(context.Background(), client, state))
+	assert.Equal(t, "2", state.TotalNodes)
+	assert.Equal(t, "containerd://1.7.27", state.ContainerRuntime)
 }
 
 // ---------------------------------------------------------------------------
