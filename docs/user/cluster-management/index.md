@@ -38,7 +38,7 @@ After installing NVCA on a cluster:
 
 ### Supported Kubernetes Versions
 
-- Any official supported Kubernetes version
+- Supported versions are the latest Kubernetes minor release and the two prior minor releases (N-2). See official Kubernetes docs for current supported [versions](https://kubernetes.io/releases/version-skew-policy/#supported-versions). 
 
 ## Upgrade Advisory
 
