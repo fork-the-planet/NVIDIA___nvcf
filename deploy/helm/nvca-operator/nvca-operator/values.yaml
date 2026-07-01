@@ -12,8 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 ## @section NVCA Operator parameters
+
 ## @param image.repository NVCA Operator container registry path, without tag
 ## @param image.tag NVCA Operator container image tag. This defaults to the chart version
 ## @param image.pullPolicy K8s ImagePullPolicy
@@ -245,7 +245,7 @@ helmManaged:
   ## @param helmManaged.imageCredHelper.imageTag (REQUIRED) Image tag of "nvcf-image-credential-helper". Only override this if you know what you are doing.
   imageCredHelper:
     imageRepository: ""
-    imageTag: 0.5.1
+    imageTag: 0.10.1
   ## @param helmManaged.otelCollector.enabled Enable OTel collector sidecar for helm-managed clusters
   ## @param helmManaged.otelCollector.imageRepository (OPTIONAL) Image repository of "otel-collector". Only override this if you know what you are doing. If not specified, it will be calculated based on image.repository.
   ## @param helmManaged.otelCollector.imageTag (REQUIRED) Image tag of "otel-collector". Only override this if you know what you are doing.
@@ -269,7 +269,7 @@ selfManaged:
   ## @param selfManaged.imageCredHelper.imageTag (REQUIRED) Image tag of "nvcf-image-credential-helper". Only override this if you know what you are doing.
   imageCredHelper:
     imageRepository: ""
-    imageTag: 0.5.1
+    imageTag: 0.10.1
   ## @param selfManaged.otelCollector.enabled Enable OTel collector sidecar for self-managed clusters
   ## @param selfManaged.otelCollector.imageRepository (OPTIONAL) Image repository of "otel-collector". Only override this if you know what you are doing. If not specified, it will be calculated based on image.repository.
   ## @param selfManaged.otelCollector.imageTag (REQUIRED) Image tag of "otel-collector". Only override this if you know what you are doing.

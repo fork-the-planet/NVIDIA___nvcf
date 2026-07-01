@@ -97,4 +97,4 @@ The default values include development-oriented placeholders. Override them befo
 ## Notes
 
 - If you publish or mirror the required images into another registry, set the image registry, repository, tag, and pull secret values explicitly in your override file.
-- When vendoring a new NVCA ref, merge with a release-generating Conventional Commit type. Use `feat` for chart behavior changes and `fix` for patch fixes. A `chore` merge does not create a chart release tag.
+- When vendoring updated NVCA chart inputs, merge with a release-generating Conventional Commit type. Use `feat` for chart behavior changes and `fix` for patch fixes. A `chore` merge does not create a chart release tag.
