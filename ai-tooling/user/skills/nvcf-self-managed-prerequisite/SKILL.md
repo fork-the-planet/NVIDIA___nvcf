@@ -1,14 +1,17 @@
 ---
 name: nvcf-self-managed-prerequisite
 description: >-
-  Install the cluster-level prerequisites the NVCA operator needs before
-  nvcf-nvca-install can succeed — KAI Scheduler (for the KAIScheduler feature
-  gate) and the SMB CSI driver (for the sharedStorage Samba sidecar PVCs).
-  Both are cloud-neutral helm installs at the NVCF-validated version pins;
-  same install on AKS, EKS, GKE, k3d, or bare metal. Use when the user
-  mentions NVCA prereqs, KAI Scheduler, SMB CSI, csi-driver-smb, queue
-  quotas, default-parent-queue, NVCA shared-storage PVCs stuck Pending, or
-  asks how to prepare a cluster before installing the NVCA operator.
+  Install the prerequisites the NVCA operator / compute plane needs before
+  nvcf-nvca-install can succeed: the operator tool nvcf-cli (required by the
+  compute-plane stack's register-cluster step), KAI Scheduler (for the
+  KAIScheduler feature gate), and the SMB CSI driver (for the sharedStorage
+  Samba sidecar PVCs). The two cluster components are cloud-neutral helm
+  installs at the NVCF-validated version pins; same install on AKS, EKS, GKE,
+  k3d, or bare metal. Use when the user mentions NVCA prereqs, nvcf-cli, "nvcf-cli
+  not found", ensure-nvcf-cli, register-cluster, KAI Scheduler, SMB CSI,
+  csi-driver-smb, queue quotas, default-parent-queue, NVCA shared-storage PVCs
+  stuck Pending, or asks how to prepare a cluster before installing the NVCA
+  operator.
 license: Apache-2.0
 compatibility: Requires helm >= 3.12, < 4 (Helm 4 not supported), kubectl matching cluster version.
 author: "nvcf-core-eng <nvcf-core-eng@exchange.nvidia.com>"
@@ -27,14 +30,15 @@ metadata:
 
 # NVCA prerequisites — KAI Scheduler + SMB CSI
 
-Two cluster-level components the NVCA operator depends on. Install both before running `nvcf-nvca-install`.
+One operator tool plus two cluster-level components the NVCA operator / compute plane depends on. Satisfy all three before running `nvcf-nvca-install`.
 
-| Prereq | Why NVCA needs it | Detail |
+| Prereq | Why it is needed | Detail |
 | ------ | ------------------ | ------ |
+| `nvcf-cli` | The compute-plane stack's `make register-cluster` (and `install`/`apply`/`sync`, which abort without the registration values it writes) shells out to `nvcf-cli`. The shipped stack defaults to building it from a sibling `../cli` checkout that the release does not include, so a green-field repo fails with `ensure-nvcf-cli` / "Registration values not found". | See Step 0b below |
 | KAI Scheduler | `selfManaged.featureGateValues` includes `KAIScheduler`; NVCA polls `Queue` CRs and refuses to become healthy until their quotas are `-1` | [references/kai-scheduler.md](references/kai-scheduler.md) |
 | SMB CSI driver (`smb.csi.k8s.io`) | NVCA's `selfManaged.sharedStorage` runs Samba sidecar pods that export file shares; the resulting PVCs need this CSI driver to bind | [references/smb-csi.md](references/smb-csi.md) |
 
-Both installs are cloud-neutral helm commands pinned to NVCF-validated versions. These are upstream third-party charts (not NVCF images), so they are not in `manifest.yaml`; the per-component reference docs carry the current pin and link the NVCF docs version table.
+The KAI Scheduler and SMB CSI installs are cloud-neutral helm commands pinned to NVCF-validated versions. These are upstream third-party charts (not NVCF images), so they are not in `manifest.yaml`; the per-component reference docs carry the current pin and link the NVCF docs version table. `nvcf-cli` is an operator workstation tool, not an in-cluster install.
 
 ## Prerequisites
 
@@ -55,6 +59,25 @@ if [ "$helm_major" != "3" ]; then
   echo "Helm 4 hangs on the KAI Scheduler chart's crd-manager hook. Install a 3.x release and retry." >&2
   exit 1
 fi
+```
+
+### 0b — nvcf-cli (compute-plane registration tool)
+
+The compute-plane stack (`nvcf-compute-plane-stack`) registers each GPU cluster with the control plane via `make register-cluster`, which shells out to `nvcf-cli` (`init` + `cluster register`) and writes `registration/<cluster>-register-values.yaml`. The stack's `install`/`apply`/`sync` targets abort if that file is missing. By default the stack builds `nvcf-cli` from a sibling `../cli` checkout (`NVCF_CLI_REPO ?= $(MAKEFILE_DIR)/../cli`) that is not bundled with the release, so a fresh checkout fails at `ensure-nvcf-cli`.
+
+`nvcf-cli` is a convenience wrapper: its only job in this flow is to produce `registration/<cluster>-register-values.yaml` (the `clusterID` / `selfManaged.clusterId`/`clusterGroupId` schema the NVCA helmfile loads). There are two ways to satisfy this prerequisite.
+
+Register without `nvcf-cli` (supported path for self-hosted deployments). Obtain the cluster registration data from the running control plane and hand-author `registration/<cluster>-register-values.yaml` in the schema the NVCA helmfile expects, then run `make install CLUSTER_NAME=<name> HELMFILE_ENV=<env>` directly (no `register-cluster`). The step-by-step procedure for gathering that data without the CLI is being published by the NVCF team; until it lands, use an `nvcf-cli` build if NVIDIA has provided you one.
+
+Use an `nvcf-cli` binary if you have one. Point the stack at the binary with an absolute path so it does not try to build the missing `../cli`:
+
+```bash
+cd nvcf-compute-plane-stack
+make register-cluster \
+  CLUSTER_NAME=<name> NCA_ID=<nca> CLUSTER_REGION=<region> \
+  ICMS_URL=https://sis.<your-domain> \
+  NVCF_CLI=/abs/path/to/nvcf-cli
+make install CLUSTER_NAME=<name> HELMFILE_ENV=<env>
 ```
 
 ### 1 — KAI Scheduler
@@ -130,6 +153,7 @@ AKS clusters can use the managed `csi-driver-smb` add-on instead — see [refere
 
 ## Definition of done
 
+- Compute-plane registration is satisfiable: either you can produce `registration/<cluster>-register-values.yaml` without the CLI, or an `nvcf-cli` binary is available (on `PATH` or via `NVCF_CLI=<abs-path>`).
 - `kubectl get pods -n kai-scheduler` shows 7 pods Running.
 - `kubectl get queues` shows both `default-parent-queue` and `default-queue` with `limit: -1, quota: -1` on cpu / gpu / memory.
 - `kubectl get csidriver smb.csi.k8s.io` returns the driver without error.
