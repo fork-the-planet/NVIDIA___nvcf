@@ -54,8 +54,9 @@ type ServerConfig struct {
 }
 
 type TelemetryConfig struct {
-	ServiceName string
-	MetricsPort int
+	ServiceName        string
+	MetricsPort        int
+	TracingAccessToken string
 }
 
 type StargateConfig struct {
@@ -240,10 +241,33 @@ func LoadFromEnv() (*Config, error) {
 	applyRateLimitEnv(cfg, &errs)
 	applyDefaultModelEnv(cfg, &errs)
 
+	// SecretsPath is populated by applyStargateNVCFEnv above.
+	cfg.Telemetry.TracingAccessToken = loadTracingAccessToken(cfg.NVCF.SecretsPath)
+
 	if err := errs.err(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// loadTracingAccessToken reads the Lightstep access token for the OTLP
+// exporters. Best-effort: a missing file or key leaves the token empty rather
+// than failing startup.
+func loadTracingAccessToken(secretsPath string) string {
+	if secretsPath == "" {
+		return ""
+	}
+	data, err := os.ReadFile(secretsPath)
+	if err != nil {
+		return ""
+	}
+	var secrets struct {
+		TracingAccessToken string `json:"tracingAccessToken"`
+	}
+	if err := json.Unmarshal(data, &secrets); err != nil {
+		return ""
+	}
+	return secrets.TracingAccessToken
 }
 
 func applyServerTelemetryEnv(cfg *Config, errs *envErrs) {

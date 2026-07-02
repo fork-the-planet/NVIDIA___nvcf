@@ -182,7 +182,7 @@ func TestInitDoesNotStartMetricsServerWhenPortIsZero(t *testing.T) {
 }
 
 func TestPrometheusHandlerProducesParseableMetricNames(t *testing.T) {
-	provider, gatherer, err := newMeterProvider(context.Background(), "", resource.Empty(), true)
+	provider, gatherer, err := newMeterProvider(context.Background(), "", resource.Empty(), true, "")
 	if err != nil {
 		t.Fatalf("new meter provider: %v", err)
 	}
