@@ -1,8 +1,8 @@
 ---
 name: Bug report
 about: Create a bug report to help us improve NVCF
-labels: "needs-triage, bug"
-assignees: ''
+labels: "needs-triage"
+type: Bug
 
 ---
 

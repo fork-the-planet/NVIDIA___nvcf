@@ -1,8 +1,8 @@
 ---
 name: Feature request
-about: Suggest an idea for NVCF
-labels: "needs-triage, enhancement"
-assignees: ''
+about: Suggest a request, idea, or new functionality for NVCF
+labels: "needs-triage"
+type: Enhancement
 
 ---
 

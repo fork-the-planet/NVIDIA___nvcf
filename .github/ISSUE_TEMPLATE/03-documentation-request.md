@@ -1,7 +1,8 @@
 ---
 name: Documentation request
 about: Report incorrect or needed documentation
-labels: "needs-triage, documentation"
+labels: "needs-triage"
+type: Documentation
 assignees: ''
 
 ---
