@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Restore pod for vllm-small checkpoint.
+#
+# The init container ladder MUST stay byte-identical to vllm-small.yaml's
+# source ladder — CRIU's restore verifies the size of every mmap'd file
+# on disk against the checkpointed copy. If the source pod mmap'd
+# /nvsnap-lib/site-packages-cp312/uvloop/loop.so but the restore container
+# only has /nvsnap-lib/site-packages/uvloop/loop.so (old single-Python
+# layout), restore aborts with "restore requires file contents but not
+# found in checkpoint: …". Keep the two manifests in lockstep when
+# changing the injection pattern.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-small-restored
+  namespace: nvsnap-system
+  labels:
+    app: vllm-small-restored
+    nvsnap.io/demo: "true"
+spec:
+  automountServiceAccountToken: false
+  # IMPORTANT: must run on the same node as the source pod's checkpoint.
+  # test-e2e.sh substitutes __NODE_NAME__ from the source pod's status.
+  nodeName: __NODE_NAME__
+  hostPID: true
+
+  imagePullSecrets:
+    - name: nvsnap-pull-secret
+
+  initContainers:
+    - name: get-uvloop
+      image: nvcr.io/0651155215864979/ncp-dev/uvloop-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          for whl in /wheels/uvloop-*.whl; do
+              tag=$(echo "$whl" | grep -oE 'cp3[0-9]+' | head -1)
+              mkdir -p "/nvsnap-lib/site-packages-${tag}"
+              python3 -m zipfile -e "$whl" "/nvsnap-lib/site-packages-${tag}/"
+          done
+      volumeMounts:
+        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
+
+    - name: get-libuv
+      image: nvcr.io/0651155215864979/ncp-dev/libuv-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args: ["cp /usr/local/lib/libuv.so* /nvsnap-lib/"]
+      volumeMounts:
+        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
+
+    - name: get-libzmq
+      image: nvcr.io/0651155215864979/ncp-dev/libzmq-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args: ["cp /usr/local/lib/libzmq.so* /nvsnap-lib/"]
+      volumeMounts:
+        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
+
+    # CRIU bundle + libnvsnap_intercept.so + sitecustomize.py
+    - name: get-criu
+      image: nvcr.io/0651155215864979/ncp-dev/nvsnap-agent:v0.1.3
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          cp -r /criu-bundle/. /nvsnap/
+          if [ -x /usr/local/bin/py-spy ]; then cp /usr/local/bin/py-spy /nvsnap/; fi
+          if [ -x /usr/bin/nsenter ]; then cp /usr/bin/nsenter /nvsnap/; fi
+          cp /criu-bundle/lib/libnvsnap_intercept.so /nvsnap-lib/
+          cp -r /criu-bundle/sitecustomize /nvsnap-lib/
+      volumeMounts:
+        - { name: nvsnap-tools, mountPath: /nvsnap }
+        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
+
+  containers:
+    - name: restore
+      image: vllm/vllm-openai:v0.11.2
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-lc"]
+      args:
+        - |
+          set -e
+          mkdir -p /var/run/vllm
+          # No site-packages cp needed — sitecustomize prepends
+          # /nvsnap-lib/site-packages-cpXY to sys.path, and CRIU restores
+          # the original process's mmap of the patched loop.so directly.
+          /nvsnap/restore-entrypoint
+          sleep 600
+      env:
+        # CHECKPOINT_ID intentionally in block style — test-e2e.sh's
+        # sed substitution uses the "/name: CHECKPOINT_ID/{n; s|...}"
+        # pattern, which advances to the NEXT line. Flow-style
+        # ({name:..., value:...} on one line) breaks that substitution
+        # by clobbering the following env var instead.
+        - name: CHECKPOINT_ID
+          value: "__CHECKPOINT_ID__"
+        - { name: CRIU_BUNDLE_PATH,     value: "/nvsnap" }
+        - { name: CHECKPOINT_PATH,      value: "/checkpoints" }
+        - { name: PYTHONPATH,           value: "/nvsnap-lib/sitecustomize" }
+        - { name: LD_LIBRARY_PATH,      value: "/nvsnap-lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64" }
+        - { name: LD_PRELOAD,           value: "/nvsnap-lib/libnvsnap_intercept.so" }
+        - { name: PATH,                 value: "/nvsnap:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
+        - { name: PYTHONFAULTHANDLER,   value: "1" }
+        - { name: PYTHONUNBUFFERED,     value: "1" }
+        - { name: NVSNAP_LOG_LEVEL,       value: "3" }
+        - { name: NVSNAP_ZMQ_INTERCEPT,   value: "0" }
+        - { name: NVSNAP_LAZY_PAGES,      value: "0" }   # Day-1 spike: CRIU lazy-pages via userfaultfd
+        - { name: NVSNAP_SECCOMP_ENABLED, value: "0" }
+        - { name: NVSNAP_KEEPALIVE_SECONDS, value: "1800" }
+        - { name: VLLM_LOGGING_LEVEL,   value: "INFO" }
+        - { name: VLLM_ENABLE_V1_MULTIPROCESSING, value: "0" }
+        - { name: VLLM_RPC_BASE_PATH,   value: "/var/run/vllm" }
+        - { name: HF_HUB_DISABLE_XET,   value: "1" }
+        - { name: HF_HUB_ENABLE_HF_TRANSFER, value: "0" }
+        # OTLP exporter for the OTel-instrumented restore-entrypoint.
+        # No-op when Jaeger isn't deployed (env unset → tracing init
+        # short-circuits to a no-op tracer).
+        - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "nvsnap-jaeger-collector.nvsnap-system.svc.cluster.local:4317" }
+        - { name: CUDA_VISIBLE_DEVICES, value: "0" }
+        - { name: HF_HOME,              value: "/root/.cache/huggingface" }
+      readinessProbe:
+        httpGet: { path: /v1/models, port: 8000 }
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 60
+      securityContext:
+        privileged: true
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+        requests:
+          nvidia.com/gpu: "1"
+      volumeMounts:
+        - { name: nvsnap-tools, mountPath: /nvsnap }
+        - { name: checkpoints, mountPath: /checkpoints }
+        - { name: dev-shm, mountPath: /dev/shm }
+        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
+
+  volumes:
+    - name: nvsnap-tools
+      emptyDir: {}
+    - name: checkpoints
+      hostPath:
+        path: /var/lib/containerd/nvsnap-checkpoints
+        type: Directory
+    - name: dev-shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi
+    - name: nvsnap-lib
+      emptyDir: {}
+
+  restartPolicy: Never

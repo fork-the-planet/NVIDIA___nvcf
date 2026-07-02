@@ -1,0 +1,176 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SGLang with TinyLlama for checkpoint/restore testing
+# Tests that our sigaction guard works with SGLang (asyncio-based, like vLLM)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sglang-small
+  namespace: nvsnap-system
+  labels:
+    app: sglang-small
+    nvsnap.io/demo: "true"
+  annotations:
+    nvsnap.io/demo-name: "SGLang"
+    nvsnap.io/desc: "TinyLlama 1.1B on SGLang"
+    nvsnap.io/model: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    nvsnap.io/port: "30000"
+    nvsnap.io/gpus: "1"
+    nvsnap.io/path: "criu"
+    nvsnap.io/ckpt-size: "59 GB"
+spec:
+  tolerations:
+    - key: "nvidia.com/gpu"
+      operator: "Exists"
+      effect: "NoSchedule"
+
+  imagePullSecrets:
+    - name: nvsnap-pull-secret
+
+  initContainers:
+  # Extract patched uvloop
+    - name: get-uvloop
+      image: nvcr.io/0651155215864979/ncp-dev/uvloop-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          for whl in /wheels/uvloop-*.whl; do
+              tag=$(echo "$whl" | grep -oE 'cp3[0-9]+' | head -1)
+              mkdir -p "/nvsnap-lib/site-packages-${tag}"
+              python3 -m zipfile -e "$whl" "/nvsnap-lib/site-packages-${tag}/"
+          done
+      volumeMounts:
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+
+  # Copy patched libuv (fixes c10d LibUVStoreDaemon segfault after CRIU restore)
+    - name: get-libuv
+      image: nvcr.io/0651155215864979/ncp-dev/libuv-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          cp /usr/local/lib/libuv.so* /nvsnap-lib/
+      volumeMounts:
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+
+  # Copy patched libzmq
+    - name: get-libzmq
+      image: nvcr.io/0651155215864979/ncp-dev/libzmq-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          cp /usr/local/lib/libzmq.so* /nvsnap-lib/
+      volumeMounts:
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+  # Copy intercept lib from agent
+    - name: get-intercept-lib
+      image: nvcr.io/0651155215864979/ncp-dev/nvsnap-agent:v0.1.3
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          cp /criu-bundle/lib/libnvsnap_intercept.so /nvsnap-lib/
+      volumeMounts:
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+
+  containers:
+    - name: sglang
+      image: lmsysorg/sglang:v0.4.5.post3-cu125
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/bash", "-lc"]
+      args:
+        - |
+          ulimit -c unlimited
+          # SGLang uses Python 3.12 in latest image
+          PYTAG=$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+          if [ -d "/nvsnap-lib/site-packages-${PYTAG}" ]; then
+            cp -a /nvsnap-lib/site-packages-${PYTAG}/* "$SITE/" 2>/dev/null || true
+          fi
+          if [ -f /nvsnap-lib/libzmq.so.5 ]; then
+            cp /nvsnap-lib/libzmq.so* /usr/local/lib/
+          fi
+          if [ -f /nvsnap-lib/libuv.so.1 ]; then
+            cp /nvsnap-lib/libuv.so* /usr/local/lib/
+          fi
+          ldconfig
+          if [ -f /nvsnap-lib/libnvsnap_intercept.so ]; then
+            echo "/nvsnap-lib/libnvsnap_intercept.so" > /etc/ld.so.preload
+          fi
+          python3 -m sglang.launch_server \
+            --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+            --host 0.0.0.0 \
+            --port 30000 \
+            --mem-fraction-static 0.8
+      env:
+        - name: LD_LIBRARY_PATH
+          value: "/nvsnap-lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+        - name: LD_PRELOAD
+          value: "/nvsnap-lib/libnvsnap_intercept.so"
+        - name: PYTHONFAULTHANDLER
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: NVSNAP_LOG_LEVEL
+          value: "3"
+        - name: NVSNAP_QUIESCE_SIGNALS
+          value: "1"
+        - name: NVSNAP_QUIESCE_METADATA_ONLY
+          value: "1"
+        - name: NVSNAP_ZMQ_INTERCEPT
+          value: "0"
+        - name: NVSNAP_SECCOMP_ENABLED
+          value: "0"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+        - name: HF_HUB_ENABLE_HF_TRANSFER
+          value: "0"
+        - name: TORCH_CPP_LOG_LEVEL
+          value: "INFO"
+        - name: TORCH_SHOW_CPP_STACKTRACES
+          value: "1"
+        - name: USE_LIBUV
+          value: "0"
+      ports:
+        - containerPort: 30000
+          name: http
+      readinessProbe:
+        httpGet:
+          path: /v1/models
+          port: 30000
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 60
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+        requests:
+          nvidia.com/gpu: "1"
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi
+    - name: nvsnap-lib
+      emptyDir: {}
+
+  restartPolicy: Never

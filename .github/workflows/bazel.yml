@@ -3,10 +3,18 @@
 #
 # Bazel build + test on the public NVIDIA/nvcf mirror.
 #
+# Change-aware: a cheap detect job diffs the push/PR and expands the
+# build matrix to only the subtrees whose files changed. A docs-only
+# mirror sync spawns zero build jobs instead of twelve, keeping the
+# org-shared hosted-runner queue clear. workflow_dispatch, changes to
+# this workflow file, and any diff that cannot be computed safely fall
+# back to the full matrix.
+#
 # Matrix entries reference subtrees that have their Bazel scaffold
 # mirrored to GitHub (each subtree's upstream .oss-allowlist controls
-# whether BUILD.bazel files reach this mirror). Add a row when a new
-# subtree's OSS-flip MR merges upstream.
+# whether BUILD.bazel files reach this mirror). Add a row to the ROWS
+# table in the detect job when a new subtree's OSS-flip MR merges
+# upstream.
 #
 # Image push targets, internal NGC registry pulls, and the nvcfbarn
 # remote cache are all internal-only; this workflow runs build + test
@@ -30,7 +38,7 @@ concurrency:
   group: bazel-${{ github.ref }}
   cancel-in-progress: true
 
-# NOTE: keep the bazel-ci image tag as a string literal in both
+# NOTE: keep the bazel-ci image tag as a string literal in
 # container.image and any tag-bump bookkeeping. GitHub Actions
 # evaluates job-level `container.image` before the workflow-level
 # `env:` context is reliably available, so referencing
@@ -39,8 +47,103 @@ concurrency:
 # happen to work). The duplication is intentional.
 
 jobs:
+  detect:
+    name: detect changed subtrees
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      any: ${{ steps.detect.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute changed subtrees
+        id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # id|path|tests_skip. tests_skip notes:
+          #  umbrella-phase1: //src/libraries/go/lib test issues (NVCF-10337;
+          #    icms-translate env-flaky, core_test goroutine leak) -- nvcf-go
+          #    team owns the test-layer cleanup.
+          #  nvca: TestReconcile_ModelCache fails under envtest >= 1.30
+          #    (NVCF-10347); test-layer fix owned by the nvca team. Do not
+          #    change reconciler logic to satisfy it.
+          ROWS='umbrella-phase1|.|true
+          grpc-proxy|src/invocation-plane-services/grpc-proxy|false
+          nats-auth-callout|src/control-plane-services/nats-auth-callout|false
+          ratelimiter|src/invocation-plane-services/ratelimiter|false
+          http-invocation|src/invocation-plane-services/http-invocation|false
+          llm-api-gateway|src/invocation-plane-services/llm-api-gateway|false
+          vanity-gateway|src/invocation-plane-services/vanity-gateway|false
+          nvca|src/compute-plane-services/nvca|true
+          ess-agent|src/compute-plane-services/ess-agent|false
+          image-credential-helper|src/compute-plane-services/image-credential-helper|false
+          function-autoscaler|src/control-plane-services/function-autoscaler|false
+          helm-reval|src/control-plane-services/helm-reval|false'
+          # Paths that affect the umbrella-phase1 workspace build (native
+          # Phase 1 roots plus the shared Bazel scaffold).
+          UMBRELLA_GLOBS=(MODULE.bazel .bazelrc .bazelversion BUILD.bazel rules/ platforms/ tools/ ci/ src/clis/ src/libraries/)
+
+          run_all=false
+          changed=""
+          case "$EVENT" in
+            workflow_dispatch) run_all=true ;;
+            pull_request)
+              if ! changed=$(git diff --name-only "origin/${BASE_REF}...HEAD" 2>/dev/null); then
+                echo "diff vs origin/${BASE_REF} failed; running full matrix"
+                run_all=true
+              fi
+              ;;
+            *)
+              if [ -z "${BEFORE_SHA}" ] || [ "${BEFORE_SHA}" = "0000000000000000000000000000000000000000" ]; then
+                run_all=true
+              elif ! changed=$(git diff --name-only "${BEFORE_SHA}..${HEAD_SHA}" 2>/dev/null); then
+                echo "diff ${BEFORE_SHA}..${HEAD_SHA} failed (rewritten history?); running full matrix"
+                run_all=true
+              fi
+              ;;
+          esac
+          # A change to this workflow itself revalidates everything.
+          if printf '%s\n' "$changed" | grep -q '^\.github/workflows/bazel\.yml$'; then
+            run_all=true
+          fi
+
+          include="[]"
+          while IFS='|' read -r id path tests_skip; do
+            id="$(echo "$id" | xargs)"; [ -z "$id" ] && continue
+            hit=false
+            if [ "$run_all" = "true" ]; then
+              hit=true
+            elif [ "$path" = "." ]; then
+              for g in "${UMBRELLA_GLOBS[@]}"; do
+                # Fixed-string, start-of-line prefix test via awk index()==1:
+                # avoids treating the dots in .bazelrc/MODULE.bazel as regex
+                # wildcards and avoids any shell glob expansion of the token.
+                if printf '%s\n' "$changed" | awk -v p="$g" 'index($0, p) == 1 { f = 1 } END { exit !f }'; then hit=true; break; fi
+              done
+            else
+              if printf '%s\n' "$changed" | grep -q "^${path}/"; then hit=true; fi
+            fi
+            if [ "$hit" = "true" ]; then
+              include=$(printf '%s' "$include" | jq -c --arg id "$id" --arg path "$path" --argjson ts "$tests_skip" '. + [{id:$id, path:$path, tests_skip:$ts}]')
+            fi
+          done <<< "$ROWS"
+
+          count=$(printf '%s' "$include" | jq 'length')
+          echo "selected ${count} subtree(s): $(printf '%s' "$include" | jq -r '[.[].id] | join(", ")')"
+          echo "matrix=${include}" >> "$GITHUB_OUTPUT"
+          if [ "$count" -gt 0 ]; then echo "any=true" >> "$GITHUB_OUTPUT"; else echo "any=false" >> "$GITHUB_OUTPUT"; fi
+
   bazel:
     name: bazel (${{ matrix.subtree.id }})
+    needs: detect
+    if: needs.detect.outputs.any == 'true'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/nvidia/nvcf/bazel-ci:0.8.0
@@ -50,57 +153,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        subtree:
-          # Full matrix. The precheck step skips entries that don't
-          # have a MODULE.bazel on the mirror yet (their upstream
-          # OSS-flip MR is still open, or the umbrella's imports.yaml
-          # pin hasn't been bumped past that flip). Entries fill in
-          # automatically as the underlying syncs land.
-          - id: umbrella-phase1
-            path: .
-            # Build-only on GHA. Phase 1 native subtrees compile fine, but
-            # //src/libraries/go/lib has pre-existing test issues that were
-            # masked while the matrix test step was silently skipping for
-            # every row (fixed in b941ba1c). Now-visible failures:
-            #   //src/libraries/go/lib/cmd/icms-translate:icms-translate_test
-            #     -- passes locally, env-flaky on GHA (testdata IS in
-            #     runfiles per the //src/libraries/go/lib/testdata/
-            #     icms-translate:testdata filegroup added in !234)
-            #   //src/libraries/go/lib/pkg/core:core_test
-            #     -- TestKubeConfiguratorToken leaks goroutines; pre-existing
-            # Track under NVCF-10337; nvcf-go team owns the test cleanup.
-            tests_skip: true
-          - id: grpc-proxy
-            path: src/invocation-plane-services/grpc-proxy
-          - id: nats-auth-callout
-            path: src/control-plane-services/nats-auth-callout
-          - id: ratelimiter
-            path: src/invocation-plane-services/ratelimiter
-          - id: http-invocation
-            path: src/invocation-plane-services/http-invocation
-          - id: llm-gateway
-            path: src/invocation-plane-services/llm-gateway
-          - id: nvca
-            path: src/compute-plane-services/nvca
-            # Build-only on GHA: TestReconcile_ModelCache (pkg/storage) fails
-            # under envtest >= 1.30 because the test fakes JobSuccessCriteriaMet
-            # on a NonIndexed Job without a SuccessPolicy, which the apiserver
-            # now rejects. Tracked under NVCF-10347 for a test-layer fix by the
-            # nvca team; do not change reconciler logic to satisfy this.
-            tests_skip: true
-          - id: dns-cache
-            path: src/compute-plane-services/dns-cache
-          - id: ess-agent
-            path: src/compute-plane-services/ess-agent
-          - id: image-credential-helper
-            path: src/compute-plane-services/image-credential-helper
-          - id: function-autoscaler
-            path: src/control-plane-services/function-autoscaler
-          - id: helm-reval
-            path: src/control-plane-services/helm-reval
+        subtree: ${{ fromJSON(needs.detect.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
+      # A subtree can be selected but not yet have its Bazel scaffold on
+      # the mirror (its upstream OSS-flip MR is still open, or the
+      # umbrella's imports.yaml pin has not been bumped past that flip).
       - name: Skip if subtree has no MODULE.bazel yet
         id: precheck
         run: |
@@ -146,11 +205,7 @@ jobs:
         # `tests_skip: true` on the matrix row keeps the subtree in the matrix
         # for build coverage but skips this step. Used when the build passes
         # but tests fail with an environment delta from GitLab CI (per the
-        # documented build-only policy). Default is to run tests. NOTE: the
-        # gate uses a positive-skip field (negated below). The previous form
-        # `tests_enabled != false` silently skipped tests for every row that
-        # did not set the key explicitly, because GitHub Actions expressions
-        # coerce missing matrix keys to null which compares equal to false.
+        # documented build-only policy). Default is to run tests.
         if: steps.precheck.outputs.skip == 'false' && !matrix.subtree.tests_skip
         working-directory: ${{ matrix.subtree.path }}
         run: bazel test --remote_cache= --flaky_test_attempts=3 //...

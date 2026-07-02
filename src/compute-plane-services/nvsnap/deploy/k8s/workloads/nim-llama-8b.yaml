@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# NIM Llama-3.1-8B-Instruct source pod (1 GPU, CRIU + cuda-checkpoint path).
+#
+# This manifest is the first user of the generic Python injection design
+# (docs/GENERIC-PYTHON-INJECTION-DESIGN.md): no `command:` override on the
+# main container, no inline bash injection. PYTHONPATH points Python at
+# our sitecustomize.py which detects the running interpreter's ABI tag
+# (NIM venv is cp312) and prepends /nvsnap-lib/site-packages-cp312 so our
+# patched uvloop wins on `import uvloop`. Native libs (libzmq, libuv) ride
+# on LD_LIBRARY_PATH; libnvsnap_intercept.so on LD_PRELOAD as before.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nim-llama-8b
+  namespace: nvsnap-system
+  labels:
+    app: nim-llama-8b
+    nvsnap.io/demo: "true"
+  annotations:
+    nvsnap.io/demo-name: "NIM"
+    nvsnap.io/desc: "Llama-3.1-8B on NVIDIA NIM (single GPU)"
+    nvsnap.io/model: "meta/llama-3.1-8b-instruct"
+    nvsnap.io/port: "8000"
+    nvsnap.io/gpus: "1"
+    nvsnap.io/path: "criu"
+    nvsnap.io/ckpt-size: "76 GB"
+spec:
+  # nodeName intentionally omitted — let the K8s scheduler pick any
+  # GPU node. test-e2e.sh records the chosen node in $POD_NODE and
+  # pins the restore pod there (CRIU restore needs the same hostPath
+  # /var/lib/containerd/nvsnap-checkpoints/<id>). For multi-node
+  # restore via per-capture PVC, the webhook injects a PVC ref.
+  tolerations:
+    - key: "nvidia.com/gpu"
+      operator: "Exists"
+      effect: "NoSchedule"
+
+  imagePullSecrets:
+    - name: nvsnap-pull-secret
+    - name: nim-pull-secret
+
+  initContainers:
+    # Extract uvloop wheel for every Python ABI we ship (cp310/311/312/313).
+    # sitecustomize.py picks the right one at runtime by interpreter tag,
+    # so this same init container works for any Python version going forward.
+    - name: get-uvloop
+      image: nvcr.io/0651155215864979/ncp-dev/uvloop-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          for whl in /wheels/uvloop-*.whl; do
+              tag=$(echo "$whl" | grep -oE 'cp3[0-9]+' | head -1)
+              mkdir -p "/nvsnap-lib/site-packages-${tag}"
+              python3 -m zipfile -e "$whl" "/nvsnap-lib/site-packages-${tag}/"
+          done
+          ls -la /nvsnap-lib/
+      volumeMounts:
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+
+    - name: get-libuv
+      image: nvcr.io/0651155215864979/ncp-dev/libuv-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          cp /usr/local/lib/libuv.so* /nvsnap-lib/
+      volumeMounts:
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+
+    - name: get-libzmq
+      image: nvcr.io/0651155215864979/ncp-dev/libzmq-builder:v0.0.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          cp /usr/local/lib/libzmq.so* /nvsnap-lib/
+      volumeMounts:
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+
+    # Drops both libnvsnap_intercept.so and the runtime sitecustomize.py.
+    # Renamed from get-intercept-lib to get-nvsnap to reflect the broader job.
+    - name: get-nvsnap
+      image: nvcr.io/0651155215864979/ncp-dev/nvsnap-agent:v0.1.3
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          cp /criu-bundle/lib/libnvsnap_intercept.so /nvsnap-lib/
+          cp -r /criu-bundle/sitecustomize /nvsnap-lib/
+          ls -la /nvsnap-lib/ /nvsnap-lib/sitecustomize/
+      volumeMounts:
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+
+  containers:
+    - name: nim
+      image: nvcr.io/nim/meta/llama-3.1-8b-instruct:1.8.5
+      imagePullPolicy: IfNotPresent
+      env:
+        # Generic Python injection — Python's site.py imports
+        # /nvsnap-lib/sitecustomize/sitecustomize.py at interpreter startup,
+        # which prepends /nvsnap-lib/site-packages-cp312 (NIM venv is cp312).
+        - name: PYTHONPATH
+          value: "/nvsnap-lib/sitecustomize"
+        - name: LD_LIBRARY_PATH
+          value: "/nvsnap-lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+        - name: LD_PRELOAD
+          value: "/nvsnap-lib/libnvsnap_intercept.so"
+        - name: NVSNAP_LOG_LEVEL
+          value: "3"
+        - name: NVSNAP_ZMQ_INTERCEPT
+          value: "0"
+        - name: NVSNAP_QUIESCE_SIGNALS
+          value: "1"
+        - name: NVSNAP_SECCOMP_ENABLED
+          value: "0"
+        - name: NGC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ngc-api-key
+              key: NGC_API_KEY
+        - name: NIM_CACHE_PATH
+          value: "/opt/nim/.cache"
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+        # Force TP=1 — privileged container sees all 8 H100s on the
+        # node regardless of nvidia.com/gpu request, so NIM auto-selects
+        # FP8 latency (TP=2) profile if not pinned. CUDA_VISIBLE_DEVICES
+        # is the belt-and-braces — keeps NIM bound even if it ignores
+        # NIM_TAGS_SELECTOR.
+        - name: NIM_TAGS_SELECTOR
+          value: "tp:1"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+      ports:
+        - containerPort: 8000
+          name: http
+      readinessProbe:
+        httpGet: { path: /v1/health/ready, port: 8000 }
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 180
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+        requests:
+          nvidia.com/gpu: "1"
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+        - name: nvsnap-lib
+          mountPath: /nvsnap-lib
+        - name: nim-cache
+          mountPath: /opt/nim/.cache
+
+  volumes:
+    - name: shm
+      emptyDir: { medium: Memory, sizeLimit: 16Gi }
+    - name: nvsnap-lib
+      emptyDir: {}
+    - name: nim-cache
+      emptyDir: {}
+
+  restartPolicy: Never

@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# NVSNAP golangci-lint configuration
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - misspell
+    - unconvert
+    - unparam
+    - nakedret
+    - prealloc
+    - copyloopvar
+    - gocritic
+    - revive
+    - bodyclose
+    - noctx
+    - gosec
+    - errorlint
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/NVIDIA/nvcf/src/compute-plane-services/nvsnap
+
+  govet:
+    enable:
+      - shadow
+  
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+  
+  gosec:
+    excludes:
+      - G104 # Audit errors not checked - we handle this case by case
+      - G304 # Potential file inclusion - necessary for our use case
+      # Permissive dir/file perms are intentional: restored pods run as a
+      # different uid (distroless 65532) than the capturing agent, so the
+      # cache/checkpoint/blob trees these rules flag MUST stay world-readable
+      # for cross-uid restore to work. Tightening them breaks restore.
+      - G301 # dir perms (MkdirAll 0755) — see above
+      - G302 # file perms on chmod — see above
+      - G306 # WriteFile perms (0644) — see above
+
+  errorlint:
+    errorf: true
+    asserts: true
+    comparison: true
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - hugeParam # We pass large structs by value intentionally in some cases
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  # Third-party vendored code (npm package that happens to ship a .go file).
+  exclude-dirs:
+    - ui/node_modules
+
+  exclude-rules:
+    # Test files can have longer functions
+    - path: _test\.go
+      linters:
+        - funlen
+    
+    # Allow dot imports in tests
+    - path: _test\.go
+      linters:
+        - revive
+      text: "dot-imports"
+    
+    # Generated files
+    - path: zz_generated
+      linters:
+        - all
+    
+    # API types have many fields
+    - path: pkg/apis/
+      linters:
+        - revive
+      text: "exported:"
