@@ -36,7 +36,7 @@ Install the following tools:
   exist on disk before those steps run:
 
   ```bash
-  go build -o nvcf-cli ./src/clis/nvcf-cli
+  go build -C src/clis/nvcf-cli -o ../../../nvcf-cli .
   ```
 
 Export the env vars used below:

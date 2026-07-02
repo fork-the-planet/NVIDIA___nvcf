@@ -84,7 +84,7 @@ the rationale.
 - `nvcf-cli` built from this repo:
 
   ```bash
-  go build -o nvcf-cli ./src/clis/nvcf-cli
+  go build -C src/clis/nvcf-cli -o ../../../nvcf-cli .
   ```
 
 Each flow page restates exactly the prerequisites that flow needs.

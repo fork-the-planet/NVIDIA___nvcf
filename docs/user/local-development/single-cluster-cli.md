@@ -35,7 +35,7 @@ Install the following tools:
 - `nvcf-cli` built from this repo:
 
   ```bash
-  go build -o nvcf-cli ./src/clis/nvcf-cli
+  go build -C src/clis/nvcf-cli -o ../../../nvcf-cli .
   ```
 
 Export the env vars used by the cluster bootstrap and the install steps:
@@ -85,18 +85,41 @@ make -C tools/ncp-local-cluster check-gateway-api
 
 </Note>
 
-## Step 2: Author the local secrets file
+## Step 2: Author the Helmfile environment files
 
-`nvcf-cli self-hosted install --env local` reads NGC credentials from the
+The CLI passes `--env local-bdd` to Helmfile when it renders each stack.
+Create the environment files from the single-cluster fixtures so Helmfile uses
+the NGC organization and team that you can access:
+
+```bash
+cp tests/bdd/fixtures/self-managed-local-bdd.yaml \
+   deploy/stacks/self-managed/environments/local-bdd.yaml
+cp tests/bdd/fixtures/nvcf-compute-plane-local-bdd.yaml \
+   deploy/stacks/nvcf-compute-plane/environments/local-bdd.yaml
+
+for file in \
+  deploy/stacks/self-managed/environments/local-bdd.yaml \
+  deploy/stacks/nvcf-compute-plane/environments/local-bdd.yaml; do
+  sed -i.bak \
+    -e "s|REPLACE_WITH_SAMPLE_NGC_ORG|${SAMPLE_NGC_ORG}|g" \
+    -e "s|REPLACE_WITH_SAMPLE_NGC_TEAM|${SAMPLE_NGC_TEAM}|g" \
+    "$file"
+  rm "${file}.bak"
+done
+```
+
+## Step 3: Author the local secrets file
+
+`nvcf-cli self-hosted install --env local-bdd` reads NGC credentials from the
 control-plane stack:
 
-- `deploy/stacks/self-managed/secrets/local-secrets.yaml` (control plane)
+- `deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml` (control plane)
 
 Author the file from its canonical template:
 
 ```bash
 cp deploy/stacks/self-managed/secrets/secrets.yaml.template \
-   deploy/stacks/self-managed/secrets/local-secrets.yaml
+   deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml
 ```
 
 Generate the base64 NGC dockerconfig credential and substitute it into the
@@ -105,15 +128,16 @@ file:
 ```bash
 BASE64_CRED=$(printf '%s' "\$oauthtoken:${NGC_API_KEY}" | base64 | tr -d '\n')
 sed -i.bak "s|REPLACE_WITH_BASE64_DOCKER_CREDENTIAL|${BASE64_CRED}|g" \
-  deploy/stacks/self-managed/secrets/local-secrets.yaml
-rm deploy/stacks/self-managed/secrets/local-secrets.yaml.bak
+  deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml
+rm deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml.bak
 ```
 
 <Warning>
-`local-secrets.yaml` is gitignored. Keep your NGC key out of the working tree.
+`local-bdd-secrets.yaml` is gitignored. Keep your NGC key out of the working
+tree.
 </Warning>
 
-## Step 3: Create the image pull secrets
+## Step 4: Create the image pull secrets
 
 `nvcf-cli self-hosted install` renders helmfile manifests that reference
 `imagePullSecrets: [{name: nvcr-pull-secret}]`. Create the secret in each
@@ -133,15 +157,15 @@ for ns in cassandra-system nats-system nvcf api-keys ess sis \
 done
 ```
 
-## Step 4: Install the control plane
+## Step 5: Install the control plane
 
 ```bash
-nvcf-cli \
+./nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
     --control-plane-stack deploy/stacks/self-managed \
     --compute-plane-stack deploy/stacks/nvcf-compute-plane \
-    --env local \
+    --env local-bdd \
     --plain \
     --token DUMMY \
   install --control-plane \
@@ -160,13 +184,13 @@ skip the gate; the install path itself never reads the token.
 When this completes, a control-plane profile is written to
 `deploy/stacks/self-managed/out/control-plane-profile.yaml`.
 
-## Step 5: Mint the admin JWT
+## Step 6: Mint the admin JWT
 
 Now that the api-keys service is reachable, `nvcf-cli init` can mint a real
 admin JWT:
 
 ```bash
-nvcf-cli \
+./nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   init
 ```
@@ -174,18 +198,18 @@ nvcf-cli \
 The token is written to `~/.nvcf-cli.nvcf-cli-local.state`. Subsequent commands
 read it from there; the token never appears in argv or per-command logs.
 
-## Step 6: Register the compute plane
+## Step 7: Register the compute plane
 
 In single-cluster topology, compute and control plane share the same k3d
 cluster (`ncp-local`).
 
 ```bash
-nvcf-cli \
+./nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
     --control-plane-stack deploy/stacks/self-managed \
     --compute-plane-stack deploy/stacks/nvcf-compute-plane \
-    --env local \
+    --env local-bdd \
     --plain \
   compute-plane register \
     --control-plane-profile deploy/stacks/self-managed/out/control-plane-profile.yaml \
@@ -200,15 +224,15 @@ plane share a cluster, the in-cluster service URLs (for example
 `http://api.sis.svc.cluster.local:8080`) are directly reachable and are
 selected automatically.
 
-## Step 7: Install the compute plane
+## Step 8: Install the compute plane
 
 ```bash
-nvcf-cli \
+./nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
     --control-plane-stack deploy/stacks/self-managed \
     --compute-plane-stack deploy/stacks/nvcf-compute-plane \
-    --env local \
+    --env local-bdd \
     --plain \
   compute-plane install \
     --values deploy/stacks/nvcf-compute-plane/out/ncp-local-register-values.yaml \
@@ -216,7 +240,7 @@ nvcf-cli \
     --cluster-name ncp-local
 ```
 
-## Step 8: Verify
+## Step 9: Verify
 
 Wait for the NVCA backend to become healthy:
 
@@ -243,12 +267,12 @@ curl -s "http://api.localhost:8080/v2/nvcf/functions" \
 The control-plane profile can be re-validated against the live cluster:
 
 ```bash
-nvcf-cli \
+./nvcf-cli \
   --config tests/bdd/fixtures/nvcf-cli-local.yaml \
   self-hosted \
     --control-plane-stack deploy/stacks/self-managed \
     --compute-plane-stack deploy/stacks/nvcf-compute-plane \
-    --env local \
+    --env local-bdd \
     --plain \
   control-plane profile validate \
     --file deploy/stacks/self-managed/out/control-plane-profile.yaml \
