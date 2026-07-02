@@ -16,7 +16,7 @@ for tool in curl jq; do
   fi
 done
 
-STATE_PATH="${HOME}/.nvcf-cli.nvcf-cli-local.state"
+STATE_PATH="${NVCT_BDD_STATE_PATH:-${HOME}/.nvcf-cli.nvcf-cli-local.state}"
 if [[ ! -f "$STATE_PATH" ]]; then
   echo "nvcf-cli state file not found: $STATE_PATH" >&2
   exit 1
@@ -34,6 +34,7 @@ API_KEYS_SERVICE_ID="${NVCT_BDD_API_KEYS_SERVICE_ID:-nvidia-cloud-tasks-ncp-serv
 API_KEYS_ISSUER_SERVICE="${NVCT_BDD_API_KEYS_ISSUER_SERVICE:-nvct-api}"
 API_KEYS_OWNER_ID="${NVCT_BDD_API_KEYS_OWNER_ID:-svc@nvct-api.local}"
 TASKS_URL="${NVCT_BDD_TASKS_URL:-http://tasks.localhost:8080/v1/nvct/tasks}"
+TASKS_HOST="${NVCT_BDD_TASKS_HOST:-tasks.localhost}"
 TASK_NAME="${NVCT_BDD_TASK_NAME:-bdd-nvct-task-smoke}"
 if [[ -n "${NVCT_BDD_TASK_IMAGE:-}" ]]; then
   TASK_IMAGE="$NVCT_BDD_TASK_IMAGE"
@@ -167,6 +168,7 @@ jq -n \
 
 if ! http_code="$(curl -sS -o "$create_response" -w "%{http_code}" \
   -X POST "$TASKS_URL" \
+  -H "Host: ${TASKS_HOST}" \
   -H "Authorization: Bearer ${API_KEY}" \
   -H "Content-Type: application/json" \
   --data-binary "@${request_body}")"; then
@@ -194,6 +196,7 @@ echo "Created NVCT task $TASK_NAME ($task_id)"
 deadline=$(( $(date +%s) + TASK_TIMEOUT_SECONDS ))
 while [[ $(date +%s) -lt "$deadline" ]]; do
   if ! http_code="$(curl -sS -o "$task_response" -w "%{http_code}" \
+    -H "Host: ${TASKS_HOST}" \
     -H "Authorization: Bearer ${API_KEY}" \
     "$TASKS_URL/$task_id")"; then
     echo "failed to get NVCT task status for $task_id" >&2

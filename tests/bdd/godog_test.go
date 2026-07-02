@@ -403,7 +403,9 @@ func TestSingleClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 			ExitCode: 0,
 			Stdout:   "Function invocation completed!\n\nResponse:\n{\"rawResponse\":\"bdd-echo\"}\n",
 		},
-		"/usr/bin/nvcf-cli --config /repo-root-placeholder/tests/bdd/fixtures/nvcf-cli-local.yaml function invoke --grpc --grpc-plaintext --grpc-service Echo --grpc-method EchoMessage --request-body '{\"message\":\"bdd-grpc-echo\"}' --timeout 120 --poll-duration 5": {
+		"/usr/bin/nvcf-cli --config /repo-root-placeholder/tests/bdd/fixtures/nvcf-cli-local.yaml function invoke" +
+			" --grpc --grpc-plaintext --grpc-service Echo --grpc-method EchoMessage" +
+			" --request-body '{\"message\":\"bdd-grpc-echo\"}' --timeout 120 --poll-duration 5": {
 			ExitCode: 0,
 			Stdout:   "Function invocation completed!\n\nResponse:\n{\"message\":\"bdd-grpc-echo\"}\n",
 		},
@@ -479,7 +481,9 @@ func TestMultiClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 			ExitCode: 0,
 			Stdout:   "Function invocation completed!\n\nResponse:\n{\"rawResponse\":\"bdd-echo\"}\n",
 		},
-		"/usr/bin/nvcf-cli --config /repo-root-placeholder/tests/bdd/fixtures/nvcf-cli-local.yaml function invoke --grpc --grpc-plaintext --grpc-service Echo --grpc-method EchoMessage --request-body '{\"message\":\"bdd-grpc-echo\"}' --timeout 120 --poll-duration 5": {
+		"/usr/bin/nvcf-cli --config /repo-root-placeholder/tests/bdd/fixtures/nvcf-cli-local.yaml function invoke" +
+			" --grpc --grpc-plaintext --grpc-service Echo --grpc-method EchoMessage" +
+			" --request-body '{\"message\":\"bdd-grpc-echo\"}' --timeout 120 --poll-duration 5": {
 			ExitCode: 0,
 			Stdout:   "Function invocation completed!\n\nResponse:\n{\"message\":\"bdd-grpc-echo\"}\n",
 		},
@@ -794,6 +798,7 @@ func TestSingleClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 		"helm list -n nvca-operator --kube-context " + eksContext + " -o json": {ExitCode: 0, Stdout: helmListNVCAJSON()},
 	}))
 	seedStackBaseYaml(t, suite.Config.RepoRoot)
+	seedComputePlaneBaseYaml(t, suite.Config.RepoRoot)
 	seedStackSecretsTemplate(t, suite.Config.RepoRoot)
 	seedNVCFCLINonlocalTemplate(t, suite.Config.RepoRoot)
 	writeEKSRegisterValues(t, suite.Config.RepoRoot, eksClusterName, eksRegion)
@@ -819,8 +824,8 @@ func TestSingleClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "install HELMFILE_ENV=eks-bdd") {
 		t.Fatal("helmfile install make target was never invoked")
 	}
-	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "cluster register --name") {
-		t.Fatal("nvcf-cli cluster register was never invoked")
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "register-cluster CLUSTER_NAME="+eksClusterName) {
+		t.Fatal("compute-plane register-cluster make target was never invoked")
 	}
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "deploy/stacks/nvcf-compute-plane install") {
 		t.Fatal("compute-plane install make target was never invoked")
@@ -837,11 +842,12 @@ func TestSingleClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 // EKS_GATEWAY_ADDR from the canned gateway stdout.
 func TestMultiClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	const (
-		cpContext          = "arn:aws:eks:us-east-1:000000000000:cluster/wiring-cp"
-		computeContext     = "arn:aws:eks:us-east-1:000000000000:cluster/wiring-compute"
-		computeClusterName = "wiring-compute"
-		eksRegion          = "us-east-1"
-		wiringGatewayLB    = "wiring-cp-elb.example.invalid"
+		cpContext           = "arn:aws:eks:us-east-1:000000000000:cluster/wiring-cp"
+		computeContext      = "arn:aws:eks:us-east-1:000000000000:cluster/wiring-compute"
+		computeClusterName  = "wiring-compute"
+		eksRegion           = "us-east-1"
+		wiringGatewayLB     = "wiring-cp-elb.example.invalid"
+		wiringGatewayDomain = "192-0-2-10.nip.io"
 	)
 	t.Setenv("NGC_API_KEY", "test-key")
 	t.Setenv("SAMPLE_NGC_ORG", "test-org")
@@ -852,22 +858,49 @@ func TestMultiClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	t.Setenv("EKS_COMPUTE_CONTEXT", computeContext)
 	t.Setenv("EKS_COMPUTE_CLUSTER_NAME", computeClusterName)
 	t.Setenv("EKS_REGION", eksRegion)
+	t.Setenv("HOME", "/home/wiring")
 	// EKS_GATEWAY_ADDR is intentionally NOT preset: @gateway-setup's
-	// export step captures it from the canned gateway stdout below.
+	// export step captures it from the canned gateway stdout below. The
+	// gateway-domain export is likewise exercised from its canned result.
+	taskSmokeCommand := strings.Join([]string{
+		"env",
+		"NVCT_BDD_STATE_PATH=/home/wiring/.nvcf-cli.nvcf-cli-eks-bdd-multi.state",
+		"NVCT_BDD_API_KEYS_URL=http://" + wiringGatewayLB + "/v1/keys",
+		"NVCT_BDD_API_KEYS_HOST=api-keys." + wiringGatewayDomain,
+		"NVCT_BDD_TASKS_URL=http://" + wiringGatewayLB + "/v1/nvct/tasks",
+		"NVCT_BDD_TASKS_HOST=tasks." + wiringGatewayDomain,
+		"NVCT_BDD_TASK_BACKEND=" + computeClusterName,
+		"tests/bdd/scripts/run-nvct-task-smoke.sh",
+	}, " ")
 
 	suite := newWiringSuite(t, newFakeRunner(map[string]harness.Result{
 		// @gateway-setup: control-plane gateway address -> EKS_GATEWAY_ADDR.
 		"kubectl --context " + cpContext + " get gateway nvcf-gateway -n envoy-gateway -o jsonpath={.status.addresses[0].value}": {ExitCode: 0, Stdout: wiringGatewayLB},
+		"tests/bdd/scripts/resolve-gateway-domain.sh " + wiringGatewayLB:                                                         {ExitCode: 0, Stdout: wiringGatewayDomain},
 		// control-plane helm list assertion.
 		"helm list --all-namespaces --kube-context " + cpContext + " -o json": {ExitCode: 0, Stdout: helmListAllNamespacesJSON()},
 		// control-plane api HTTPRoute hostname assertion.
-		"kubectl --context " + cpContext + " get httproute nvcf-api -n envoy-gateway -o jsonpath={.spec.hostnames[0]}": {ExitCode: 0, Stdout: "api." + wiringGatewayLB},
+		"kubectl --context " + cpContext + " get httproute nvcf-api -n envoy-gateway -o jsonpath={.spec.hostnames[0]}": {ExitCode: 0, Stdout: "api." + wiringGatewayDomain},
+		// control-plane API environment config assertions.
+		"kubectl --context " + cpContext + " get configmap nvcf-api-env -n nvcf -o yaml": {ExitCode: 0, Stdout: `data:
+	NVCF_FQDN: http://api.` + wiringGatewayDomain + `
+	NVCF_GLOBAL_FQDN_GRPC: http://worker-api.` + wiringGatewayDomain + `
+	NVCF_NATS_WORKER_URL: nats://` + wiringGatewayLB + `:4222
+`},
+		"kubectl --context " + cpContext + " get configmap nvct-api-env -n nvcf -o yaml": {ExitCode: 0, Stdout: `data:
+	NVCT_FQDN: http://tasks.` + wiringGatewayDomain + `
+	NVCT_GLOBAL_FQDN_GRPC: http://worker-tasks.` + wiringGatewayDomain + `
+`},
 		// compute nvca-operator helm list assertion.
 		"helm list -n nvca-operator --kube-context " + computeContext + " -o json": {ExitCode: 0, Stdout: helmListNVCAJSON()},
 		// @function-lifecycle: function invoke returns the echo payload.
 		"/usr/bin/nvcf-cli --config /repo-root-placeholder/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml function invoke --request-body '{\"message\":\"bdd-echo\",\"repeats\":1}' --timeout 120 --poll-duration 5": {
 			ExitCode: 0,
 			Stdout:   "Function invocation completed!\n\nResponse:\n{\"rawResponse\":\"bdd-echo\"}\n",
+		},
+		taskSmokeCommand: {
+			ExitCode: 0,
+			Stdout:   "Task bdd-nvct-task-smoke status: COMPLETED\n",
 		},
 	}))
 	seedStackBaseYaml(t, suite.Config.RepoRoot)
@@ -908,6 +941,9 @@ func TestMultiClusterEKSHelmfileFeatureFileWiresToSteps(t *testing.T) {
 	}
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "function invoke") {
 		t.Fatal("function invoke CLI command was never invoked")
+	}
+	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "tests/bdd/scripts/run-nvct-task-smoke.sh") {
+		t.Fatal("NVCT task API smoke script was never invoked")
 	}
 }
 
@@ -971,20 +1007,13 @@ func TestSingleClusterEKSHelmfile(t *testing.T) {
 // TestMultiClusterEKSHelmfile is the live entry point for the
 // multi-cluster EKS Helmfile feature: control-plane install on one EKS
 // cluster, then register + NVCA install on a separate compute EKS
-// cluster. Skipped under -short.
-//
-// The @function-lifecycle scenario is excluded from the live run via
-// ~@skip: cross-cluster function execution is not supported by the
-// current nvca-operator chart/agent (worker pods receive the control
-// plane's in-cluster service FQDNs, which do not resolve on a separate
-// compute cluster). The wiring test still exercises that scenario
-// against the fake runner. Drop the tag filter once worker FQDNs can be
-// externalized.
+// cluster, then execute a function and an NVCT task there. Skipped under
+// -short.
 func TestMultiClusterEKSHelmfile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("live run skipped under -short")
 	}
-	runLiveFeatureTags(t, "multi-cluster-eks-helmfile.feature", "~@skip")
+	runLiveFeature(t, "multi-cluster-eks-helmfile.feature")
 }
 
 // runLiveFeature is the shared live-run path: build CLI, register

@@ -21,6 +21,8 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -141,6 +143,8 @@ func TestNVCTTaskSmokeUsesTaskSimpleSample(t *testing.T) {
 		"audience_service_ids",
 		"account-tasks",
 		"Key-Issuer-Service",
+		"NVCT_BDD_STATE_PATH",
+		"NVCT_BDD_TASKS_HOST",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("NVCT task smoke script does not reference %q", want)
@@ -154,6 +158,107 @@ func TestNVCTTaskSmokeUsesTaskSimpleSample(t *testing.T) {
 	}
 	if strings.Contains(script, "docker.io/library/busybox") {
 		t.Fatal("NVCT task smoke script still uses the synthetic busybox sample")
+	}
+}
+
+func TestResolveGatewayDomainUsesResolvedIPv4(t *testing.T) {
+	cmd := exec.Command("bash", "scripts/resolve-gateway-domain.sh", "gateway.example.invalid")
+	cmd.Env = append(os.Environ(), "EKS_GATEWAY_IPV4=192.0.2.10")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve gateway domain: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "192-0-2-10.nip.io"; got != want {
+		t.Fatalf("resolved gateway domain = %q, want %q", got, want)
+	}
+}
+
+func TestResolveGatewayDomainRetriesTransientDNSFailures(t *testing.T) {
+	binDir := t.TempDir()
+	countPath := filepath.Join(binDir, "host-count")
+	hostPath := filepath.Join(binDir, "host")
+	hostScript := `#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [[ -f "$FAKE_HOST_COUNT" ]]; then
+  count="$(<"$FAKE_HOST_COUNT")"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$FAKE_HOST_COUNT"
+if [[ "$count" -lt 3 ]]; then
+  exit 1
+fi
+printf '%s has address 192.0.2.10\n' "$1"
+`
+	if err := os.WriteFile(hostPath, []byte(hostScript), 0o755); err != nil {
+		t.Fatalf("write fake host: %v", err)
+	}
+	sleepPath := filepath.Join(binDir, "sleep")
+	if err := os.WriteFile(sleepPath, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake sleep: %v", err)
+	}
+
+	cmd := exec.Command("bash", "scripts/resolve-gateway-domain.sh", "gateway.example.invalid")
+	cmd.Env = append(os.Environ(), "FAKE_HOST_COUNT="+countPath, "PATH="+binDir+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve gateway domain after transient DNS failures: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "192-0-2-10.nip.io"; got != want {
+		t.Fatalf("resolved gateway domain = %q, want %q", got, want)
+	}
+	count, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read host attempt count: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(count)), "3"; got != want {
+		t.Fatalf("host attempts = %s, want %s", got, want)
+	}
+}
+
+func TestWaitForDNSRequiresStableSystemResolution(t *testing.T) {
+	binDir := t.TempDir()
+	countPath := filepath.Join(binDir, "resolver-count")
+	resolverScript := `#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [[ -f "$FAKE_RESOLVER_COUNT" ]]; then
+  count="$(<"$FAKE_RESOLVER_COUNT")"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$FAKE_RESOLVER_COUNT"
+if [[ "$count" -eq 2 ]]; then
+  exit 1
+fi
+`
+	for _, name := range []string{"host", "python3"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(resolverScript), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(
+		filepath.Join(binDir, "sleep"),
+		[]byte("#!/usr/bin/env bash\nexit 0\n"),
+		0o755,
+	); err != nil {
+		t.Fatalf("write fake sleep: %v", err)
+	}
+
+	cmd := exec.Command("bash", "scripts/wait-for-dns.sh", "gateway.example.invalid", "30")
+	cmd.Env = append(os.Environ(), "FAKE_RESOLVER_COUNT="+countPath, "PATH="+binDir+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wait for stable DNS: %v\n%s", err, out)
+	}
+	if got := string(out); !strings.Contains(got, "3 consecutive system-resolver checks after 5 attempts") {
+		t.Fatalf("wait output did not report stable resolution: %q", got)
+	}
+	count, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read resolver attempt count: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(count)), "5"; got != want {
+		t.Fatalf("resolver attempts = %s, want %s", got, want)
 	}
 }
 

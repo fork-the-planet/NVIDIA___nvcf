@@ -15,6 +15,7 @@ Feature: Install a single-cluster NVCF stack on a pre-provisioned EKS cluster wi
   # AGENTS.md "CLI vs Helmfile install paths".
   #
   # Required environment variables (user-supplied):
+  #   REPO_ROOT                      absolute path to this repository
   #   NVCF_CLI                       built CLI path (harness)
   #   NGC_API_KEY                    NGC API key
   #   SAMPLE_NGC_ORG / SAMPLE_NGC_TEAM
@@ -51,7 +52,8 @@ Feature: Install a single-cluster NVCF stack on a pre-provisioned EKS cluster wi
   #   --compute-context ${EKS_CONTEXT}
 
   Background:
-    Given environment variable "NVCF_CLI" is set
+    Given environment variable "REPO_ROOT" is set
+    And environment variable "NVCF_CLI" is set
     And environment variable "NGC_API_KEY" is set
     And environment variable "SAMPLE_NGC_ORG" is set
     And environment variable "SAMPLE_NGC_TEAM" is set
@@ -143,6 +145,20 @@ Feature: Install a single-cluster NVCF stack on a pre-provisioned EKS cluster wi
       | openbao.migrations.issuerDiscovery.enabled   | true                                 |
     Then yaml file "deploy/stacks/self-managed/environments/eks-bdd.yaml" key "global.domain" should equal "${EKS_GATEWAY_ADDR}"
 
+    # The compute-plane Helmfile is a separate bundle, so give it an
+    # environment file with the same registry and control-plane endpoints.
+    When I copy the file "deploy/stacks/nvcf-compute-plane/environments/base.yaml" to "deploy/stacks/nvcf-compute-plane/environments/eks-bdd.yaml"
+    And I update yaml file "deploy/stacks/nvcf-compute-plane/environments/eks-bdd.yaml" with keys:
+      | global.helm.sources.repository                                 | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
+      | global.image.repository                                        | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
+      | global.imagePullSecrets[0].name                                | nvcr-pull-secret                     |
+      | global.nvcaOperator.selfManaged.icmsServiceURL                 | http://${EKS_GATEWAY_ADDR}           |
+      | global.nvcaOperator.selfManaged.icmsServiceHostHeaderOverride  | sis.${EKS_GATEWAY_ADDR}              |
+      | global.nvcaOperator.selfManaged.revalServiceURL                | http://${EKS_GATEWAY_ADDR}           |
+      | global.nvcaOperator.selfManaged.revalServiceHostHeaderOverride | reval.${EKS_GATEWAY_ADDR}            |
+      | global.nvcaOperator.selfManaged.natsURL                        | nats://${EKS_GATEWAY_ADDR}:4222      |
+      | global.nvcaOperator.selfManaged.natsHostOverride               | nats.${EKS_GATEWAY_ADDR}             |
+
   Rule: Helmfile installs the EKS control plane and NVCA on the same pre-provisioned cluster
 
     Background:
@@ -218,38 +234,24 @@ Feature: Install a single-cluster NVCF stack on a pre-provisioned EKS cluster wi
         | invoke_host          | invocation.${EKS_GATEWAY_ADDR} |
         | icms_host            | sis.${EKS_GATEWAY_ADDR}        |
 
-      # Mint the admin JWT. The CLI writes the token into the state
-      # file resolved from --config; downstream cluster commands read
-      # it back from there.
-      When I run command "${NVCF_CLI} --config tests/bdd/out/nvcf-cli-eks-bdd.yaml init"
-      Then the command exit code should be 0
-
-      # Register the cluster. Run nvcf-cli directly here rather than
-      # through the Makefile's register-cluster target -- that target
-      # bakes in local-k3d defaults (CLUSTER_REGION=us-west-1,
-      # ICMS_URL=http://sis.localhost) that don't fit EKS. tee mirrors
-      # the CLI's full stdout to stderr for log visibility; the slice
-      # helper extracts the YAML body out of the CLI's mixed stdout
-      # (status logs + YAML on the same stream -- a known CLI
-      # limitation) before redirecting it to the compute-plane values
-      # file. The slice helper exists because the DSL runner uses
-      # shlex + exec rather than a shell, so the pipe + redirect must
-      # live inside one bash -c invocation.
+      # The Make target initializes the CLI, registers the EKS cluster
+      # with explicit nonlocal values, and writes the Helm handoff under
+      # registration/ for the compute-plane install.
       When I run command:
         """
-        bash -c 'set -eo pipefail; mkdir -p deploy/stacks/nvcf-compute-plane/out; ${NVCF_CLI} --config tests/bdd/out/nvcf-cli-eks-bdd.yaml cluster register --name ${EKS_CLUSTER_NAME} --nca-id nvcf-default --region ${EKS_REGION} --icms-url http://${EKS_GATEWAY_ADDR} --ignore-existing | tee /dev/stderr | tests/bdd/scripts/slice-yaml-body.sh > deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml'
+        make -C deploy/stacks/nvcf-compute-plane register-cluster CLUSTER_NAME=${EKS_CLUSTER_NAME} NCA_ID=nvcf-default CLUSTER_REGION=${EKS_REGION} ICMS_URL=http://${EKS_GATEWAY_ADDR} NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd.yaml
         """
       Then the command exit code should be 0
-      And file "deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml" should exist
-      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml" should contain:
+      And file "deploy/stacks/nvcf-compute-plane/registration/${EKS_CLUSTER_NAME}-register-values.yaml" should exist
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/${EKS_CLUSTER_NAME}-register-values.yaml" should contain:
         """
         ncaID: nvcf-default
         region: ${EKS_REGION}
         selfManaged:
           identitySource: psat
         """
-      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml" key "clusterID" should not be empty
-      And yaml file "deploy/stacks/nvcf-compute-plane/out/${EKS_CLUSTER_NAME}-register-values.yaml" key "clusterGroupID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/${EKS_CLUSTER_NAME}-register-values.yaml" key "clusterID" should not be empty
+      And yaml file "deploy/stacks/nvcf-compute-plane/registration/${EKS_CLUSTER_NAME}-register-values.yaml" key "clusterGroupID" should not be empty
 
       # The register-values URLs stay as cluster register's bare-ELB
       # output (http://${EKS_GATEWAY_ADDR}, nats://${EKS_GATEWAY_ADDR}:4222).

@@ -96,10 +96,12 @@ EKS_CONTEXT=<ctx> EKS_CLUSTER_NAME=<name> EKS_REGION=<region> \
   go test -run '^TestSingleClusterEKSHelmfile$' -timeout 120m -v
 
 # Multi-cluster EKS Helmfile feature: control plane on EKS_CONTEXT, then
-# register + NVCA + function smoke on a separate compute EKS cluster
-# (EKS_COMPUTE_CONTEXT). Uses HELMFILE_ENV=eks-bdd-multi to isolate its
-# environment, secrets, and CLI-config files from the single-cluster EKS
-# feature (eks-bdd).
+# register + NVCA + function and task execution on a separate compute EKS
+# cluster (EKS_COMPUTE_CONTEXT). The feature derives a nip.io wildcard domain
+# from the provisioned NLB so worker-facing Gateway hostnames resolve without
+# requiring a preconfigured DNS zone. The task smoke expects
+# task-simple-sample:local in the sample NGC repository unless
+# NVCT_BDD_TASK_IMAGE names another published image.
 EKS_CONTEXT=<cp-ctx> EKS_COMPUTE_CONTEXT=<compute-ctx> \
   EKS_COMPUTE_CLUSTER_NAME=<compute-name> EKS_REGION=<region> \
   NGC_API_KEY=<key> SAMPLE_NGC_ORG=<org> SAMPLE_NGC_TEAM=<team> \

@@ -58,7 +58,7 @@ go_oci_image(
     name = "image",
     base = "@distroless_go",
     binary = ":image-credential-helper",
-    binary_path = "/usr/bin/app",
+    binary_path = "/usr/bin/image-credential-helper",
     tags = ["nvcf-image-credential-helper"],
     visibility = ["//visibility:public"],
 )

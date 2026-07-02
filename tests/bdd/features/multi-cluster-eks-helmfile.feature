@@ -27,6 +27,8 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
   # NOT user-supplied (feature exports it):
   #   EKS_GATEWAY_ADDR           captured from the control-plane
   #                              gateway/nvcf-gateway .status.addresses[0].value
+  #   EKS_GATEWAY_DOMAIN         resolvable wildcard domain derived from the
+  #                              gateway address for hostname-based routes
   #
   # Cluster prerequisites (feature does NOT install these):
   #   - EBS CSI driver (gp3 StorageClass) on both clusters
@@ -110,9 +112,17 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
     When I run command "tests/bdd/scripts/wait-for-dns.sh ${EKS_GATEWAY_ADDR} 180"
     Then the command exit code should be 0
 
+    # Route hostnames such as api.<domain> must resolve independently. Derive
+    # a nip.io wildcard domain from one NLB address so worker pods on the
+    # compute cluster can resolve every control-plane route hostname.
+    When I run command "tests/bdd/scripts/resolve-gateway-domain.sh ${EKS_GATEWAY_ADDR}"
+    Then the command exit code should be 0
+    When I export command output to environment variable "EKS_GATEWAY_DOMAIN"
+    When I run command "tests/bdd/scripts/wait-for-dns.sh api.${EKS_GATEWAY_DOMAIN} 180"
+    Then the command exit code should be 0
+
     # 6. Copy base.yaml -> eks-bdd-multi.yaml and patch with the EKS
-    #    knobs (including global.domain from the just-exported
-    #    EKS_GATEWAY_ADDR).
+    #    knobs, including the resolvable Gateway domain.
     #
     #    The three global.nvcaOperator.selfManaged.*Override rows set the
     #    NVCA service Host-header overrides (helm-nvca-operator >=1.12.0).
@@ -127,10 +137,17 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       | global.image.repository                                        | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
       | global.imagePullSecrets[0].name                                | nvcr-pull-secret                     |
       | global.storageClass                                            | gp3                                  |
-      | global.domain                                                  | ${EKS_GATEWAY_ADDR}                  |
-      | global.nvcaOperator.selfManaged.icmsServiceHostHeaderOverride  | sis.${EKS_GATEWAY_ADDR}   |
-      | global.nvcaOperator.selfManaged.revalServiceHostHeaderOverride | reval.${EKS_GATEWAY_ADDR} |
-      | global.nvcaOperator.selfManaged.natsHostOverride               | nats.${EKS_GATEWAY_ADDR}  |
+      | global.domain                                                  | ${EKS_GATEWAY_DOMAIN}                    |
+      | global.workerEndpoints.nvcfServiceURL                          | http://api.${EKS_GATEWAY_DOMAIN}         |
+      | global.workerEndpoints.nvcfGrpcServiceURL                      | http://worker-api.${EKS_GATEWAY_DOMAIN}  |
+      | global.workerEndpoints.nvcfNatsServiceURL                      | nats://${EKS_GATEWAY_ADDR}:4222          |
+      | global.workerEndpoints.nvctServiceURL                          | http://tasks.${EKS_GATEWAY_DOMAIN}       |
+      | global.workerEndpoints.nvctGrpcServiceURL                      | http://worker-tasks.${EKS_GATEWAY_DOMAIN} |
+      | global.workerEndpoints.invocationServiceURL                    | http://invocation.${EKS_GATEWAY_DOMAIN}  |
+      | grpcproxy.nvcfGrpcServiceURL                                   | http://api.nvcf.svc.cluster.local:9090   |
+      | global.nvcaOperator.selfManaged.icmsServiceHostHeaderOverride  | sis.${EKS_GATEWAY_DOMAIN}                |
+      | global.nvcaOperator.selfManaged.revalServiceHostHeaderOverride | reval.${EKS_GATEWAY_DOMAIN}              |
+      | global.nvcaOperator.selfManaged.natsHostOverride               | nats.${EKS_GATEWAY_DOMAIN}               |
       | ingress.gatewayApi.controllerNamespace                         | envoy-gateway-system                 |
       | ingress.gatewayApi.gateways.shared.name                        | nvcf-gateway                         |
       | ingress.gatewayApi.gateways.shared.namespace                   | envoy-gateway                        |
@@ -138,9 +155,13 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       | ingress.gatewayApi.gateways.grpc.namespace                     | envoy-gateway                        |
       | ingress.gatewayApi.gateways.nats.name                          | nvcf-gateway                         |
       | ingress.gatewayApi.gateways.nats.namespace                     | envoy-gateway                        |
+      | ingress.gatewayApi.routes.nvcfApi.grpc.enabled                 | true                                 |
+      | ingress.gatewayApi.routes.nvcfApi.grpc.hostnames[0]            | worker-api.${EKS_GATEWAY_DOMAIN}     |
+      | ingress.gatewayApi.routes.nvctApi.grpc.enabled                 | true                                 |
+      | ingress.gatewayApi.routes.nvctApi.grpc.hostnames[0]            | worker-tasks.${EKS_GATEWAY_DOMAIN}   |
       | ingress.gatewayApi.routes.nats.enabled                         | true                                 |
       | openbao.migrations.issuerDiscovery.enabled                     | true                                 |
-    Then yaml file "deploy/stacks/self-managed/environments/eks-bdd-multi.yaml" key "global.domain" should equal "${EKS_GATEWAY_ADDR}"
+    Then yaml file "deploy/stacks/self-managed/environments/eks-bdd-multi.yaml" key "global.domain" should equal "${EKS_GATEWAY_DOMAIN}"
 
     When I copy the file "deploy/stacks/nvcf-compute-plane/environments/base.yaml" to "deploy/stacks/nvcf-compute-plane/environments/eks-bdd-multi.yaml"
     And I update yaml file "deploy/stacks/nvcf-compute-plane/environments/eks-bdd-multi.yaml" with keys:
@@ -148,11 +169,11 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       | global.image.repository                                        | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
       | global.imagePullSecrets[0].name                                | nvcr-pull-secret                     |
       | global.nvcaOperator.selfManaged.icmsServiceURL                 | http://${EKS_GATEWAY_ADDR}           |
-      | global.nvcaOperator.selfManaged.icmsServiceHostHeaderOverride  | sis.${EKS_GATEWAY_ADDR}              |
+      | global.nvcaOperator.selfManaged.icmsServiceHostHeaderOverride  | sis.${EKS_GATEWAY_DOMAIN}            |
       | global.nvcaOperator.selfManaged.revalServiceURL                | http://${EKS_GATEWAY_ADDR}           |
-      | global.nvcaOperator.selfManaged.revalServiceHostHeaderOverride | reval.${EKS_GATEWAY_ADDR}            |
+      | global.nvcaOperator.selfManaged.revalServiceHostHeaderOverride | reval.${EKS_GATEWAY_DOMAIN}          |
       | global.nvcaOperator.selfManaged.natsURL                        | nats://${EKS_GATEWAY_ADDR}:4222      |
-      | global.nvcaOperator.selfManaged.natsHostOverride               | nats.${EKS_GATEWAY_ADDR}             |
+      | global.nvcaOperator.selfManaged.natsHostOverride               | nats.${EKS_GATEWAY_DOMAIN}           |
 
   Rule: Helmfile installs the control plane on the control-plane EKS cluster
 
@@ -199,7 +220,34 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       # Confirm gateway-routes templated global.domain into the api
       # HTTPRoute hostname on the control-plane cluster.
       When I run command "kubectl --context ${EKS_CONTEXT} get httproute nvcf-api -n envoy-gateway -o jsonpath={.spec.hostnames[0]}"
-      Then the command output should contain "api.${EKS_GATEWAY_ADDR}"
+      Then the command output should contain "api.${EKS_GATEWAY_DOMAIN}"
+
+      # Confirm the optional API GRPCRoutes are accepted and point at
+      # resolved backends. These route flags are authored in the EKS env
+      # file because worker pods need externally reachable API gRPC
+      # endpoints on the compute cluster.
+      When I run command:
+        """
+        kubectl --context ${EKS_CONTEXT} wait grpcroute/nvcf-api-grpc grpcroute/nvct-api-grpc -n envoy-gateway --for=jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}'=True --timeout=2m
+        """
+      Then the command exit code should be 0
+
+      When I run command:
+        """
+        kubectl --context ${EKS_CONTEXT} wait grpcroute/nvcf-api-grpc grpcroute/nvct-api-grpc -n envoy-gateway --for=jsonpath='{.status.parents[0].conditions[?(@.type=="ResolvedRefs")].status}'=True --timeout=2m
+        """
+      Then the command exit code should be 0
+
+      # Confirm Helmfile passed the worker-facing endpoints into the
+      # environment ConfigMaps consumed by the API deployments.
+      When I run command "kubectl --context ${EKS_CONTEXT} get configmap nvcf-api-env -n nvcf -o yaml"
+      Then the command output should contain "NVCF_FQDN: http://api.${EKS_GATEWAY_DOMAIN}"
+      And the command output should contain "NVCF_GLOBAL_FQDN_GRPC: http://worker-api.${EKS_GATEWAY_DOMAIN}"
+      And the command output should contain "NVCF_NATS_WORKER_URL: nats://${EKS_GATEWAY_ADDR}:4222"
+
+      When I run command "kubectl --context ${EKS_CONTEXT} get configmap nvct-api-env -n nvcf -o yaml"
+      Then the command output should contain "NVCT_FQDN: http://tasks.${EKS_GATEWAY_DOMAIN}"
+      And the command output should contain "NVCT_GLOBAL_FQDN_GRPC: http://worker-tasks.${EKS_GATEWAY_DOMAIN}"
 
   Rule: Helmfile registers and installs NVCA on the compute EKS cluster
 
@@ -252,14 +300,17 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
         | base_grpc_url        | ${EKS_GATEWAY_ADDR}:10081      |
         | api_keys_service_url | http://${EKS_GATEWAY_ADDR}     |
         | icms_url             | http://${EKS_GATEWAY_ADDR}     |
-        | api_host             | api.${EKS_GATEWAY_ADDR}        |
-        | api_keys_host        | api-keys.${EKS_GATEWAY_ADDR}   |
-        | invoke_host          | invocation.${EKS_GATEWAY_ADDR} |
-        | icms_host            | sis.${EKS_GATEWAY_ADDR}        |
+        | api_host             | api.${EKS_GATEWAY_DOMAIN}        |
+        | api_keys_host        | api-keys.${EKS_GATEWAY_DOMAIN}   |
+        | invoke_host          | invocation.${EKS_GATEWAY_DOMAIN} |
+        | icms_host            | sis.${EKS_GATEWAY_DOMAIN}        |
 
       # Register the compute cluster with the control plane. The Makefile
       # runs nvcf-cli init, then cluster register, and writes the returned
       # Helm values under registration/.
+      When I run command "tests/bdd/scripts/wait-for-dns.sh ${EKS_GATEWAY_ADDR} 180"
+      Then the command exit code should be 0
+
       When I run command:
         """
         make -C deploy/stacks/nvcf-compute-plane register-cluster CLUSTER_NAME=${EKS_COMPUTE_CLUSTER_NAME} NCA_ID=nvcf-default CLUSTER_REGION=${EKS_REGION} ICMS_URL=http://${EKS_GATEWAY_ADDR} KUBECONFIG_FILE=${REPO_ROOT}/tests/bdd/out/eks-compute-kubeconfig.yaml NVCF_CLI=${NVCF_CLI} NVCF_CLI_CONFIG=${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml
@@ -307,28 +358,13 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
       When I run command "kubectl --context ${EKS_COMPUTE_CONTEXT} get secret nvcr-pull-secret -n nvca-system"
       Then the command exit code should be 0
 
-    @function-lifecycle @skip
+  Rule: Helmfile-installed multi-cluster NVCF can run workloads
+
+    @function-lifecycle
     Scenario: User creates, deploys, and invokes the Load Tester Supreme sample function
-      # SKIPPED in the live run via ~@skip (still exercised by the wiring
-      # test). Known gap: cross-cluster function EXECUTION is
-      # not supported by the current nvca-operator chart/agent. The agent
-      # injects the control plane's IN-CLUSTER service names into worker
-      # pods (NVCF_FQDN=http://api.nvcf.svc.cluster.local:8080,
-      # NVCF_FQDN_GRPC=...:9090, NVCF_FQDN_NATS=nats://nats.nats-system...,
-      # ESS_FQDN=http://ess-api.ess...), which do not resolve on a separate
-      # compute cluster, so the worker init container cannot fetch
-      # artifacts and the deployment ERRORs. The selfManaged.*Override
-      # values only configure the agent's own connections, not the worker
-      # pod env; there is no chart knob to externalize the worker FQDNs.
-      # Registration + agent health (the scenario above) work cross-region.
-      # Re-enable this scenario once worker FQDNs can be externalized.
-      #
-      # Smoke the full path: function management hits the control-plane
-      # API through the gateway; the deployment lands on the registered
-      # compute cluster. Relies on the @nvca-registration scenario above
-      # having registered the compute cluster and brought the agent
-      # healthy in this suite; re-assert health first so this scenario
-      # fails clearly if registration did not complete.
+      # Function management reaches the control plane through the gateway,
+      # and the deployment must execute on the separately registered compute
+      # cluster using the worker-facing endpoints configured above.
       Given command has succeeded:
         """
         kubectl wait nvcfbackend ${EKS_COMPUTE_CLUSTER_NAME} -n nvca-operator --context ${EKS_COMPUTE_CONTEXT} --for=jsonpath={.status.agentStatus}=healthy --timeout=10m
@@ -352,9 +388,29 @@ Feature: Install a multi-cluster NVCF stack across two pre-provisioned EKS clust
         """
       Then the command exit code should be 0
 
+      # AWS can briefly return NXDOMAIN for a newly provisioned ELB even after
+      # earlier successful lookups. Reconfirm system-resolver stability before
+      # the CLI performs its function-details lookup and invocation.
+      When I run command "tests/bdd/scripts/wait-for-dns.sh ${EKS_GATEWAY_ADDR} 180"
+      Then the command exit code should be 0
+
       When I run command:
         """
         ${NVCF_CLI} --config ${REPO_ROOT}/tests/bdd/out/nvcf-cli-eks-bdd-multi.yaml function invoke --request-body '{"message":"bdd-echo","repeats":1}' --timeout 120 --poll-duration 5
         """
       Then the command exit code should be 0
       And the command output should contain "bdd-echo"
+
+    @nvct-task-api
+    Scenario: User launches an NVCT task on the compute cluster and waits for completion
+      Given command has succeeded:
+        """
+        kubectl wait nvcfbackend ${EKS_COMPUTE_CLUSTER_NAME} -n nvca-operator --context ${EKS_COMPUTE_CONTEXT} --for=jsonpath={.status.agentStatus}=healthy --timeout=10m
+        """
+
+      When I run command:
+        """
+        env NVCT_BDD_STATE_PATH=${HOME}/.nvcf-cli.nvcf-cli-eks-bdd-multi.state NVCT_BDD_API_KEYS_URL=http://${EKS_GATEWAY_ADDR}/v1/keys NVCT_BDD_API_KEYS_HOST=api-keys.${EKS_GATEWAY_DOMAIN} NVCT_BDD_TASKS_URL=http://${EKS_GATEWAY_ADDR}/v1/nvct/tasks NVCT_BDD_TASKS_HOST=tasks.${EKS_GATEWAY_DOMAIN} NVCT_BDD_TASK_BACKEND=${EKS_COMPUTE_CLUSTER_NAME} tests/bdd/scripts/run-nvct-task-smoke.sh
+        """
+      Then the command exit code should be 0
+      And the command output should contain "COMPLETED"
