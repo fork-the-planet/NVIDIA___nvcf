@@ -161,6 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scaling_settings = initialize_scaling_settings(
         config.scaling.clone(),
         config.nvcf_api.oauth2_token_api_address.clone(),
+        config.nvcf_api.nvcf_api_grpc_address.clone(),
         secrets_file_watcher.clone(),
     )
     .await;
@@ -355,6 +356,7 @@ async fn handler_404() -> impl IntoResponse {
 async fn initialize_scaling_settings(
     mut settings: ScalingSettings,
     oauth2_token_api_address: String,
+    nvcf_api_grpc_address: String,
     secrets_watcher: Arc<SecretFileWatcher>,
 ) -> ScalingSettings {
     match &settings.policy {
@@ -367,7 +369,7 @@ async fn initialize_scaling_settings(
         ScalingPolicy::Custom(config) => {
             tracing::info!(
                 "Using Custom scaling policy - per-function configs from gRPC endpoint: {}",
-                config.grpc_endpoint
+                nvcf_api_grpc_address
             );
             tracing::info!("Cache configuration: TTL={}s", config.ttl_seconds);
 
@@ -380,9 +382,11 @@ async fn initialize_scaling_settings(
                 }
             };
 
-            // Initialize the policy cache
+            // Initialize the policy cache. Uses the same NVCF API gRPC
+            // endpoint as the scaling loop's Autoscaler client, since both
+            // are the same upstream Autoscaler service.
             match PolicyCache::new(
-                config.grpc_endpoint.clone(),
+                nvcf_api_grpc_address,
                 oauth2_client,
                 config.ttl_seconds,
                 settings.policy_cache_max_capacity,

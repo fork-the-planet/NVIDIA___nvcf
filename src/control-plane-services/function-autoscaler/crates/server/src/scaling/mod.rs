@@ -230,10 +230,12 @@ pub enum ScalingPolicy {
     Custom(CustomScalingPolicyConfig),
 }
 
-/// Configuration for custom (per-function) scaling policies
+/// Configuration for custom (per-function) scaling policies.
+/// The gRPC endpoint used to fetch per-function policies is the same NVCF
+/// API Autoscaler service the scaling loop reports back to, so it is
+/// configured once via `nvcf_api.nvcf_api_grpc_address` rather than here.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CustomScalingPolicyConfig {
-    pub grpc_endpoint: String,
     #[serde(rename = "ttl_seconds")]
     pub ttl_seconds: u64,
     // Fallback defaults when custom policy fetch fails

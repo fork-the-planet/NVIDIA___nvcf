@@ -30,6 +30,7 @@ import (
 
 	"github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/core"
 	translatecommon "github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common"
+	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -228,11 +229,15 @@ func (w *miniserviceMutatingWebhook) Handle(ctx context.Context, req admission.R
 			fmt.Errorf("decode admitted %s: %w", gvk, err))
 	}
 
+	isCreate := req.Operation == admissionv1.Create
+
 	if pod, ok := obj.(*corev1.Pod); ok && pod.Name == translatecommon.UtilsPodName {
-		// Shared storage mutation does not need metadata.
-		if _, _, err := w.sharedStorageMutator.mutate(ctx, obj); err != nil {
-			return admission.Errored(http.StatusInternalServerError,
-				fmt.Errorf("mutate shared storage on utils pod: %w", err))
+		if isCreate {
+			// Shared storage mutation does not need metadata.
+			if _, _, err := w.sharedStorageMutator.mutate(ctx, obj); err != nil {
+				return admission.Errored(http.StatusInternalServerError,
+					fmt.Errorf("mutate shared storage on utils pod: %w", err))
+			}
 		}
 	} else {
 		// The metadata configmap is only written once, otherwise the webhook is not guaranteed
@@ -260,7 +265,7 @@ func (w *miniserviceMutatingWebhook) Handle(ctx context.Context, req admission.R
 			}
 		}
 
-		if err := w.mutate(ctx, obj, meta); err != nil {
+		if err := w.mutate(ctx, obj, meta, isCreate); err != nil {
 			return admission.Errored(http.StatusInternalServerError,
 				fmt.Errorf("mutate admitted %s: %w", gvk, err))
 		}
@@ -298,7 +303,7 @@ func (w *miniserviceMutatingWebhook) decodeObject(raw []byte, gvk schema.GroupVe
 }
 
 // mutate applies all NVCF mutations to obj in-place.
-func (w *miniserviceMutatingWebhook) mutate(ctx context.Context, obj client.Object, meta nvcatypes.MiniserviceMetadata) error {
+func (w *miniserviceMutatingWebhook) mutate(ctx context.Context, obj client.Object, meta nvcatypes.MiniserviceMetadata, isCreate bool) error {
 	// Always inject labels and annotations on the object itself.
 	labels, annotations := obj.GetLabels(), obj.GetAnnotations()
 	if labels == nil {
@@ -320,16 +325,18 @@ func (w *miniserviceMutatingWebhook) mutate(ctx context.Context, obj client.Obje
 		// GXCache label for injection.
 		w.mutateGXCache(labels)
 
-		// Pod-spec mutations.
-		w.mutatePodSpec(&t.Spec, meta)
+		// Pod spec mutations must only be applied on creation events.
+		if isCreate {
+			w.mutatePodSpec(&t.Spec, meta)
 
-		// NVLink DRA mutations for claims/scheduling.
-		if w.fff.IsAttributeEnabled(featureflag.AttrNVLinkOptimized) {
-			w.mutateNVLinkDRA(obj.GetNamespace(), t)
-		}
+			// NVLink DRA mutations for claims/scheduling.
+			if w.fff.IsAttributeEnabled(featureflag.AttrNVLinkOptimized) {
+				w.mutateNVLinkDRA(obj.GetNamespace(), t)
+			}
 
-		if _, _, err := w.sharedStorageMutator.mutate(ctx, obj); err != nil {
-			return fmt.Errorf("mutate shared storage: %w", err)
+			if _, _, err := w.sharedStorageMutator.mutate(ctx, obj); err != nil {
+				return fmt.Errorf("mutate shared storage: %w", err)
+			}
 		}
 	}
 

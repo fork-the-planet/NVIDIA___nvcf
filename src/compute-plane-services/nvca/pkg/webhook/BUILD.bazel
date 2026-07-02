@@ -98,6 +98,7 @@ go_test(
     },
     deps = [
         "//internal/util/k8sutil",
+        "//pkg/dra",
         "//pkg/featureflag",
         "//pkg/featureflag/mock",
         "//pkg/nodefeatures",
