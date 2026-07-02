@@ -473,9 +473,6 @@ func defaultOutputs() []OutputFile {
 				},
 			},
 		},
-		{Path: "docs/user/standalone-infrastructure.md"},
-		{Path: "docs/user/standalone-core-services.md"},
-		{Path: "docs/user/standalone-gateway.md"},
 		{Path: "docs/user/cluster-management/self-managed.md"},
 		{Path: "docs/user/cluster-management/reference.md"},
 	}

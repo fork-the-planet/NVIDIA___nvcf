@@ -197,36 +197,6 @@ func TestRenderImageMirroringSnippets(t *testing.T) {
 	}
 }
 
-func TestSyncInlineChartVersions(t *testing.T) {
-	catalog := testCatalog()
-	catalog.Artifacts = append(catalog.Artifacts,
-		Artifact{Name: "helm-nvcf-nats", Type: ArtifactTypeChart, Registry: "staging", Version: "0.6.0"},
-		Artifact{Name: "nvcf-openbao", Type: ArtifactTypeImage, Registry: "staging", Version: "2.5.1-nv-1.2.1"},
-		Artifact{Name: "helm-nvcf-openbao-server", Type: ArtifactTypeChart, Registry: "staging", Version: "0.30.3"},
-		Artifact{Name: "helm-nvcf-cassandra", Type: ArtifactTypeChart, Registry: "staging", Version: "0.14.0"},
-	)
-	content := "| **Chart** | `helm-nvcf-nats` |\n| --- | --- |\n| **Version** | `0.5.0` |\n\n" +
-		"helm upgrade --install nats \\\n  oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-nats \\\n  --version 0.5.0 \\\n\n" +
-		"| **Chart** | `helm-nvcf-openbao-server` |\n| --- | --- |\n| **Version** | `0.27.1` |\n\n" +
-		"helm upgrade --install openbao \\\n  oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-openbao-server \\\n  --version 0.27.1 \\\n\n" +
-		`image: "<REGISTRY>/<REPOSITORY>/nvcf-openbao:2.5.1-nv-1.1.0"` + "\n\n" +
-		"| **Chart** | `helm-nvcf-cassandra` |\n| --- | --- |\n| **Version** | `0.11.1` |\n\n" +
-		"helm upgrade --install cassandra \\\n  oci://${REGISTRY}/${REPOSITORY}/helm-nvcf-cassandra \\\n  --version 0.11.1 \\\n"
-
-	got, changed, err := SyncInlineVersions("docs/user/standalone-infrastructure.md", content, catalog)
-	if err != nil {
-		t.Fatalf("SyncInlineVersions failed: %v", err)
-	}
-	if !changed {
-		t.Fatal("SyncInlineVersions reported no change")
-	}
-	for _, want := range []string{"`0.6.0`", "--version 0.6.0", "`0.30.3`", "`0.14.0`", "nvcf-openbao:2.5.1-nv-1.2.1"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("updated content missing %q:\n%s", want, got)
-		}
-	}
-}
-
 func TestSyncInlineSelfManagedNVCAOperatorVersions(t *testing.T) {
 	catalog := testCatalog()
 	catalog.SupplementalArtifacts = append(catalog.SupplementalArtifacts,

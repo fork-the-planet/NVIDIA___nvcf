@@ -28,19 +28,6 @@ navigation:
         path: ../../docs/v0.6.0-rc/grpc-invocation-enablement.md
       - page: CSP End-to-End Example
         path: ../../docs/v0.6.0-rc/csp-end-to-end-example-installation.md
-      - section: Standalone Deployment
-        skip-slug: true
-        contents:
-          - page: Standalone Deployment Overview
-            path: ../../docs/v0.6.0-rc/standalone-deployment.md
-          - page: Prerequisites
-            path: ../../docs/v0.6.0-rc/standalone-prerequisites.md
-          - page: Infrastructure
-            path: ../../docs/v0.6.0-rc/standalone-infrastructure.md
-          - page: Core Services
-            path: ../../docs/v0.6.0-rc/standalone-core-services.md
-          - page: Gateway
-            path: ../../docs/v0.6.0-rc/standalone-gateway.md
 
   - section: GPU Cluster Setup
     skip-slug: true

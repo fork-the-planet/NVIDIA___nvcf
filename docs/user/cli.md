@@ -101,8 +101,8 @@ For Gateway routing details, including architecture diagrams, verification comma
 
 #### Prepare Gateway API ingress
 
-For remote Helmfile or standalone deployments, set up Gateway API ingress
-before you configure the CLI. The CLI calls the configured API, API Keys,
+For remote Helmfile deployments, set up Gateway API ingress before you configure
+the CLI. The CLI calls the configured API, API Keys,
 invocation, and gRPC endpoints during token minting, cluster registration,
 health checks, and function operations.
 

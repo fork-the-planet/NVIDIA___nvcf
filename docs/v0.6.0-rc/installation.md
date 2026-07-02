@@ -19,9 +19,8 @@ Want to try NVCF locally first? See [Local Development](./local-development.md) 
 | --- | --- | --- |
 | Local one-click CLI installation | You want the fastest local k3d install and cluster registration path. | [Quickstart](./quickstart.md) |
 | Helmfile installation | You need manual release control, partial recovery, upgrades, or detailed Helmfile operations. | [Helmfile Installation](./helmfile-installation.md) |
-| Standalone chart installation | You need GitOps integration or chart-by-chart ownership. | [Standalone Deployment](./standalone-deployment.md) |
 
-The control plane and GPU cluster can be the same Kubernetes cluster or separate clusters when you use Helmfile, standalone charts, or the explicit CLI install primitives. The quickstart supports only a single local k3d cluster. For a complete Amazon EKS example of both topologies, see the [CSP End-to-End Example](./csp-end-to-end-example-installation.md).
+The control plane and GPU cluster can be the same Kubernetes cluster or separate clusters when you use Helmfile or the explicit CLI install primitives. The quickstart supports only a single local k3d cluster. For a complete Amazon EKS example of both topologies, see the [CSP End-to-End Example](./csp-end-to-end-example-installation.md).
 
 For remote installs, prepare the Gateway API ingress path and CLI endpoint
 configuration before registering GPU clusters or running post-install CLI
@@ -43,7 +42,7 @@ Every installation path follows the same high-level sequence:
 
 3. Create or select Kubernetes cluster targets. You need a cluster for the control plane and a GPU cluster for function workloads. These can be the same cluster or separate clusters.
 
-4. Install the self-hosted control plane. Use the [Quickstart](./quickstart.md) for a local k3d install, [Helmfile Installation](./helmfile-installation.md) for manual Helmfile operations, or [Standalone Deployment](./standalone-deployment.md) for chart-by-chart installation.
+4. Install the self-hosted control plane. Use the [Quickstart](./quickstart.md) for a local k3d install or [Helmfile Installation](./helmfile-installation.md) for manual Helmfile operations.
 
 5. Register a GPU cluster and install the NVIDIA Cluster Agent. The local quickstart performs this step for the local k3d cluster. For manual installation paths, see [Self-Managed Clusters](./cluster-management/self-managed.md).
 

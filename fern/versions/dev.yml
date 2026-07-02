@@ -27,19 +27,6 @@ navigation:
         path: ../../docs/user/helmfile-installation.md
       - page: gRPC Invocation Enablement
         path: ../../docs/user/grpc-invocation-enablement.md
-      - section: Standalone Deployment
-        skip-slug: true
-        contents:
-          - page: Standalone Deployment Overview
-            path: ../../docs/user/standalone-deployment.md
-          - page: Prerequisites
-            path: ../../docs/user/standalone-prerequisites.md
-          - page: Infrastructure
-            path: ../../docs/user/standalone-infrastructure.md
-          - page: Core Services
-            path: ../../docs/user/standalone-core-services.md
-          - page: Gateway
-            path: ../../docs/user/standalone-gateway.md
 
   - section: GPU Cluster Setup
     skip-slug: true

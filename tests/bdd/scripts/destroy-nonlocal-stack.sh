@@ -303,8 +303,50 @@ delete_stack_namespaces() {
   clear_sentinel_finalizers "$ctx" "${namespaces[@]}"
   for ns in "${namespaces[@]}"; do
     echo "  delete namespace $ns"
-    run kubectl --context "$ctx" delete namespace "$ns" \
-      --ignore-not-found --wait --timeout=120s
+    if run kubectl --context "$ctx" delete namespace "$ns" \
+        --ignore-not-found --wait --timeout=120s; then
+      continue
+    fi
+    if [[ "$ns" != "envoy-gateway-system" || "$DRY_RUN" -eq 1 ]]; then
+      return 1
+    fi
+
+    # Envoy data-plane pods can outlive their controller while the shutdown
+    # manager waits for an AWS load balancer drain. Once the BDD-owned Gateway
+    # and controller release are gone, force-delete those leftover pods so the
+    # BDD-owned namespace can finish terminating.
+    local pods
+    pods=$(kubectl --context "$ctx" -n "$ns" get pods -o name 2>/dev/null || true)
+    if [[ -n "$pods" ]]; then
+      echo "  force-delete remaining pods in $ns"
+      while IFS= read -r ref; do
+        [[ -z "$ref" ]] && continue
+        run kubectl --context "$ctx" -n "$ns" delete "$ref" \
+          --force --grace-period=0 --wait=false
+      done <<<"$pods"
+    fi
+
+    if kubectl --context "$ctx" wait --for=delete "namespace/$ns" \
+        --timeout=60s; then
+      continue
+    fi
+
+    # EKS can retain a stale NamespaceContentRemaining condition after the
+    # final pod is gone. The namespace is allow-listed and empty at this point,
+    # so clear its built-in finalizer through the finalize subresource.
+    command -v jq >/dev/null 2>&1 || {
+      echo "destroy-nonlocal-stack.sh requires jq to finalize $ns" >&2
+      return 1
+    }
+    if kubectl --context "$ctx" -n "$ns" get pods -o name 2>/dev/null | grep -q .; then
+      echo "FAIL: pods still remain in $ns after force deletion" >&2
+      return 1
+    fi
+    echo "  finalize empty namespace $ns"
+    kubectl --context "$ctx" get namespace "$ns" -o json \
+      | jq '.spec.finalizers=[]' \
+      | kubectl --context "$ctx" replace \
+          --raw "/api/v1/namespaces/$ns/finalize" -f - >/dev/null
   done
 }
 

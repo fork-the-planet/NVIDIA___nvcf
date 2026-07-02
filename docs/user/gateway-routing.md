@@ -17,9 +17,8 @@ API-compliant controller that supports the requirements below.
 
 ## Gateway quickstart
 
-Use this procedure before any remote deployment path that needs NVCF services
-reachable through Gateway API, including Helmfile and standalone Helm chart
-installation.
+Use this procedure before any remote Helmfile deployment that needs NVCF
+services reachable through Gateway API.
 
 Skip this section for local k3d flows that already create the local Gateway and
 route hostnames.
@@ -227,12 +226,11 @@ HTTPS.
 | --- | --- |
 | [Quickstart](./quickstart.md) | Do not use these remote Gateway values. The quickstart uses local k3d route hostnames. |
 | [Helmfile Installation](./helmfile-installation.md) | Use `GATEWAY_ADDR` as `global.domain`, and set `ingress.gatewayApi.gateways` to the Gateway names, namespaces, and listener names from Gateway quickstart. |
-| [Standalone Gateway](./standalone-gateway.md) | Use `GATEWAY_ADDR` as `nvcfGatewayRoutes.domain`, and set `nvcfGatewayRoutes.gateways` to the Gateway names and namespaces from Gateway quickstart. |
 
 ## Configure the CLI for Gateway access
 
-For remote Helmfile or standalone deployments, configure the CLI after Gateway
-API ingress is available. The CLI calls API, API Keys, invocation, and gRPC
+For remote Helmfile deployments, configure the CLI after Gateway API ingress is
+available. The CLI calls API, API Keys, invocation, and gRPC
 endpoints during token minting, cluster registration, health checks, and
 function operations.
 

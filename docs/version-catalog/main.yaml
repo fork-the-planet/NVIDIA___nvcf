@@ -349,8 +349,5 @@ outputs:
         renderer: image-mirroring-compute-stack-snippet
       - marker: image-mirroring-cli-snippet
         renderer: image-mirroring-cli-snippet
-  - path: docs/user/standalone-infrastructure.md
-  - path: docs/user/standalone-core-services.md
-  - path: docs/user/standalone-gateway.md
   - path: docs/user/cluster-management/self-managed.md
   - path: docs/user/cluster-management/reference.md

@@ -18,17 +18,10 @@ package main
 import (
 	"fmt"
 	"regexp"
-	"strings"
 )
 
 func SyncInlineVersions(path, content string, catalog *Catalog) (string, bool, error) {
 	switch path {
-	case "docs/user/standalone-infrastructure.md":
-		return syncStandaloneInfrastructure(content, catalog)
-	case "docs/user/standalone-core-services.md":
-		return syncStandaloneCoreServices(content, catalog)
-	case "docs/user/standalone-gateway.md":
-		return syncStandaloneGateway(content, catalog)
 	case "docs/user/image-mirroring.md":
 		return syncImageMirroring(content, catalog)
 	case "docs/user/cluster-management/self-managed.md":
@@ -38,55 +31,6 @@ func SyncInlineVersions(path, content string, catalog *Catalog) (string, bool, e
 	default:
 		return content, false, nil
 	}
-}
-
-func syncStandaloneInfrastructure(content string, catalog *Catalog) (string, bool, error) {
-	replacements := []string{
-		"helm-nvcf-nats",
-		"helm-nvcf-openbao-server",
-		"helm-nvcf-cassandra",
-	}
-	updated, changed, err := replaceChartVersions(content, catalog, replacements)
-	if err != nil {
-		return "", false, err
-	}
-	openbao, ok := catalog.latestArtifact("nvcf-openbao")
-	if !ok {
-		return "", false, fmt.Errorf("artifact nvcf-openbao is required")
-	}
-	updated, imageChanged := replaceImageTag(updated, "nvcf-openbao", openbao.Version)
-	return updated, changed || imageChanged, nil
-}
-
-func syncStandaloneCoreServices(content string, catalog *Catalog) (string, bool, error) {
-	return replaceChartVersions(content, catalog, []string{
-		"helm-nvcf-api-keys",
-		"helm-nvcf-sis",
-		"helm-nvcf-ess-api",
-		"helm-nvcf-api",
-		"helm-nvcf-invocation-service",
-		"helm-nvcf-grpc-proxy",
-		"helm-nvcf-notary-service",
-		"helm-reval",
-		"helm-admin-token-issuer-proxy",
-	})
-}
-
-func syncStandaloneGateway(content string, catalog *Catalog) (string, bool, error) {
-	updated, changed, err := replaceChartVersions(content, catalog, []string{"nvcf-gateway-routes"})
-	if err != nil {
-		return "", false, err
-	}
-	admin, ok := catalog.findArtifact("helm-admin-token-issuer-proxy")
-	if !ok {
-		return "", false, fmt.Errorf("artifact helm-admin-token-issuer-proxy is required")
-	}
-	var count int
-	updated, count = replaceHelmVersionArgument(updated, admin.Name, admin.Version)
-	if count == 0 {
-		return "", false, fmt.Errorf("helm --version argument for %s not found", admin.Name)
-	}
-	return updated, changed || updated != content, nil
 }
 
 func syncImageMirroring(content string, catalog *Catalog) (string, bool, error) {
@@ -142,26 +86,6 @@ func syncClusterManagementReference(content string, catalog *Catalog) (string, b
 	return updated, updated != content, nil
 }
 
-func replaceChartVersions(content string, catalog *Catalog, names []string) (string, bool, error) {
-	updated := content
-	for _, name := range names {
-		artifact, ok := catalog.findArtifact(name)
-		if !ok {
-			return "", false, fmt.Errorf("artifact %s is required", name)
-		}
-		var count int
-		updated, count = replaceVersionTable(updated, name, artifact.Version)
-		if count == 0 {
-			return "", false, fmt.Errorf("version table for %s not found", name)
-		}
-		updated, count = replaceHelmVersionArgument(updated, name, artifact.Version)
-		if count == 0 {
-			return "", false, fmt.Errorf("helm --version argument for %s not found", name)
-		}
-	}
-	return updated, updated != content, nil
-}
-
 func replaceVersionTable(content, chartName, version string) (string, int) {
 	label := `(?:\*\*)?%s(?:\*\*)?`
 	pattern := fmt.Sprintf(`(?s)(\| `+label+` \| %s \|\n\| --- \| --- \|\n\| `+label+` \| )`+"`[^`]+`"+`( \|)`, "Chart", regexp.QuoteMeta("`"+chartName+"`"), "Version")
@@ -201,24 +125,4 @@ func replaceNVCAOperatorChartPush(content, version string) (string, int) {
 	re := regexp.MustCompile(`helm push (?:helm-nvca-operator|nvca-operator)-[^\s]+\.tgz`)
 	count := len(re.FindAllStringIndex(content, -1))
 	return re.ReplaceAllString(content, "helm push helm-nvca-operator-"+version+".tgz"), count
-}
-
-func replaceImageTag(content, imageName, version string) (string, bool) {
-	re := regexp.MustCompile(regexp.QuoteMeta(imageName) + `:[^\s"']+`)
-	updated := re.ReplaceAllStringFunc(content, func(match string) string {
-		return imageName + ":" + strings.TrimRight(version, "\\")
-	})
-	return updated, updated != content
-}
-
-func (catalog *Catalog) latestArtifact(name string) (Artifact, bool) {
-	// Duplicate artifact names keep catalog order; generated docs intentionally use
-	// the last matching entry rather than comparing version strings.
-	var found Artifact
-	ok := false
-	for _, artifact := range catalog.findArtifacts(name) {
-		found = artifact
-		ok = true
-	}
-	return found, ok
 }
