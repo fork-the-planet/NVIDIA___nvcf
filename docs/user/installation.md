@@ -78,6 +78,15 @@ For environments without actual GPU hardware, install the fake GPU operator to s
 GPU resources. See [fake-gpu-operator](./fake-gpu-operator.md) for full instructions.
 </Note>
 
+#### SMB CSI Driver
+
+The [SMB CSI driver](https://github.com/kubernetes-csi/csi-driver-smb)
+(`smb.csi.k8s.io`) must be installed on every GPU cluster. NVCA uses the
+driver for shared model cache storage that function worker pods mount. Install
+and verify the driver before registering the GPU cluster. See the
+[Self-Managed Clusters prerequisites](./cluster-management/self-managed.md#prerequisites)
+for the installation command.
+
 #### Network Policies
 
 Your cluster must support Kubernetes Network Policies if network isolation is required.

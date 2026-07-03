@@ -38,10 +38,14 @@ func syncImageMirroring(content string, catalog *Catalog) (string, bool, error) 
 	if !ok {
 		return "", false, fmt.Errorf("artifact helm-nvca-operator is required")
 	}
+	pullReference, err := catalog.chartPullReference(chart)
+	if err != nil {
+		return "", false, err
+	}
 	updated := content
 	var total int
 	var count int
-	updated, count = replaceNVCAOperatorChartPull(updated, chart.Version)
+	updated, count = replaceNVCAOperatorChartPull(updated, pullReference, chart.Version)
 	total += count
 	updated, count = replaceNVCAOperatorChartArchiveComments(updated, chart.Version)
 	total += count
@@ -108,10 +112,10 @@ func replaceYAMLStringValue(content, key, value string) (string, int) {
 	return re.ReplaceAllString(content, "${1}\""+value+"\""), count
 }
 
-func replaceNVCAOperatorChartPull(content, version string) (string, int) {
-	re := regexp.MustCompile(`oci://nvcr\.io/0833294136851237/nvcf-ncp-staging/(?:helm-nvca-operator|nvca-operator) --version [^\s]+`)
+func replaceNVCAOperatorChartPull(content, pullReference, version string) (string, int) {
+	re := regexp.MustCompile(`(?:oci://[^\s]+/|[a-z0-9-]+/)(?:helm-nvca-operator|nvca-operator) --version [^\s]+`)
 	count := len(re.FindAllStringIndex(content, -1))
-	replacement := "oci://nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator --version " + version
+	replacement := pullReference + " --version " + version
 	return re.ReplaceAllString(content, replacement), count
 }
 

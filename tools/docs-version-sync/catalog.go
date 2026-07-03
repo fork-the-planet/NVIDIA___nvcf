@@ -50,6 +50,7 @@ type Catalog struct {
 	Version               int                 `yaml:"version"`
 	Target                string              `yaml:"target"`
 	Registries            map[string]Registry `yaml:"registries"`
+	Publications          []Publication       `yaml:"publications,omitempty"`
 	Stack                 StackMetadata       `yaml:"stack"`
 	Denylist              []DenylistEntry     `yaml:"denylist,omitempty"`
 	Artifacts             []Artifact          `yaml:"artifacts"`
@@ -58,8 +59,22 @@ type Catalog struct {
 }
 
 type Registry struct {
-	Host      string `yaml:"host"`
-	Namespace string `yaml:"namespace"`
+	Host            string `yaml:"host"`
+	Namespace       string `yaml:"namespace"`
+	RepositoryAlias string `yaml:"repository_alias,omitempty"`
+}
+
+type ChartFormat string
+
+const (
+	ChartFormatHTTP ChartFormat = "http"
+)
+
+type Publication struct {
+	Name        string      `yaml:"name"`
+	Version     string      `yaml:"version"`
+	Registry    string      `yaml:"registry"`
+	ChartFormat ChartFormat `yaml:"chart_format,omitempty"`
 }
 
 type StackMetadata struct {
@@ -183,6 +198,26 @@ func ValidateCatalog(catalog *Catalog) error {
 			return fmt.Errorf("registry %q has empty namespace", name)
 		}
 	}
+	seenPublications := map[string]struct{}{}
+	for _, publication := range catalog.Publications {
+		if strings.TrimSpace(publication.Name) == "" {
+			return fmt.Errorf("publication name cannot be empty")
+		}
+		if strings.TrimSpace(publication.Version) == "" {
+			return fmt.Errorf("publication %s has empty version", publication.Name)
+		}
+		if _, ok := catalog.Registries[publication.Registry]; !ok {
+			return fmt.Errorf("publication %s:%s registry %q is not defined", publication.Name, publication.Version, publication.Registry)
+		}
+		if publication.ChartFormat != "" && publication.ChartFormat != ChartFormatHTTP {
+			return fmt.Errorf("publication %s:%s has unsupported chart format %q", publication.Name, publication.Version, publication.ChartFormat)
+		}
+		key := publication.Name + ":" + publication.Version
+		if _, exists := seenPublications[key]; exists {
+			return fmt.Errorf("duplicate publication %s", key)
+		}
+		seenPublications[key] = struct{}{}
+	}
 	if strings.TrimSpace(catalog.Stack.Name) == "" {
 		return fmt.Errorf("stack name cannot be empty")
 	}
@@ -283,15 +318,48 @@ func (catalog *Catalog) DenylistMap() map[string]DenylistEntry {
 }
 
 func (catalog *Catalog) artifactPath(artifact Artifact) (string, error) {
-	registry, ok := catalog.Registries[artifact.Registry]
+	registryName := artifact.Registry
+	if publication, ok := catalog.publicationFor(artifact); ok {
+		registryName = publication.Registry
+	}
+	registry, ok := catalog.Registries[registryName]
 	if !ok {
-		return "", fmt.Errorf("artifact %s registry %q is not defined", artifact.Name, artifact.Registry)
+		return "", fmt.Errorf("artifact %s registry %q is not defined", artifact.Name, registryName)
 	}
 	name := artifact.RepositoryName
 	if name == "" {
 		name = artifact.Name
 	}
 	return registry.fullPath(name, artifact.Version), nil
+}
+
+func (catalog *Catalog) publicationFor(artifact Artifact) (Publication, bool) {
+	for _, publication := range catalog.Publications {
+		if publication.Name == artifact.Name && publication.Version == artifact.Version {
+			return publication, true
+		}
+	}
+	return Publication{}, false
+}
+
+func (catalog *Catalog) chartPullReference(artifact Artifact) (string, error) {
+	publication, published := catalog.publicationFor(artifact)
+	if published && publication.ChartFormat == ChartFormatHTTP {
+		registry := catalog.Registries[publication.Registry]
+		if registry.RepositoryAlias == "" {
+			return "", fmt.Errorf("publication registry %q has no repository alias", publication.Registry)
+		}
+		name := artifact.RepositoryName
+		if name == "" {
+			name = artifact.Name
+		}
+		return registry.RepositoryAlias + "/" + name, nil
+	}
+	path, err := catalog.artifactPath(artifact)
+	if err != nil {
+		return "", err
+	}
+	return "oci://" + strings.TrimSuffix(path, ":"+artifact.Version), nil
 }
 
 func (catalog *Catalog) resourceRef(artifact Artifact) (string, error) {
@@ -360,6 +428,7 @@ func BuildCatalogFromArtifactsWithBase(stackVersion string, artifacts []Artifact
 			catalog.Registries[key] = registry
 		}
 	}
+	catalog.Publications = append(catalog.Publications, base.Publications...)
 	catalog.Denylist = append(catalog.Denylist, base.Denylist...)
 
 	manifestNames := map[string]struct{}{}
@@ -401,6 +470,11 @@ func (catalog *Catalog) pruneUnusedRegistries() {
 	for _, artifact := range append(append([]Artifact{}, catalog.Artifacts...), catalog.SupplementalArtifacts...) {
 		if artifact.Registry != "" {
 			used[artifact.Registry] = struct{}{}
+		}
+	}
+	for _, publication := range catalog.Publications {
+		if publication.Registry != "" {
+			used[publication.Registry] = struct{}{}
 		}
 	}
 	for key := range catalog.Registries {

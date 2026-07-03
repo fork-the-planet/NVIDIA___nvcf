@@ -279,7 +279,7 @@ func renderArtifactTable(b *strings.Builder, catalog *Catalog, artifacts []Artif
 		if err != nil {
 			return err
 		}
-		b.WriteString(fmt.Sprintf("| %s | %s | `%s` |\n", artifactTypeLabel(artifact), artifact.Name, path))
+		b.WriteString(fmt.Sprintf("| %s | %s | `%s` |\n", catalog.artifactTypeLabel(artifact), artifact.Name, path))
 	}
 	return nil
 }
@@ -319,7 +319,6 @@ func renderImageMirroringResourceExamples(catalog *Catalog) (string, error) {
 	}
 
 	refWithVersion := strings.Replace(ref, stack.Version, "${STACK_VERSION}", 1)
-	refWithoutVersion := strings.TrimSuffix(ref, ":"+stack.Version)
 
 	var b strings.Builder
 	b.WriteString("```bash\n")
@@ -331,26 +330,13 @@ func renderImageMirroringResourceExamples(catalog *Catalog) (string, error) {
 	b.WriteString("\n")
 	b.WriteString("# Download a specific control-plane stack version\n")
 	b.WriteString("ngc registry resource download-version \\\n")
-	b.WriteString(fmt.Sprintf("  %q\n\n", refWithVersion))
-	b.WriteString("# List all control-plane stack versions\n")
-	b.WriteString("ngc registry resource list \\\n")
-	b.WriteString(fmt.Sprintf("  %q\n\n", refWithoutVersion+":*"))
-	b.WriteString("# Download latest control-plane stack version (omit version)\n")
-	b.WriteString("ngc registry resource download-version \\\n")
-	b.WriteString(fmt.Sprintf("  %q\n", refWithoutVersion))
+	b.WriteString(fmt.Sprintf("  %q\n", refWithVersion))
 
 	if hasComputeStack {
 		computeRefWithVersion := strings.Replace(computeRef, compute.Version, "${COMPUTE_STACK_VERSION}", 1)
-		computeRefWithoutVersion := strings.TrimSuffix(computeRef, ":"+compute.Version)
 		b.WriteString("\n# Download a specific compute-plane stack version\n")
 		b.WriteString("ngc registry resource download-version \\\n")
-		b.WriteString(fmt.Sprintf("  %q\n\n", computeRefWithVersion))
-		b.WriteString("# List all compute-plane stack versions\n")
-		b.WriteString("ngc registry resource list \\\n")
-		b.WriteString(fmt.Sprintf("  %q\n\n", computeRefWithoutVersion+":*"))
-		b.WriteString("# Download latest compute-plane stack version (omit version)\n")
-		b.WriteString("ngc registry resource download-version \\\n")
-		b.WriteString(fmt.Sprintf("  %q\n", computeRefWithoutVersion))
+		b.WriteString(fmt.Sprintf("  %q\n", computeRefWithVersion))
 	}
 
 	b.WriteString("```\n")
@@ -421,9 +407,12 @@ func (catalog *Catalog) stackArtifact() Artifact {
 	}
 }
 
-func artifactTypeLabel(artifact Artifact) string {
+func (catalog *Catalog) artifactTypeLabel(artifact Artifact) string {
 	switch artifact.Type {
 	case ArtifactTypeChart:
+		if publication, ok := catalog.publicationFor(artifact); ok && publication.ChartFormat == ChartFormatHTTP {
+			return "Chart (HTTP)"
+		}
 		return "Chart (OCI)"
 	case ArtifactTypeResource:
 		return "Resource"

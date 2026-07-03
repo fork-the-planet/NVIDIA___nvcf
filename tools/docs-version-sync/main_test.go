@@ -142,6 +142,79 @@ func TestRenderManifestHandlesNewNVCAAndNVCTImageAndHelmArtifacts(t *testing.T) 
 	}
 }
 
+func TestRenderManifestUsesVerifiedPublicLocations(t *testing.T) {
+	catalog := testCatalog()
+	catalog.Registries["public-images"] = Registry{
+		Host:      "nvcr.io",
+		Namespace: "nvidia/nvcf",
+	}
+	catalog.Registries["public-helm"] = Registry{
+		Host:            "https://helm.ngc.nvidia.com",
+		Namespace:       "nvidia/nvcf",
+		RepositoryAlias: "nvcf",
+	}
+	catalog.Artifacts = append(catalog.Artifacts,
+		Artifact{Name: "nvcf-grpc-proxy", Type: ArtifactTypeImage, Registry: "staging", Version: "1.29.1"},
+		Artifact{Name: "helm-nvcf-grpc-proxy", Type: ArtifactTypeChart, Registry: "staging", Version: "1.6.7"},
+		Artifact{Name: "helm-nvcf-nats", Type: ArtifactTypeChart, Registry: "staging", Version: "0.6.1"},
+	)
+	catalog.Publications = []Publication{
+		{Name: "nvcf-grpc-proxy", Version: "1.29.1", Registry: "public-images"},
+		{Name: "helm-nvcf-grpc-proxy", Version: "1.6.7", Registry: "public-helm", ChartFormat: ChartFormatHTTP},
+		{Name: "helm-nvcf-nats", Version: "0.7.1", Registry: "public-helm", ChartFormat: ChartFormatHTTP},
+	}
+
+	got, err := Render("manifest-artifact-registry-paths", catalog)
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	for _, want := range []string{
+		"| Image | nvcf-grpc-proxy | `nvcr.io/nvidia/nvcf/nvcf-grpc-proxy:1.29.1` |",
+		"| Chart (HTTP) | helm-nvcf-grpc-proxy | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-grpc-proxy:1.6.7` |",
+		"| Chart (OCI) | helm-nvcf-nats | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-nats:0.6.1` |",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered table missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "nvcr.io/nvidia/nvcf/helm-nvcf-grpc-proxy") {
+		t.Fatalf("public Helm chart rendered as an OCI artifact:\n%s", got)
+	}
+}
+
+func TestCatalogRefreshPreservesVersionQualifiedPublications(t *testing.T) {
+	base := testCatalog()
+	base.Registries["public-images"] = Registry{Host: "nvcr.io", Namespace: "nvidia/nvcf"}
+	base.Publications = []Publication{{
+		Name:     "nvcf-grpc-proxy",
+		Version:  "1.29.1",
+		Registry: "public-images",
+	}}
+
+	updated := BuildCatalogFromArtifactsWithBase("0.6.0-rc.99", []Artifact{{
+		Name:     "nvcf-grpc-proxy",
+		Type:     ArtifactTypeImage,
+		Registry: "staging",
+		Version:  "1.30.0",
+	}}, base)
+
+	if len(updated.Publications) != 1 || updated.Publications[0].Version != "1.29.1" {
+		t.Fatalf("publications = %#v, want preserved verified publication", updated.Publications)
+	}
+	artifact, ok := updated.findArtifact("nvcf-grpc-proxy")
+	if !ok {
+		t.Fatal("updated catalog is missing nvcf-grpc-proxy")
+	}
+	path, err := updated.artifactPath(artifact)
+	if err != nil {
+		t.Fatalf("artifactPath failed: %v", err)
+	}
+	if path != "nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-grpc-proxy:1.30.0" {
+		t.Fatalf("path = %q, want refreshed version at its stack-provided location", path)
+	}
+}
+
 func TestRenderImageMirroringResourceExamples(t *testing.T) {
 	catalog := testCatalog()
 	got, err := Render("image-mirroring-resource-examples", catalog)
@@ -159,6 +232,11 @@ func TestRenderImageMirroringResourceExamples(t *testing.T) {
 	}
 	if !strings.Contains(got, `0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:${COMPUTE_STACK_VERSION}`) {
 		t.Fatalf("resource examples missing compute stack ref:\n%s", got)
+	}
+	for _, stale := range []string{"resource list", "Download latest", ":*"} {
+		if strings.Contains(got, stale) {
+			t.Fatalf("resource examples contain unqualified latest-version guidance %q:\n%s", stale, got)
+		}
 	}
 }
 
@@ -277,6 +355,47 @@ func TestSyncInlineImageMirroringNVCAOperatorChartVersions(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("updated content missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestSyncInlineImageMirroringUsesTraditionalPublicHelmChart(t *testing.T) {
+	catalog := testCatalog()
+	catalog.Registries["public-helm"] = Registry{
+		Host:            "https://helm.ngc.nvidia.com",
+		Namespace:       "nvidia/nvcf",
+		RepositoryAlias: "nvcf",
+	}
+	catalog.SupplementalArtifacts = append(catalog.SupplementalArtifacts,
+		Artifact{Name: "helm-nvca-operator", Type: ArtifactTypeChart, Registry: "staging", Version: "1.12.7"},
+	)
+	catalog.Publications = []Publication{{
+		Name:        "helm-nvca-operator",
+		Version:     "1.12.7",
+		Registry:    "public-helm",
+		ChartFormat: ChartFormatHTTP,
+	}}
+	content := "helm pull oci://nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator --version 1.12.6\n" +
+		"# This creates: helm-nvca-operator-1.12.6.tgz\n" +
+		"helm push helm-nvca-operator-1.12.6.tgz oci://example.test/repo\n"
+
+	got, changed, err := SyncInlineVersions("docs/user/image-mirroring.md", content, catalog)
+	if err != nil {
+		t.Fatalf("SyncInlineVersions failed: %v", err)
+	}
+	if !changed {
+		t.Fatal("SyncInlineVersions reported no change")
+	}
+	for _, want := range []string{
+		"helm pull nvcf/helm-nvca-operator --version 1.12.7",
+		"# This creates: helm-nvca-operator-1.12.7.tgz",
+		"helm push helm-nvca-operator-1.12.7.tgz",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("updated content missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "oci://nvcr.io/nvidia/nvcf") {
+		t.Fatalf("updated content treats the public chart as OCI:\n%s", got)
 	}
 }
 

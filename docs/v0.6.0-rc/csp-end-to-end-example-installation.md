@@ -74,6 +74,13 @@ them. Each cluster needs:
   `gp3`, backed by the EBS CSI driver. Substitute your provider's class name.
 - The compute (GPU) cluster needs a GPU operator (real or the fake GPU operator
   for non-GPU validation). See [Fake GPU Operator](./fake-gpu-operator.md).
+- The compute cluster needs the
+  [SMB CSI driver](https://github.com/kubernetes-csi/csi-driver-smb)
+  (`smb.csi.k8s.io`). NVCA uses it for shared model cache storage that function
+  worker pods mount. Install and verify the driver before registering the GPU
+  cluster. See the
+  [Self-Managed Clusters prerequisites](./cluster-management/self-managed.md#prerequisites)
+  for the installation command.
 
 Both clusters must be reachable through `kubectl` contexts:
 
