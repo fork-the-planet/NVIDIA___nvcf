@@ -138,6 +138,16 @@ You configure observability by integrating with your own backend:
 
 ### Metrics Scraping
 
+Metrics export is opt-in and disabled by default. Enable it in your Helmfile
+environment before configuring scrape targets:
+
+```yaml
+global:
+  observability:
+    metrics:
+      enabled: true
+```
+
 Use Prometheus Operator with the provided ServiceMonitor examples:
 
 ```yaml

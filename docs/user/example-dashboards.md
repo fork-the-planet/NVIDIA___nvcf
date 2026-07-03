@@ -49,6 +49,9 @@ Before deploying the example dashboards, you need:
 4. `kubectl` configured to access your cluster
 
 <Note>
+To populate Prometheus-backed dashboards, deploy the control-plane with
+`global.observability.metrics.enabled` set to `true`.
+
 To view traces in the example stack, the control-plane must be deployed
 with tracing enabled and configured to send OTLP traces to the
 observability collector. See [Tracing Configuration](./observability.md)
@@ -58,21 +61,23 @@ for the required Helm overrides under `global.observability.tracing` (e.g.,
 
 </Note>
 
-### Enabling tracing after initial deployment
+### Enabling metrics and tracing after initial deployment
 
 If observability was not configured during the initial self-hosted NVCF cluster
-deployment (i.e., `global.observability.tracing.enabled` was set to `false`),
-you can enable tracing later so that the control-plane sends OTLP traces to the
-deployed observability collector. Use the following steps.
+deployment, you can enable metrics later so that control-plane services expose
+Prometheus metrics. Enable tracing if you also want the control-plane to send
+OTLP traces to the deployed observability collector. Use the following steps.
 
-1. **Edit the environment file** (`environments/<environment-name>.yaml`) to
-   enable tracing and set `collectorEndpoint` to the deployed collector's
-   service address. For the example observability reference stack, the collector
-   runs in the `observability` namespace. Example:
+1. Edit the environment file (`environments/<environment-name>.yaml`) to
+   enable metrics and tracing. Set `collectorEndpoint` to the deployed
+   collector's service address. For the example observability reference stack,
+   the collector runs in the `observability` namespace. Example:
 
    ```yaml
    global:
      observability:
+       metrics:
+         enabled: true
        tracing:
          enabled: true
          collectorEndpoint: "otel-collector-gateway-collector.observability.svc.cluster.local"
@@ -80,8 +85,7 @@ deployed observability collector. Use the following steps.
          collectorProtocol: http
    ```
 
-2. **Apply the configuration changes** from your control-plane deployment
-   directory:
+2. Apply the configuration changes from your control-plane deployment directory:
 
    ```bash
    HELMFILE_ENV=<environment-name> helmfile sync
