@@ -89,7 +89,7 @@ func renderManifestArtifactRegistryPaths(catalog *Catalog) (string, error) {
 			Description: "Services that manage the NVCF platform including API gateway, deployment orchestration, invocation handling, LLM routing, and security services.",
 			Names: []string{
 				"spot",
-				"strap",
+				"nvcf-service-oss",
 				"helm-nvcf-api",
 				"helm-nvcf-sis",
 				"nvcf-grpc-proxy",
@@ -102,10 +102,10 @@ func renderManifestArtifactRegistryPaths(catalog *Catalog) (string, error) {
 				"helm-nvcf-notary-service",
 				"reval-server",
 				"helm-reval",
-				"nv-api-keys",
+				"nvcf-api-keys-service",
 				"helm-nvcf-api-keys",
 				"nvct-service-oss",
-				"helm-nvct-api",
+				"helm-nvcf-nvct-api",
 				"llm-api-gateway",
 				"llm-request-router",
 				"helm-nvcf-llm-api-gateway",
@@ -121,7 +121,6 @@ func renderManifestArtifactRegistryPaths(catalog *Catalog) (string, error) {
 				"helm-nvca-operator",
 				"nvcf_worker_utils",
 				"nvcf_worker_init",
-				"nvcf_worker_niclls",
 				"ess-agent",
 				"nvcf-image-credential-helper",
 			},
@@ -131,7 +130,6 @@ func renderManifestArtifactRegistryPaths(catalog *Catalog) (string, error) {
 			Description: "Additional utilities and helper services required for the platform, including the NVIDIA GPU Operator for GPU node management.",
 			Names: []string{
 				"alpine-k8s",
-				"load_tester_supreme",
 			},
 			StaticRows: []manifestStaticRow{
 				{Type: "Chart (HTTP)", Name: "gpu-operator", Path: "[Public NGC Helm repo](https://helm.ngc.nvidia.com/nvidia)"},
@@ -166,42 +164,6 @@ func renderManifestArtifactRegistryPaths(catalog *Catalog) (string, error) {
 				"nvcf-container-cache",
 				"helm-nvcf-container-cache",
 				"nvcf-proxy-tls-certs",
-			},
-		},
-		{
-			Heading:     "Simulation Caching Components",
-			Description: "Optional caching components for Low Latency Streaming (LLS) and simulation workloads, including shader caching, derived data caching, and USD content caching.",
-			Names: []string{
-				"gxcache-webhook",
-				"gxcache-init",
-				"gxcache-service",
-				"helm-gxcache",
-				"ddcs-dist-kv",
-				"usd-content-cache",
-			},
-			StaticRows: []manifestStaticRow{
-				{Type: "Chart (HTTP)", Name: "ddcs", Path: "https://helm.ngc.nvidia.com/nvidia/omniverse/ddcs:5.0.0"},
-				{Type: "Chart (HTTP)", Name: "usd-content-cache", Path: "https://helm.ngc.nvidia.com/nvidia/omniverse/usd-content-cache:3.0.3"},
-			},
-		},
-		{
-			Heading:     "Storage API Components",
-			Description: "Optional components for USD Storage API functionality used in simulation workloads.",
-			Names: []string{
-				"storage-service",
-				"simple-nginx",
-			},
-			StaticRows: []manifestStaticRow{
-				{Type: "Chart (HTTP)", Name: "storage-service", Path: "https://helm.ngc.nvidia.com/nvidia/omniverse/storage-service:1.0.2"},
-				{Type: "Chart (HTTP)", Name: "discovery-service", Path: "https://helm.ngc.nvidia.com/nvidia/omniverse/discovery-service:2.3.8"},
-			},
-		},
-		{
-			Heading:     "Low Latency Streaming (LLS) Components",
-			Description: "Components for Low Latency Streaming functionality.",
-			Names: []string{
-				"streaming-proxy",
-				"gdn-streaming",
 			},
 		},
 	}

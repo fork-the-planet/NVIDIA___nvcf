@@ -4,9 +4,6 @@
 version: 1
 target: main
 registries:
-  nvidia-omniverse:
-    host: nvcr.io
-    namespace: nvidia/omniverse
   public-helm:
     host: https://helm.ngc.nvidia.com
     namespace: nvidia/nvcf
@@ -145,13 +142,64 @@ publications:
     version: 1.12.7
     registry: public-helm
     chart_format: http
+version_overrides:
+  - name: nvcf_worker_utils
+    version: 2.109.4
+    source: helm-nvcf-api:1.23.1
+  - name: nvcf_worker_init
+    version: 2.109.4
+    source: helm-nvcf-api:1.23.1
+  - name: ess-agent
+    version: 1.1.0
+    source: helm-nvcf-api:1.23.1
+  - name: llm-request-router
+    version: 0.3.0
+    source: helm-nvcf-llm-request-router:1.6.3
+  - name: pylon
+    version: 0.3.0
+    source: stargate:0.3.0 paired release
 stack:
   name: nvcf-self-managed-stack
-  version: 0.6.0-rc.97
+  version: 0.6.0-rc.98
   registry: staging
   gitlab_project_id: 182049
   package_name: ncp-deploy
-  artifacts_file: artifacts-0.6.0-rc.97.txt
+  artifacts_file: artifacts-0.6.0-rc.98.txt
+denylist:
+  - name: strap
+    reason: Legacy name replaced by nvcf-service-oss
+  - name: nv-api-keys
+    reason: Legacy name replaced by nvcf-api-keys-service
+  - name: nvcf_worker_niclls
+    reason: Proprietary image excluded from the published manifest
+  - name: stargate-client
+    reason: Renamed worker client deferred to a later release
+  - name: ddcs-dist-kv
+    reason: Excluded from the published manifest
+  - name: ddcs
+    reason: Excluded from the published manifest
+  - name: usd-content-cache
+    reason: Excluded from the published manifest
+  - name: load_tester_supreme
+    reason: Excluded from the published manifest
+  - name: gxcache-webhook
+    reason: Excluded from the published manifest
+  - name: gxcache-init
+    reason: Excluded from the published manifest
+  - name: gxcache-service
+    reason: Excluded from the published manifest
+  - name: helm-gxcache
+    reason: Excluded from the published manifest
+  - name: storage-service
+    reason: Excluded from the published manifest
+  - name: simple-nginx
+    reason: Excluded from the published manifest
+  - name: discovery-service
+    reason: Excluded from the published manifest
+  - name: streaming-proxy
+    reason: Excluded from the published manifest
+  - name: gdn-streaming
+    reason: Excluded from the published manifest
 artifacts:
   - name: admin-token-issuer-proxy
     type: image
@@ -196,7 +244,7 @@ artifacts:
   - name: helm-nvcf-api
     type: chart
     registry: staging
-    version: 1.22.5
+    version: 1.23.1
   - name: helm-nvcf-cassandra
     type: chart
     registry: staging
@@ -316,7 +364,7 @@ artifacts:
   - name: nvcf-service-oss
     type: image
     registry: staging
-    version: 1.8.1
+    version: 1.9.0
   - name: nvct-service-oss
     type: image
     registry: staging
@@ -325,10 +373,6 @@ artifacts:
     type: image
     registry: staging
     version: 1.7.4
-  - name: pylon
-    type: image
-    registry: staging
-    version: 0.2.1
   - name: reval-server
     type: image
     registry: staging
@@ -342,6 +386,10 @@ supplemental_artifacts:
     type: resource
     registry: staging
     version: 0.0.30
+  - name: pylon
+    type: image
+    registry: staging
+    version: 0.3.0
   - name: helm-nvca-operator
     type: chart
     registry: staging
@@ -354,59 +402,35 @@ supplemental_artifacts:
     type: image
     registry: staging
     version: 3.0.3
-  - name: stargate-client
-    type: image
-    registry: staging
-    version: 0.3.0
   - name: nvcf-compute-plane-stack
     type: resource
     registry: staging
     version: 1.0.6
-  - name: nv-api-keys
-    type: image
-    registry: staging
-    version: 0.0.7
-  - name: helm-nvct-api
-    type: chart
-    registry: staging
-    version: 1.0.2
-  - name: strap
-    type: image
-    registry: staging
-    version: 2.242.2
   - name: llm-api-gateway
     type: image
     registry: staging
-    version: 0.6.1
+    version: 0.8.3
   - name: llm-request-router
     type: image
     registry: staging
     repository_name: stargate
-    version: 0.4.0
+    version: 0.3.0
   - name: nvcf_worker_utils
     type: image
     registry: staging
-    version: 2.101.0
+    version: 2.109.4
   - name: nvcf_worker_init
     type: image
     registry: staging
-    version: 2.102.0
-  - name: nvcf_worker_niclls
-    type: image
-    registry: staging
-    version: 2.105.7
+    version: 2.109.4
   - name: ess-agent
     type: image
     registry: staging
-    version: 1.0.5
+    version: 1.1.0
   - name: nvcf-image-credential-helper
     type: image
     registry: staging
     version: 0.10.2
-  - name: load_tester_supreme
-    type: image
-    registry: staging
-    version: 0.0.8
   - name: nvcf-observability-reference-stack
     type: chart
     registry: staging
@@ -422,53 +446,11 @@ supplemental_artifacts:
   - name: helm-nvcf-container-cache
     type: chart
     registry: staging
-    repository_name: nvcf-container-cache
     version: 0.25.6
   - name: nvcf-proxy-tls-certs
     type: image
     registry: staging
     version: 1.2.0
-  - name: gxcache-webhook
-    type: image
-    registry: staging
-    version: 59bd8ec5
-  - name: gxcache-init
-    type: image
-    registry: staging
-    version: 1e47f722
-  - name: gxcache-service
-    type: image
-    registry: staging
-    version: b206ce39
-  - name: helm-gxcache
-    type: chart
-    registry: staging
-    repository_name: gxcache
-    version: 0.8.2
-  - name: ddcs-dist-kv
-    type: image
-    registry: nvidia-omniverse
-    version: 5.0.0
-  - name: usd-content-cache
-    type: image
-    registry: nvidia-omniverse
-    version: 3.0.1
-  - name: storage-service
-    type: image
-    registry: nvidia-omniverse
-    version: 1.0.2
-  - name: simple-nginx
-    type: image
-    registry: nvidia-omniverse
-    version: 1.0.2
-  - name: streaming-proxy
-    type: image
-    registry: staging
-    version: 2.0.1
-  - name: gdn-streaming
-    type: chart
-    registry: staging
-    version: 2.0.1
 outputs:
   - path: docs/user/manifest.md
     blocks:

@@ -47,9 +47,12 @@ openbao:
     # Single-node local cluster: hard anti-affinity would leave the 2nd replica Pending.
     replicas: 1
 
+# Pylon exits at startup when the API advertises its default HTTPS dummy OTLP
+# endpoint because the current binary has no OpenTelemetry TLS provider. Keep
+# worker telemetry on HTTP in this fixture until Pylon supports HTTPS OTLP.
 api:
   env:
-    NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE: nvcr.io/REPLACE_WITH_SAMPLE_NGC_ORG/REPLACE_WITH_SAMPLE_NGC_TEAM/stargate-client:0.2.0
+    MANAGEMENT_OTLP_TRACING_ENDPOINT: http://dummy:8282
 
 # LLM gateway talks to nvcf-api over plaintext gRPC in local dev
 # (api.nvcf.svc.cluster.local:9090 has no TLS).
@@ -68,6 +71,17 @@ addons:
       metrics:
         serviceMonitor:
           enabled: false
+      loadBalancer:
+        config: |
+          {
+            "default": "power-of-two",
+            "request_algorithms": {
+              "power-of-two": "power-of-two",
+              "round-robin": "round-robin",
+              "random": "random",
+              "groq-multiregion": "groq-multiregion"
+            }
+          }
 
 # Gateway API Ingress (POC)
 # Application Developer role: Only HTTPRoutes

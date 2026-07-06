@@ -108,7 +108,7 @@ func TestRenderManifestHandlesNewNVCAAndNVCTImageAndHelmArtifacts(t *testing.T) 
 		Artifact{Name: "nvca-operator", Type: ArtifactTypeImage, Registry: "staging", Version: "3.0.0-rc.13"},
 		Artifact{Name: "helm-nvca-operator", Type: ArtifactTypeChart, Registry: "staging", Version: "1.11.1"},
 		Artifact{Name: "nvct-service-oss", Type: ArtifactTypeImage, Registry: "staging", Version: "1.2.11"},
-		Artifact{Name: "helm-nvct-api", Type: ArtifactTypeChart, Registry: "staging", Version: "1.0.2"},
+		Artifact{Name: "helm-nvcf-nvct-api", Type: ArtifactTypeChart, Registry: "staging", Version: "1.4.2"},
 	)
 
 	got, err := Render("manifest-artifact-registry-paths", catalog)
@@ -130,7 +130,7 @@ func TestRenderManifestHandlesNewNVCAAndNVCTImageAndHelmArtifacts(t *testing.T) 
 	controlPlane := sectionBetween(t, got, "#### Control Plane Components", "#### GPU Workload Components")
 	for _, want := range []string{
 		"| Image | nvct-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvct-service-oss:1.2.11` |",
-		"| Chart (OCI) | helm-nvct-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvct-api:1.0.2` |",
+		"| Chart (OCI) | helm-nvcf-nvct-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-nvct-api:1.4.2` |",
 	} {
 		if !strings.Contains(controlPlane, want) {
 			t.Fatalf("control plane section missing %q:\n%s", want, controlPlane)
@@ -139,6 +139,9 @@ func TestRenderManifestHandlesNewNVCAAndNVCTImageAndHelmArtifacts(t *testing.T) 
 
 	if other, ok := optionalSectionBetween(got, "#### Other Published Components", "#### Deployment Resources"); ok && strings.Contains(other, "nvct") {
 		t.Fatalf("NVCT artifacts should not render in the fallback section:\n%s", other)
+	}
+	if strings.Contains(got, "helm-nvct-api") {
+		t.Fatalf("rendered manifest contains obsolete helm-nvct-api chart name:\n%s", got)
 	}
 }
 
@@ -212,6 +215,67 @@ func TestCatalogRefreshPreservesVersionQualifiedPublications(t *testing.T) {
 	}
 	if path != "nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-grpc-proxy:1.30.0" {
 		t.Fatalf("path = %q, want refreshed version at its stack-provided location", path)
+	}
+}
+
+func TestCatalogRefreshAppliesVersionOverrides(t *testing.T) {
+	base := testCatalog()
+	base.VersionOverrides = []VersionOverride{{
+		Name:    "nvcf_worker_utils",
+		Version: "2.109.4",
+		Source:  "helm-nvcf-api:1.22.5",
+	}}
+	updated := BuildCatalogFromArtifactsWithBase("0.6.0-rc.99", []Artifact{{
+		Name:     "nvcf_worker_utils",
+		Type:     ArtifactTypeImage,
+		Registry: "staging",
+		Version:  "2.101.0",
+	}}, base)
+
+	artifact, ok := updated.findArtifact("nvcf_worker_utils")
+	if !ok {
+		t.Fatal("updated catalog is missing nvcf_worker_utils")
+	}
+	if artifact.Version != "2.109.4" {
+		t.Fatalf("version = %q, want chart-derived override 2.109.4", artifact.Version)
+	}
+	path, err := updated.artifactPath(artifact)
+	if err != nil {
+		t.Fatalf("artifactPath failed: %v", err)
+	}
+	if path != "nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_utils:2.109.4" {
+		t.Fatalf("path = %q, want overridden version at its stack-provided location", path)
+	}
+}
+
+func TestValidateCatalogRejectsPublishedVersionOverrideDrift(t *testing.T) {
+	catalog := testCatalog()
+	catalog.Registries["public-images"] = Registry{Host: "nvcr.io", Namespace: "nvidia/nvcf"}
+	catalog.Publications = []Publication{{
+		Name:     "nvcf_worker_utils",
+		Version:  "2.110.0",
+		Registry: "public-images",
+	}}
+	catalog.VersionOverrides = []VersionOverride{{
+		Name:    "nvcf_worker_utils",
+		Version: "2.109.4",
+	}}
+
+	err := ValidateCatalog(catalog)
+	if err == nil || !strings.Contains(err.Error(), "version override nvcf_worker_utils:2.109.4 does not match publication version 2.110.0") {
+		t.Fatalf("ValidateCatalog error = %v, want publication version drift", err)
+	}
+}
+
+func TestValidateCatalogAllowsUnpublishedVersionOverride(t *testing.T) {
+	catalog := testCatalog()
+	catalog.VersionOverrides = []VersionOverride{{
+		Name:    "pylon",
+		Version: "0.3.0",
+	}}
+
+	if err := ValidateCatalog(catalog); err != nil {
+		t.Fatalf("ValidateCatalog failed for unpublished override: %v", err)
 	}
 }
 

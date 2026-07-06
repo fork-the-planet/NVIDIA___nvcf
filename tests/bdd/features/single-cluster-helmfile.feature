@@ -18,10 +18,9 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
       # ingress.gatewayApi.*). The Background only overlays the operator-specific
       # values that vary per NGC org and pull-secret name.
       And I update yaml file "deploy/stacks/self-managed/environments/local-bdd.yaml" with keys:
-        | global.imagePullSecrets[0].name               | nvcr-pull-secret                                                    |
-        | global.helm.sources.repository                | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
-        | global.image.repository                       | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
-        | api.env.NVCF_SIDECARS_LLM_ROUTER_CLIENT_IMAGE | nvcr.io/${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}/stargate-client:0.2.0  |
+        | global.imagePullSecrets[0].name | nvcr-pull-secret                     |
+        | global.helm.sources.repository  | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
+        | global.image.repository         | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
       And I copy the file "tests/bdd/fixtures/nvcf-compute-plane-local-bdd.yaml" to "deploy/stacks/nvcf-compute-plane/environments/local-bdd.yaml"
       And I update yaml file "deploy/stacks/nvcf-compute-plane/environments/local-bdd.yaml" with keys:
         | global.imagePullSecrets[0].name               | nvcr-pull-secret                                                    |

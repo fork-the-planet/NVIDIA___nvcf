@@ -92,8 +92,8 @@ Services that manage the NVCF platform including API gateway, deployment orchest
 | Type | Component Name | Full Path |
 | --- | --- | --- |
 | Image | spot | `nvcr.io/0833294136851237/nvcf-ncp-staging/spot:1.563.1` |
-| Image | strap | `nvcr.io/0833294136851237/nvcf-ncp-staging/strap:2.242.2` |
-| Chart (HTTP) | helm-nvcf-api | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-api:1.22.5` |
+| Image | nvcf-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-service-oss:1.9.0` |
+| Chart (OCI) | helm-nvcf-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-api:1.23.1` |
 | Chart (HTTP) | helm-nvcf-sis | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-sis:1.17.0` |
 | Image | nvcf-grpc-proxy | `nvcr.io/nvidia/nvcf/nvcf-grpc-proxy:1.29.1` |
 | Chart (HTTP) | helm-nvcf-grpc-proxy | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-grpc-proxy:1.6.7` |
@@ -105,12 +105,12 @@ Services that manage the NVCF platform including API gateway, deployment orchest
 | Chart (HTTP) | helm-nvcf-notary-service | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-notary-service:1.4.1` |
 | Image | reval-server | `nvcr.io/nvidia/nvcf/reval-server:0.2.2` |
 | Chart (HTTP) | helm-reval | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-reval:1.3.8` |
-| Image | nv-api-keys | `nvcr.io/0833294136851237/nvcf-ncp-staging/nv-api-keys:0.0.7` |
+| Image | nvcf-api-keys-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-api-keys-service:1.2.14` |
 | Chart (HTTP) | helm-nvcf-api-keys | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-api-keys:1.5.1` |
 | Image | nvct-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvct-service-oss:1.5.5` |
-| Chart (OCI) | helm-nvct-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvct-api:1.0.2` |
-| Image | llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.6.1` |
-| Image | llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.4.0` |
+| Chart (HTTP) | helm-nvcf-nvct-api | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-nvct-api:1.4.2` |
+| Image | llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.8.3` |
+| Image | llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.3.0` |
 | Chart (HTTP) | helm-nvcf-llm-api-gateway | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-llm-api-gateway:1.2.0` |
 | Chart (HTTP) | helm-nvcf-llm-request-router | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-llm-request-router:1.6.3` |
 
@@ -123,10 +123,9 @@ Components that run on GPU nodes to manage function execution, including the NVC
 | Image | nvca | `nvcr.io/nvidia/nvcf/nvca:3.0.3` |
 | Image | nvca-operator | `nvcr.io/nvidia/nvcf/nvca-operator:3.0.3` |
 | Chart (HTTP) | helm-nvca-operator | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvca-operator:1.12.7` |
-| Image | nvcf_worker_utils | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_utils:2.101.0` |
-| Image | nvcf_worker_init | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_init:2.102.0` |
-| Image | nvcf_worker_niclls | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_niclls:2.105.7` |
-| Image | ess-agent | `nvcr.io/0833294136851237/nvcf-ncp-staging/ess-agent:1.0.5` |
+| Image | nvcf_worker_utils | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_utils:2.109.4` |
+| Image | nvcf_worker_init | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_init:2.109.4` |
+| Image | ess-agent | `nvcr.io/0833294136851237/nvcf-ncp-staging/ess-agent:1.1.0` |
 | Image | nvcf-image-credential-helper | `nvcr.io/nvidia/nvcf/nvcf-image-credential-helper:0.10.2` |
 
 #### Supporting Components
@@ -136,7 +135,6 @@ Additional utilities and helper services required for the platform, including th
 | Type | Component Name | Full Path |
 | --- | --- | --- |
 | Image | alpine-k8s | `nvcr.io/0833294136851237/nvcf-ncp-staging/alpine-k8s:1.36.1` |
-| Image | load_tester_supreme | `nvcr.io/0833294136851237/nvcf-ncp-staging/load_tester_supreme:0.0.8` |
 | Chart (HTTP) | gpu-operator | [Public NGC Helm repo](https://helm.ngc.nvidia.com/nvidia) |
 | Image | gpu-operator-validator | [Public NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/cloud-native/containers/gpu-operator-validator) |
 | Image | k8s-device-plugin | [Public NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/k8s/containers/device-plugin) |
@@ -170,43 +168,8 @@ Optional components for accelerating container image pulls across all workload t
 | Type | Component Name | Full Path |
 | --- | --- | --- |
 | Image | nvcf-container-cache | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-container-cache:v1.1.31` |
-| Chart (OCI) | helm-nvcf-container-cache | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-container-cache:0.25.6` |
+| Chart (OCI) | helm-nvcf-container-cache | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-container-cache:0.25.6` |
 | Image | nvcf-proxy-tls-certs | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-proxy-tls-certs:1.2.0` |
-
-#### Simulation Caching Components
-
-Optional caching components for Low Latency Streaming (LLS) and simulation workloads, including shader caching, derived data caching, and USD content caching.
-
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | gxcache-webhook | `nvcr.io/0833294136851237/nvcf-ncp-staging/gxcache-webhook:59bd8ec5` |
-| Image | gxcache-init | `nvcr.io/0833294136851237/nvcf-ncp-staging/gxcache-init:1e47f722` |
-| Image | gxcache-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/gxcache-service:b206ce39` |
-| Chart (OCI) | helm-gxcache | `nvcr.io/0833294136851237/nvcf-ncp-staging/gxcache:0.8.2` |
-| Image | ddcs-dist-kv | `nvcr.io/nvidia/omniverse/ddcs-dist-kv:5.0.0` |
-| Image | usd-content-cache | `nvcr.io/nvidia/omniverse/usd-content-cache:3.0.1` |
-| Chart (HTTP) | ddcs | `https://helm.ngc.nvidia.com/nvidia/omniverse/ddcs:5.0.0` |
-| Chart (HTTP) | usd-content-cache | `https://helm.ngc.nvidia.com/nvidia/omniverse/usd-content-cache:3.0.3` |
-
-#### Storage API Components
-
-Optional components for USD Storage API functionality used in simulation workloads.
-
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | storage-service | `nvcr.io/nvidia/omniverse/storage-service:1.0.2` |
-| Image | simple-nginx | `nvcr.io/nvidia/omniverse/simple-nginx:1.0.2` |
-| Chart (HTTP) | storage-service | `https://helm.ngc.nvidia.com/nvidia/omniverse/storage-service:1.0.2` |
-| Chart (HTTP) | discovery-service | `https://helm.ngc.nvidia.com/nvidia/omniverse/discovery-service:2.3.8` |
-
-#### Low Latency Streaming (LLS) Components
-
-Components for Low Latency Streaming functionality.
-
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | streaming-proxy | `nvcr.io/0833294136851237/nvcf-ncp-staging/streaming-proxy:2.0.1` |
-| Chart (OCI) | gdn-streaming | `nvcr.io/0833294136851237/nvcf-ncp-staging/gdn-streaming:2.0.1` |
 
 #### Other Published Components
 
@@ -219,13 +182,9 @@ Additional components present in the current stack artifact manifest.
 | Image | cert-manager-startupapicheck | `nvcr.io/nvidia/nvcf/cert-manager-startupapicheck:v1.20.2` |
 | Image | cert-manager-webhook | `nvcr.io/nvidia/nvcf/cert-manager-webhook:v1.20.2` |
 | Chart (HTTP) | helm-nvcf-cert-manager | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-cert-manager:0.1.0` |
-| Chart (HTTP) | helm-nvcf-nvct-api | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-nvct-api:1.4.2` |
 | Chart (HTTP) | helm-nvcf-rate-limiter | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-rate-limiter:1.0.3` |
 | Chart (HTTP) | helm-nvcf-vanity-gateway | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-vanity-gateway:0.1.0-nvcf-10204.1` |
-| Image | nvcf-api-keys-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-api-keys-service:1.2.14` |
-| Image | nvcf-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-service-oss:1.8.1` |
-| Image | pylon | `nvcr.io/0833294136851237/nvcf-ncp-staging/pylon:0.2.1` |
-| Image | stargate-client | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate-client:0.3.0` |
+| Image | pylon | `nvcr.io/0833294136851237/nvcf-ncp-staging/pylon:0.3.0` |
 
 #### Deployment Resources
 
@@ -233,7 +192,7 @@ Helmfile and CLI resources for deployment.
 
 | Type | Component Name | Full Path |
 | --- | --- | --- |
-| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.97` |
+| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.98` |
 | Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |
 | Resource | nvcf-compute-plane-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:1.0.6` |
 
@@ -264,7 +223,7 @@ Helmfile and CLI resources for deployment.
 | Component Name | Description |
 | --- | --- |
 | spot | Spot Instance Service (SIS) - Manages deployments, cluster and instance state |
-| strap | NVCF API service, refer to [self-hosted-api](./api.md) for full API specification |
+| nvcf-service-oss | NVCF API service, refer to [self-hosted-api](./api.md) for full API specification |
 | helm-nvcf-api | Helm chart for NVCF API service |
 | helm-nvcf-sis | Helm chart for Spot Instance Service |
 | nvcf-grpc-proxy | Used for bi-directional communication and state management |
@@ -277,7 +236,7 @@ Helmfile and CLI resources for deployment.
 | helm-nvcf-notary-service | Helm chart for Notary Service |
 | reval-server | Reval (re-validation) service - Handles background re-validation of function state |
 | helm-reval | Helm chart for Reval service |
-| nv-api-keys | API Key generation and management |
+| nvcf-api-keys-service | API key generation and management |
 | helm-nvcf-api-keys | Helm chart for API Keys service |
 | llm-api-gateway | Gateway service for OpenAI-compatible LLM requests |
 | llm-request-router | Request routing service backed by the Stargate image |
@@ -292,7 +251,6 @@ Helmfile and CLI resources for deployment.
 | helm-nvca-operator (chart) | Helm chart for NVCA operator deployment (current chart name, versions 1.4.0+) |
 | nvcf_worker_utils | Acts as a proxy to NATS from the user's application |
 | nvcf_worker_init | Setup & Resource loading on deployment for the users application |
-| nvcf_worker_niclls | NIC LLS worker component for low latency streaming workloads |
 | ess-agent | Injects User Secrets |
 | nvcf-image-credential-helper | Helper for managing container image credentials |
 
@@ -330,35 +288,6 @@ Helmfile and CLI resources for deployment.
 | nvcf-container-cache | Accelerates container image pulls by caching layers locally on nodes |
 | helm-nvcf-container-cache | Helm chart for container cache deployment |
 | nvcf-proxy-tls-certs | TLS certificate management for container cache proxy |
-
-#### Simulation Caching Components
-
-| Component Name | Description |
-| --- | --- |
-| gxcache-webhook | Shader cache webhook for intercepting and caching shader compilation requests |
-| gxcache-init | Init container for shader cache setup |
-| gxcache-service | Backend service for shader cache storage and retrieval |
-| helm-gxcache | Helm chart for deploying the complete shader cache stack |
-| ddcs-dist-kv | Derived Data Cache Service - caches computed/derived data for simulation workloads |
-| ddcs | Helm chart for DDCS deployment |
-| usd-content-cache | USD Content Cache - caches Universal Scene Description assets for streaming |
-| usd-content-cache (chart) | Helm chart for USD Content Cache deployment |
-
-#### Storage API Components
-
-| Component Name | Description |
-| --- | --- |
-| storage-service | USD Storage Service for managing assets in simulation workloads |
-| storage-service (chart) | Helm chart for Storage Service deployment |
-| simple-nginx | Simple NGINX container for Storage API routing |
-| discovery-service | Helm chart for Storage API Discovery Service |
-
-#### Low Latency Streaming (LLS) Components
-
-| Component Name | Description |
-| --- | --- |
-| streaming-proxy | LLS Streaming Proxy Container |
-| gdn-streaming | LLS Self-Hosted Helm Chart |
 
 #### Deployment Resources
 

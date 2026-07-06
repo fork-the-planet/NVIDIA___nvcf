@@ -51,6 +51,7 @@ type Catalog struct {
 	Target                string              `yaml:"target"`
 	Registries            map[string]Registry `yaml:"registries"`
 	Publications          []Publication       `yaml:"publications,omitempty"`
+	VersionOverrides      []VersionOverride   `yaml:"version_overrides,omitempty"`
 	Stack                 StackMetadata       `yaml:"stack"`
 	Denylist              []DenylistEntry     `yaml:"denylist,omitempty"`
 	Artifacts             []Artifact          `yaml:"artifacts"`
@@ -75,6 +76,12 @@ type Publication struct {
 	Version     string      `yaml:"version"`
 	Registry    string      `yaml:"registry"`
 	ChartFormat ChartFormat `yaml:"chart_format,omitempty"`
+}
+
+type VersionOverride struct {
+	Name    string `yaml:"name"`
+	Version string `yaml:"version"`
+	Source  string `yaml:"source,omitempty"`
 }
 
 type StackMetadata struct {
@@ -199,6 +206,7 @@ func ValidateCatalog(catalog *Catalog) error {
 		}
 	}
 	seenPublications := map[string]struct{}{}
+	publicationVersions := map[string][]string{}
 	for _, publication := range catalog.Publications {
 		if strings.TrimSpace(publication.Name) == "" {
 			return fmt.Errorf("publication name cannot be empty")
@@ -217,6 +225,26 @@ func ValidateCatalog(catalog *Catalog) error {
 			return fmt.Errorf("duplicate publication %s", key)
 		}
 		seenPublications[key] = struct{}{}
+		publicationVersions[publication.Name] = append(publicationVersions[publication.Name], publication.Version)
+	}
+	seenVersionOverrides := map[string]struct{}{}
+	for _, override := range catalog.VersionOverrides {
+		if strings.TrimSpace(override.Name) == "" {
+			return fmt.Errorf("version override name cannot be empty")
+		}
+		if strings.TrimSpace(override.Version) == "" {
+			return fmt.Errorf("version override %s has empty version", override.Name)
+		}
+		if _, exists := seenVersionOverrides[override.Name]; exists {
+			return fmt.Errorf("duplicate version override %s", override.Name)
+		}
+		if versions, published := publicationVersions[override.Name]; published {
+			key := override.Name + ":" + override.Version
+			if _, matches := seenPublications[key]; !matches {
+				return fmt.Errorf("version override %s does not match publication version %s", key, strings.Join(versions, ", "))
+			}
+		}
+		seenVersionOverrides[override.Name] = struct{}{}
 	}
 	if strings.TrimSpace(catalog.Stack.Name) == "" {
 		return fmt.Errorf("stack name cannot be empty")
@@ -429,6 +457,7 @@ func BuildCatalogFromArtifactsWithBase(stackVersion string, artifacts []Artifact
 		}
 	}
 	catalog.Publications = append(catalog.Publications, base.Publications...)
+	catalog.VersionOverrides = append(catalog.VersionOverrides, base.VersionOverrides...)
 	catalog.Denylist = append(catalog.Denylist, base.Denylist...)
 
 	manifestNames := map[string]struct{}{}
@@ -459,8 +488,24 @@ func BuildCatalogFromArtifactsWithBase(stackVersion string, artifacts []Artifact
 		catalog.SupplementalArtifacts = append(catalog.SupplementalArtifacts, artifact)
 		seenSupplemental[key] = struct{}{}
 	}
+	catalog.applyVersionOverrides()
 	catalog.pruneUnusedRegistries()
 	return catalog
+}
+
+func (catalog *Catalog) applyVersionOverrides() {
+	for _, override := range catalog.VersionOverrides {
+		for i := range catalog.Artifacts {
+			if catalog.Artifacts[i].Name == override.Name {
+				catalog.Artifacts[i].Version = override.Version
+			}
+		}
+		for i := range catalog.SupplementalArtifacts {
+			if catalog.SupplementalArtifacts[i].Name == override.Name {
+				catalog.SupplementalArtifacts[i].Version = override.Version
+			}
+		}
+	}
 }
 
 func (catalog *Catalog) pruneUnusedRegistries() {
