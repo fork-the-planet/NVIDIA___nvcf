@@ -83,9 +83,9 @@ assert_pre_delete_cleanup_rbac() {
   assert_eq "${cleanup_name}" \
     "$(yq 'select(.kind == "ClusterRoleBinding" and .metadata.name == "test-release-nvca-operator-pre-delete-cleanup") | .roleRef.name' "${rendered}")" \
     "pre-delete cleanup ClusterRoleBinding uses hook ClusterRole"
-  assert_eq "--hook-cluster-role-binding-name" \
-    "$(yq 'select(.kind == "Job" and .metadata.name == "test-release-nvca-operator-pre-delete-cleanup") | .spec.template.spec.containers[0].args[]' "${rendered}" | grep -Fx -- "--hook-cluster-role-binding-name" || true)" \
-    "pre-delete cleanup Job removes hook ClusterRoleBinding after cleanup"
+  assert_eq "before-hook-creation,hook-succeeded" \
+    "$(yq 'select(.kind == "ClusterRoleBinding" and .metadata.name == "test-release-nvca-operator-pre-delete-cleanup") | .metadata.annotations."helm.sh/hook-delete-policy"' "${rendered}")" \
+    "pre-delete cleanup ClusterRoleBinding is removed by Helm after job succeeds"
   assert_eq "before-hook-creation" \
     "$(yq 'select(.kind == "ClusterRole" and .metadata.name == "test-release-nvca-operator-pre-delete-cleanup") | .metadata.annotations."helm.sh/hook-delete-policy"' "${rendered}")" \
     "pre-delete cleanup hook RBAC is kept for the running Job"
