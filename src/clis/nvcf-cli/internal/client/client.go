@@ -20,6 +20,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +38,7 @@ import (
 	"nvcf-cli/internal/state"
 
 	"github.com/spf13/viper"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -87,6 +89,11 @@ type Config struct {
 	APIHost    string // Host header for NVCF API requests (e.g., "api.gateway.example.com")
 	InvokeHost string // Host header for invocation requests (e.g., "invocation.gateway.example.com")
 	ICMSHost   string // Host header for SIS/ICMS requests; allows pairing icms_url=http://<bare-elb> with Host: sis.<elb> for gateway-routed self-hosted deployments where sis.<elb> does not DNS-resolve.
+
+	// TLSConfig, when set, establishes the management-API TLS trust (R-4):
+	// system roots or a configured CA bundle. It is applied to the HTTP transport
+	// without disabling certificate verification. Built by internal/selfhosted/managementtls.
+	TLSConfig *tls.Config
 
 	// Cluster mode configuration
 	ClusterMode    bool           // Enable cluster mode (uses kubectl instead of direct HTTP)
@@ -542,13 +549,23 @@ func (t *BearerTokenTransport) base() http.RoundTripper {
 func NewClient(config *Config) (*Client, error) {
 	var httpClient *http.Client
 
+	// baseTransport applies the management-API TLS trust (R-4) when configured,
+	// otherwise the shared default transport. http.DefaultTransport is shared and
+	// must not be mutated, so it is cloned before setting TLSClientConfig.
+	baseTransport := http.RoundTripper(http.DefaultTransport)
+	if config.TLSConfig != nil {
+		cloned := http.DefaultTransport.(*http.Transport).Clone()
+		cloned.TLSClientConfig = config.TLSConfig
+		baseTransport = cloned
+	}
+
 	// Create HTTP client based on authentication type
 	switch config.AuthType {
 	case AuthTypeBearer:
 		// Set up transport chain: Debug -> Auth -> HTTP
 		// This way auth transport adds headers first, then debug transport sees them
 
-		var finalTransport http.RoundTripper = http.DefaultTransport
+		var finalTransport http.RoundTripper = baseTransport
 
 		// Add authentication transport layer (this adds the Authorization header)
 		if config.Token != "" {
@@ -574,11 +591,11 @@ func NewClient(config *Config) (*Client, error) {
 		if config.Debug {
 			// Replace the base transport in the auth layer with debug transport
 			if config.Token != "" {
-				finalTransport = newMultiTokenTransport(config.APIKey, config.Token, newDebugTransport(http.DefaultTransport))
+				finalTransport = newMultiTokenTransport(config.APIKey, config.Token, newDebugTransport(baseTransport))
 			} else {
 				finalTransport = &BearerTokenTransport{
 					Token: config.APIKey,
-					Base:  newDebugTransport(http.DefaultTransport),
+					Base:  newDebugTransport(baseTransport),
 				}
 			}
 		}
@@ -613,8 +630,12 @@ func NewClient(config *Config) (*Client, error) {
 			},
 		}
 
-		// Create HTTP client with OAuth2 transport
-		ctx := context.Background()
+		// Create HTTP client with OAuth2 transport. The context client is used
+		// by oauth2 for both token acquisition and the returned transport base.
+		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{
+			Transport: baseTransport,
+			Timeout:   config.DefaultTimeout,
+		})
 		httpClient = oauth2Config.Client(ctx)
 		httpClient.Timeout = config.DefaultTimeout
 

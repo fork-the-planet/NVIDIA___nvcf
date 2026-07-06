@@ -449,6 +449,7 @@ func (r *selfHostedUpRun) applyControlPlane(stackPath string) error {
 
 func (r *selfHostedUpRun) writeControlPlaneProfile(stackPath string) error {
 	path, err := writeControlPlaneProfile(controlPlaneProfileWriteRequest{
+		Ctx:                 r.ctx,
 		StackPath:           stackPath,
 		ClusterName:         upClusterName,
 		NCAID:               upNCAID,
@@ -458,6 +459,7 @@ func (r *selfHostedUpRun) writeControlPlaneProfile(stackPath string) error {
 		ComputePlaneContext: selfHostedComputePlaneContext,
 		ICMSURL:             resolveICMSURL(selfHostedICMSURL),
 		NATSURL:             selfHostedNATSURL,
+		SourceRootCA:        true,
 	})
 	if err != nil {
 		wrapped := fmt.Errorf("writing control-plane profile: %w", err)

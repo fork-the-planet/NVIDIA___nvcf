@@ -316,6 +316,27 @@ curl -s "http://api.localhost:8080/v2/nvcf/functions" \
   -H "Authorization: Bearer ${NVCF_TOKEN}" | python3 -m json.tool
 ```
 
+## Optional: Recreate the profile
+
+If `deploy/stacks/self-managed/out/control-plane-profile.yaml` is deleted,
+recreate it from the control-plane stack and OpenBao root CA without re-running
+the full install:
+
+```bash
+nvcf-cli \
+  --config tests/bdd/fixtures/nvcf-cli-local.yaml \
+  self-hosted \
+    --control-plane-stack deploy/stacks/self-managed \
+    --env local \
+    --plain \
+    --control-plane-context k3d-ncp-local-cp \
+    --compute-plane-context k3d-ncp-local-compute-1 \
+  control-plane profile export \
+    --cluster-name ncp-local-cp \
+    --nca-id nvcf-default \
+    --region us-west-1
+```
+
 ## Teardown
 
 Remove the helm releases on both clusters but keep the topology (stack-only):

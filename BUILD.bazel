@@ -29,6 +29,7 @@ exports_files(
 # When promoting an upstream to native (Phase B), remove the corresponding
 # exclude line below and add a per-subtree BUILD.bazel with the right prefix.
 # gazelle:exclude .bazel-cache
+# gazelle:exclude .worktrees
 # gazelle:exclude .cursor
 # gazelle:exclude .claude
 # gazelle:exclude .codex

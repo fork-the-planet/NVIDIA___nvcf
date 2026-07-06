@@ -16,20 +16,16 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "openbao",
-    srcs = ["client.go"],
-    importpath = "nvcf-cli/internal/openbao",
+    name = "reachability",
+    srcs = ["reachability.go"],
+    importpath = "nvcf-cli/internal/selfhosted/reachability",
     visibility = ["//src/clis/nvcf-cli:__subpackages__"],
-    deps = [
-        "//src/clis/nvcf-cli/internal/k8s",
-        "//src/clis/nvcf-cli/internal/logging",
-    ],
 )
 
 go_test(
-    name = "openbao_test",
-    srcs = ["client_test.go"],
-    embed = [":openbao"],
+    name = "reachability_test",
+    srcs = ["reachability_test.go"],
+    embed = [":reachability"],
     deps = [
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

@@ -19,6 +19,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"os"
 	"time"
@@ -41,6 +42,14 @@ import (
 // with no Authorization header.
 var newClusterClientForSelfHosted = func(icmsURL string) (selfhosted.ClusterClient, error) {
 	return selfhosted.NewClusterClientWithToken(icmsURL, selfHostedToken)
+}
+
+// newClusterClientForSelfHostedWithTrust is the trust-aware seam used by the
+// compute-plane register flow (R-4): it applies the control-plane profile's
+// managementTls to the management-API client. Tests override it like the
+// plain factory above.
+var newClusterClientForSelfHostedWithTrust = func(icmsURL string, tlsCfg *tls.Config) (selfhosted.ClusterClient, error) {
+	return selfhosted.NewClusterClientWithTokenAndTrust(icmsURL, selfHostedToken, tlsCfg)
 }
 
 // loadClusterIdentityConfig is a package-level seam so unit tests can verify
@@ -140,6 +149,7 @@ func runSelfHostedInstall(c *cobra.Command, _ []string) error {
 			return err
 		}
 		path, err := writeControlPlaneProfile(controlPlaneProfileWriteRequest{
+			Ctx:                 c.Context(),
 			StackPath:           resolved.Path,
 			ClusterName:         installClusterName,
 			NCAID:               installNCAID,
@@ -149,6 +159,7 @@ func runSelfHostedInstall(c *cobra.Command, _ []string) error {
 			ComputePlaneContext: selfHostedComputePlaneContext,
 			ICMSURL:             resolveICMSURL(selfHostedICMSURL),
 			NATSURL:             selfHostedNATSURL,
+			SourceRootCA:        !selfHostedNoApply,
 		})
 		if err != nil {
 			return fmt.Errorf("writing control-plane profile: %w", err)

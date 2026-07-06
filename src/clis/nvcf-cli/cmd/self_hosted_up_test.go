@@ -63,11 +63,15 @@ func resetUpFlags(t *testing.T) {
 	selfHostedUpCmd.SetContext(nil)
 	prevFinalHealth := waitForComputePlaneHealth
 	prevCurrentKubeContext := selfHostedUpCurrentKubeContext
+	prevFetchRootCA := fetchControlPlaneRootCAPEM
 	waitForComputePlaneHealth = func(context.Context, computePlaneHealthRequest) (computePlaneHealthResult, error) {
 		return computePlaneHealthResult{BackendHealth: "healthy"}, nil
 	}
 	selfHostedUpCurrentKubeContext = func() (string, error) {
 		return "k3d-ncp-local", nil
+	}
+	fetchControlPlaneRootCAPEM = func(context.Context, string) (string, error) {
+		return "", nil
 	}
 	t.Cleanup(func() {
 		upClusterName = ""
@@ -85,6 +89,7 @@ func resetUpFlags(t *testing.T) {
 		selfHostedUpCmd.SetContext(nil)
 		waitForComputePlaneHealth = prevFinalHealth
 		selfHostedUpCurrentKubeContext = prevCurrentKubeContext
+		fetchControlPlaneRootCAPEM = prevFetchRootCA
 	})
 }
 

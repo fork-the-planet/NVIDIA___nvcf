@@ -20,6 +20,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"os"
 	"path/filepath"
 	"testing"
@@ -156,9 +157,9 @@ func TestComputePlaneRegisterDryRunPrintsClusterIdentity(t *testing.T) {
 		return "https://k8s.example/issuer", `{"keys":[{"kid":"key-1"}]}`, "psat", nil
 	}
 
-	prevClientFactory := newClusterClientForSelfHosted
-	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
-	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) {
+	prevClientFactory := newClusterClientForSelfHostedWithTrust
+	t.Cleanup(func() { newClusterClientForSelfHostedWithTrust = prevClientFactory })
+	newClusterClientForSelfHostedWithTrust = func(string, *tls.Config) (selfhosted.ClusterClient, error) {
 		t.Fatal("dry-run must not construct a SIS cluster client")
 		return nil, nil
 	}
@@ -447,9 +448,9 @@ func TestComputePlaneRegisterCallsSISAfterValidation(t *testing.T) {
 
 	fakeCC := &fakeClusterClient{resp: &selfhosted.RegisterResponse{ClusterID: "cluster-id", ClusterGroupID: "group-id"}}
 	var gotSISURL string
-	prevClientFactory := newClusterClientForSelfHosted
-	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
-	newClusterClientForSelfHosted = func(sisURL string) (selfhosted.ClusterClient, error) {
+	prevClientFactory := newClusterClientForSelfHostedWithTrust
+	t.Cleanup(func() { newClusterClientForSelfHostedWithTrust = prevClientFactory })
+	newClusterClientForSelfHostedWithTrust = func(sisURL string, _ *tls.Config) (selfhosted.ClusterClient, error) {
 		gotSISURL = sisURL
 		return fakeCC, nil
 	}
@@ -499,9 +500,9 @@ func TestComputePlaneRegisterWritesNVCAValuesAndHandoffCommands(t *testing.T) {
 	}
 
 	fakeCC := &fakeClusterClient{resp: &selfhosted.RegisterResponse{ClusterID: "cluster-id", ClusterGroupID: "group-id"}}
-	prevClientFactory := newClusterClientForSelfHosted
-	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
-	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) {
+	prevClientFactory := newClusterClientForSelfHostedWithTrust
+	t.Cleanup(func() { newClusterClientForSelfHostedWithTrust = prevClientFactory })
+	newClusterClientForSelfHostedWithTrust = func(string, *tls.Config) (selfhosted.ClusterClient, error) {
 		return fakeCC, nil
 	}
 
@@ -556,9 +557,9 @@ func TestComputePlaneRegisterUsesDefaultStackForValuesHandoff(t *testing.T) {
 	}
 
 	fakeCC := &fakeClusterClient{resp: &selfhosted.RegisterResponse{ClusterID: "cluster-id", ClusterGroupID: "group-id"}}
-	prevClientFactory := newClusterClientForSelfHosted
-	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
-	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) {
+	prevClientFactory := newClusterClientForSelfHostedWithTrust
+	t.Cleanup(func() { newClusterClientForSelfHostedWithTrust = prevClientFactory })
+	newClusterClientForSelfHostedWithTrust = func(string, *tls.Config) (selfhosted.ClusterClient, error) {
 		return fakeCC, nil
 	}
 
@@ -586,9 +587,9 @@ func TestComputePlaneRegisterStopsBeforeSISOnReachabilityFailure(t *testing.T) {
 		return assert.AnError
 	}
 
-	prevClientFactory := newClusterClientForSelfHosted
-	t.Cleanup(func() { newClusterClientForSelfHosted = prevClientFactory })
-	newClusterClientForSelfHosted = func(string) (selfhosted.ClusterClient, error) {
+	prevClientFactory := newClusterClientForSelfHostedWithTrust
+	t.Cleanup(func() { newClusterClientForSelfHostedWithTrust = prevClientFactory })
+	newClusterClientForSelfHostedWithTrust = func(string, *tls.Config) (selfhosted.ClusterClient, error) {
 		t.Fatal("SIS client must not be constructed after reachability failure")
 		return nil, nil
 	}
@@ -604,6 +605,32 @@ func TestComputePlaneRegisterStopsBeforeSISOnReachabilityFailure(t *testing.T) {
 	err := rootCmd.Execute()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, assert.AnError)
+}
+
+func TestTransportTLSValuesSystemOmitsTrustMaterial(t *testing.T) {
+	got := transportTLSValues(controlplaneprofile.TransportTLS{
+		TrustMode:              controlplaneprofile.TrustModeSystem,
+		TrustBundleFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TrustBundlePEM:         "-----BEGIN CERTIFICATE-----\nignored\n-----END CERTIFICATE-----\n",
+	})
+
+	require.NotNil(t, got)
+	assert.Equal(t, controlplaneprofile.TrustModeSystem, got.TrustMode)
+	assert.Empty(t, got.TrustBundleFingerprint)
+	assert.Empty(t, got.TrustBundlePem)
+}
+
+func TestTransportTLSValuesBundleIncludesTrustMaterial(t *testing.T) {
+	got := transportTLSValues(controlplaneprofile.TransportTLS{
+		TrustMode:              controlplaneprofile.TrustModeBundle,
+		TrustBundleFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TrustBundlePEM:         "-----BEGIN CERTIFICATE-----\nrendered\n-----END CERTIFICATE-----\n",
+	})
+
+	require.NotNil(t, got)
+	assert.Equal(t, controlplaneprofile.TrustModeBundle, got.TrustMode)
+	assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", got.TrustBundleFingerprint)
+	assert.Equal(t, "-----BEGIN CERTIFICATE-----\nrendered\n-----END CERTIFICATE-----\n", got.TrustBundlePem)
 }
 
 func TestComputePlaneChartFromStack(t *testing.T) {
@@ -637,6 +664,23 @@ releases:
 		require.NoError(t, err)
 		assert.Equal(t, "nvcf/helm-nvca-operator", chart)
 		assert.Equal(t, "1.12.0", version)
+	})
+
+	t.Run("reads chart and version from worker helmfile", func(t *testing.T) {
+		stackDir := t.TempDir()
+		helmfileDir := filepath.Join(stackDir, "helmfile.d")
+		require.NoError(t, os.MkdirAll(helmfileDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(helmfileDir, "04-worker.yaml.gotmpl"), []byte(`
+releases:
+  - name: nvca-operator
+    chart: nvcf/helm-nvca-operator
+    version: 1.11.1
+`), 0o644))
+
+		chart, version, err := computePlaneChartFromStack(stackDir)
+		require.NoError(t, err)
+		assert.Equal(t, "nvcf/helm-nvca-operator", chart)
+		assert.Equal(t, "1.11.1", version)
 	})
 
 	t.Run("skips incomplete nvca file and uses next", func(t *testing.T) {
@@ -712,6 +756,32 @@ func TestReadNVCAValuesMetadata(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "gpu-b", meta.ClusterName)
 		assert.Equal(t, "nca-from-values", meta.NCAID)
+	})
+
+	t.Run("generated values with agent block decode successfully", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "gpu-c-register-values.yaml")
+		require.NoError(t, writeComputePlaneNVCAValues(computePlaneNVCAValuesRequest{
+			Path:           path,
+			ClusterName:    "gpu-c",
+			NCAID:          "nca-from-generated",
+			Region:         "us-west-1",
+			IdentitySource: "psat",
+			Registration: &selfhosted.RegisterResponse{
+				ClusterID:      "cluster-id",
+				ClusterGroupID: "group-id",
+			},
+			RequestRouterAddress: "llm-request-router.nvcf.svc.cluster.local:50071",
+		}))
+
+		body, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Contains(t, string(body), "agent:")
+		require.Contains(t, string(body), "requestRouterAddress: llm-request-router.nvcf.svc.cluster.local:50071")
+
+		meta, err := readNVCAValuesMetadata(path)
+		require.NoError(t, err)
+		assert.Equal(t, "gpu-c", meta.ClusterName)
+		assert.Equal(t, "nca-from-generated", meta.NCAID)
 	})
 
 	t.Run("typo in known field surfaces a decode error", func(t *testing.T) {

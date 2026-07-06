@@ -19,12 +19,24 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"nvcf-cli/internal/selfhosted/controlplaneprofile"
+	"nvcf-cli/internal/trustbundle"
 )
 
 func TestControlPlaneProfileValidateCommandSucceeds(t *testing.T) {
@@ -83,6 +95,56 @@ func TestControlPlaneProfileValidateCommandHelpShowsAnyRequireMode(t *testing.T)
 	assert.Contains(t, stdout.String(), "Endpoint scope to require")
 }
 
+func TestControlPlaneProfileExportCommandRecreatesProfileFromOpenBao(t *testing.T) {
+	resetControlPlaneProfileValidateCommand(t)
+	resetViperForProfileTest(t)
+	stackDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(stackDir, "helmfile.d"), 0o755))
+	rootCA := controlPlaneProfileTestCertPEM(t)
+	wantFingerprint, err := trustbundle.Fingerprint([]byte(rootCA))
+	require.NoError(t, err)
+
+	prevFetch := fetchControlPlaneRootCAPEM
+	fetchControlPlaneRootCAPEM = func(_ context.Context, kctx string) (string, error) {
+		assert.Equal(t, "cp-context", kctx)
+		return rootCA, nil
+	}
+	t.Cleanup(func() { fetchControlPlaneRootCAPEM = prevFetch })
+
+	var stderr bytes.Buffer
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&stderr)
+	rootCmd.SetArgs([]string{
+		"self-hosted",
+		"--control-plane-stack", stackDir,
+		"--env", "local",
+		"--control-plane-context", "cp-context",
+		"--compute-plane-context", "compute-context",
+		"--icms-url", "http://sis.localhost:8080",
+		"--nats-url", "nats://nats.localhost:4222",
+		"control-plane", "profile", "export",
+		"--cluster-name", "nvcf-cp",
+		"--nca-id", "nvcf-test",
+		"--region", "us-east-1",
+	})
+
+	require.NoError(t, rootCmd.Execute())
+	assert.Contains(t, stderr.String(), "Wrote control-plane profile")
+
+	body, err := os.ReadFile(filepath.Join(stackDir, "out", controlPlaneProfileFileName))
+	require.NoError(t, err)
+	result, err := controlplaneprofile.ParseAndValidate(body, controlplaneprofile.ValidateOptions{Require: controlplaneprofile.RequireBoth})
+	require.NoError(t, err)
+	assert.Equal(t, "nvcf-cp", result.Profile.ControlPlane.ClusterName)
+	assert.Equal(t, "nvcf-test", result.Profile.ControlPlane.NCAID)
+	assert.Equal(t, "us-east-1", result.Profile.ControlPlane.Region)
+	assert.Equal(t, controlplaneprofile.TrustModeBundle, result.Profile.ManagementTLS.TrustMode)
+	assert.Equal(t, strings.TrimSpace(rootCA), strings.TrimSpace(result.Profile.ManagementTLS.CABundlePEM))
+	assert.Equal(t, controlplaneprofile.TrustModeBundle, result.Profile.TransportTLS.TrustMode)
+	assert.Equal(t, strings.TrimSpace(rootCA), strings.TrimSpace(result.Profile.TransportTLS.TrustBundlePEM))
+	assert.Equal(t, wantFingerprint, result.Profile.TransportTLS.TrustBundleFingerprint)
+}
+
 func TestParseControlPlaneProfileRequireModeAcceptsAny(t *testing.T) {
 	requireMode, err := parseControlPlaneProfileRequireMode("any")
 	require.NoError(t, err)
@@ -97,6 +159,16 @@ func resetControlPlaneProfileValidateCommand(t *testing.T) {
 		rootCmd.SetArgs(nil)
 		controlPlaneProfileValidateFile = ""
 		controlPlaneProfileValidateRequire = ""
+		controlPlaneProfileExportCluster = ""
+		controlPlaneProfileExportNCAID = "nvcf-default"
+		controlPlaneProfileExportRegion = "us-west-1"
+		selfHostedControlPlaneStack = ""
+		selfHostedComputePlaneStack = ""
+		selfHostedEnv = "local"
+		selfHostedICMSURL = ""
+		selfHostedNATSURL = ""
+		selfHostedControlPlaneContext = ""
+		selfHostedComputePlaneContext = ""
 	})
 }
 
@@ -203,6 +275,43 @@ func TestBuildControlPlaneProfile_BareELBProjectsServicePrefixes(t *testing.T) {
 	assert.Equal(t, "nats://nats.abc123.elb.us-east-1.amazonaws.com:4222", got.ControlPlane.Endpoints.ComputeReachable.NATSURL)
 }
 
+func TestWriteControlPlaneProfileSourcesOpenBaoRootCA(t *testing.T) {
+	resetViperForProfileTest(t)
+	rootCA := controlPlaneProfileTestCertPEM(t)
+	wantFingerprint, err := trustbundle.Fingerprint([]byte(rootCA))
+	require.NoError(t, err)
+
+	prevFetch := fetchControlPlaneRootCAPEM
+	fetchControlPlaneRootCAPEM = func(_ context.Context, kctx string) (string, error) {
+		assert.Equal(t, "cp-context", kctx)
+		return rootCA, nil
+	}
+	t.Cleanup(func() { fetchControlPlaneRootCAPEM = prevFetch })
+
+	path, err := writeControlPlaneProfile(controlPlaneProfileWriteRequest{
+		StackPath:           t.TempDir(),
+		ClusterName:         "nvcf-cp",
+		NCAID:               "nvcf-default",
+		Region:              "us-west-1",
+		Env:                 "local",
+		ControlPlaneContext: "cp-context",
+		ICMSURL:             "http://sis.localhost:8080",
+		Ctx:                 context.Background(),
+		SourceRootCA:        true,
+	})
+	require.NoError(t, err)
+
+	body, err := os.ReadFile(path)
+	require.NoError(t, err)
+	result, err := controlplaneprofile.ParseAndValidate(body, controlplaneprofile.ValidateOptions{Require: controlplaneprofile.RequireAny})
+	require.NoError(t, err)
+	assert.Equal(t, controlplaneprofile.TrustModeBundle, result.Profile.ManagementTLS.TrustMode)
+	assert.Equal(t, strings.TrimSpace(rootCA), strings.TrimSpace(result.Profile.ManagementTLS.CABundlePEM))
+	assert.Equal(t, controlplaneprofile.TrustModeBundle, result.Profile.TransportTLS.TrustMode)
+	assert.Equal(t, strings.TrimSpace(rootCA), strings.TrimSpace(result.Profile.TransportTLS.TrustBundlePEM))
+	assert.Equal(t, wantFingerprint, result.Profile.TransportTLS.TrustBundleFingerprint)
+}
+
 func TestRewriteURLHost(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -222,6 +331,24 @@ func TestRewriteURLHost(t *testing.T) {
 			assert.Equal(t, tc.want, rewriteURLHost(tc.in, tc.newHost))
 		})
 	}
+}
+
+func controlPlaneProfileTestCertPEM(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: "NVCF Root CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
 func validControlPlaneProfileYAML() string {

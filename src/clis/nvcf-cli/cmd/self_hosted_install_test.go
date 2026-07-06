@@ -45,6 +45,10 @@ func resetInstallFlags(t *testing.T) {
 	selfHostedToken = ""
 	selfHostedControlPlaneContext = ""
 	selfHostedComputePlaneContext = ""
+	prevFetchRootCA := fetchControlPlaneRootCAPEM
+	fetchControlPlaneRootCAPEM = func(context.Context, string) (string, error) {
+		return "", nil
+	}
 	t.Cleanup(func() {
 		installControlPlane = false
 		installComputePlane = false
@@ -56,6 +60,7 @@ func resetInstallFlags(t *testing.T) {
 		selfHostedToken = ""
 		selfHostedControlPlaneContext = ""
 		selfHostedComputePlaneContext = ""
+		fetchControlPlaneRootCAPEM = prevFetchRootCA
 	})
 }
 

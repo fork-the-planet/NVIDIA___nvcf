@@ -19,14 +19,18 @@ package controlplaneprofile
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"nvcf-cli/internal/trustbundle"
 )
 
 const (
@@ -35,9 +39,11 @@ const (
 )
 
 type ControlPlaneProfile struct {
-	APIVersion   string       `yaml:"apiVersion"`
-	Kind         string       `yaml:"kind"`
-	ControlPlane ControlPlane `yaml:"controlPlane"`
+	APIVersion    string        `yaml:"apiVersion"`
+	Kind          string        `yaml:"kind"`
+	ControlPlane  ControlPlane  `yaml:"controlPlane"`
+	ManagementTLS ManagementTLS `yaml:"managementTls,omitempty"`
+	TransportTLS  TransportTLS  `yaml:"transportTls,omitempty"`
 }
 
 func WriteFile(path string, doc ControlPlaneProfile) error {
@@ -61,6 +67,24 @@ type ControlPlane struct {
 	Endpoints   Endpoints `yaml:"endpoints"`
 	Gateway     Gateway   `yaml:"gateway"`
 	Hosts       Hosts     `yaml:"hosts"`
+	// Addons advertises optional control-plane add-on coordinates that the
+	// compute-plane register flow renders into nvca-operator values.
+	Addons Addons `yaml:"addons,omitempty"`
+}
+
+// Addons groups optional control-plane add-on coordinates. Each add-on is
+// independent and omitted when the control plane does not run it.
+type Addons struct {
+	LLM LLMAddon `yaml:"llm,omitempty"`
+}
+
+// LLMAddon advertises the LLM add-on coordinates. RequestRouterAddress is the
+// host:port the LLM request router (Stargate QUIC endpoint) is reachable at
+// from the compute plane; register renders it as the default
+// agent.llm.requestRouterAddress so LLM workloads that do not set
+// STARGATE_ADDRESS bootstrap against it.
+type LLMAddon struct {
+	RequestRouterAddress string `yaml:"requestRouterAddress,omitempty"`
 }
 
 type Endpoints struct {
@@ -86,6 +110,34 @@ type Hosts struct {
 	ReVal      string `yaml:"reval"`
 	NATS       string `yaml:"nats"`
 	Invocation string `yaml:"invocation"`
+}
+
+// Trust modes for the management-API and worker-transport trust material.
+const (
+	TrustModeSystem = "system"
+	TrustModeBundle = "bundle"
+
+	fingerprintPattern = `^sha256:[0-9a-f]{64}$`
+
+	fieldTransportTrustBundlePEM = "transportTls.trustBundlePem"
+)
+
+var fingerprintRe = regexp.MustCompile(fingerprintPattern)
+
+// ManagementTLS is public client trust material for the CLI management-API
+// path. It is a separate contract from TransportTLS; consumers must not infer
+// one from the other.
+type ManagementTLS struct {
+	TrustMode   string `yaml:"trustMode,omitempty"`
+	CABundlePEM string `yaml:"caBundlePem,omitempty"`
+}
+
+// TransportTLS is worker-side trust material rendered into nvca-operator values.
+// For the default private-CA path trustBundlePem is the root CA public cert only.
+type TransportTLS struct {
+	TrustMode              string `yaml:"trustMode,omitempty"`
+	TrustBundleFingerprint string `yaml:"trustBundleFingerprint,omitempty"`
+	TrustBundlePEM         string `yaml:"trustBundlePem,omitempty"`
 }
 
 type RequireMode string
@@ -145,6 +197,9 @@ func ParseAndValidate(data []byte, opts ValidateOptions) (*ValidationResult, err
 	computeReachableUsable := v.validateEndpointScope("controlPlane.endpoints.computeReachable", doc.ControlPlane.Endpoints.ComputeReachable, endpointScopeRequired(require, RequireComputeReachable))
 	v.validateHosts()
 	v.validateNoDNSHostHeaders()
+	v.validateManagementTLS()
+	v.validateTransportTLS()
+	v.validateAddons()
 	if require == RequireAny && !inClusterUsable && !computeReachableUsable {
 		v.add("controlPlane.endpoints", "at least one endpoint scope is required")
 	}
@@ -235,6 +290,128 @@ func (v *validator) validateNoDNSHostHeaders() {
 	requireHostForGatewayURL(v.add, "controlPlane.gateway.httpURL", cp.Gateway.HTTPURL, "controlPlane.hosts.api", cp.Hosts.API)
 	requireHostForGatewayURL(v.add, "controlPlane.endpoints.computeReachable.icmsURL", cp.Endpoints.ComputeReachable.ICMSURL, "controlPlane.hosts.sis", cp.Hosts.SIS)
 	requireHostForGatewayURL(v.add, "controlPlane.endpoints.computeReachable.revalURL", cp.Endpoints.ComputeReachable.ReValURL, "controlPlane.hosts.reval", cp.Hosts.ReVal)
+}
+
+// validateManagementTLS validates managementTls only when it is provided. An
+// absent (zero-value) block means the profile carries no management trust
+// material and is left as-is for backward compatibility.
+func (v *validator) validateManagementTLS() {
+	m := v.doc.ManagementTLS
+	if m.TrustMode == "" && strings.TrimSpace(m.CABundlePEM) == "" {
+		return
+	}
+	switch m.TrustMode {
+	case TrustModeSystem:
+		if strings.TrimSpace(m.CABundlePEM) != "" {
+			v.add("managementTls.caBundlePem", "must be empty when trustMode=system")
+		}
+	case TrustModeBundle:
+		if strings.TrimSpace(m.CABundlePEM) == "" {
+			v.add("managementTls.caBundlePem", "required when trustMode=bundle")
+			return
+		}
+		if err := assertCertificatesOnly(m.CABundlePEM); err != nil {
+			v.add("managementTls.caBundlePem", err.Error())
+		}
+	default:
+		v.add("managementTls.trustMode", "must be system or bundle")
+	}
+}
+
+// validateTransportTLS validates transportTls only when it is provided. In
+// bundle mode the advertised fingerprint is recomputed from the PEM and must
+// match, and the PEM must contain only CERTIFICATE blocks so no private key or
+// other secret can ride into nvca-operator values (POR section 9.1).
+func (v *validator) validateTransportTLS() {
+	t := v.doc.TransportTLS
+	if t.TrustMode == "" && strings.TrimSpace(t.TrustBundlePEM) == "" && t.TrustBundleFingerprint == "" {
+		return
+	}
+	switch t.TrustMode {
+	case TrustModeSystem:
+		if strings.TrimSpace(t.TrustBundlePEM) != "" {
+			v.add(fieldTransportTrustBundlePEM, "must be empty when trustMode=system")
+		}
+		if strings.TrimSpace(t.TrustBundleFingerprint) != "" {
+			v.add("transportTls.trustBundleFingerprint", "must be empty when trustMode=system")
+		}
+	case TrustModeBundle:
+		if strings.TrimSpace(t.TrustBundlePEM) == "" {
+			v.add(fieldTransportTrustBundlePEM, "required when trustMode=bundle")
+			return
+		}
+		if err := assertCertificatesOnly(t.TrustBundlePEM); err != nil {
+			v.add(fieldTransportTrustBundlePEM, err.Error())
+			return
+		}
+		if !fingerprintRe.MatchString(t.TrustBundleFingerprint) {
+			v.add("transportTls.trustBundleFingerprint", fmt.Sprintf("must match %s", fingerprintPattern))
+			return
+		}
+		got, err := trustbundle.Fingerprint([]byte(t.TrustBundlePEM))
+		if err != nil {
+			v.add(fieldTransportTrustBundlePEM, err.Error())
+			return
+		}
+		if got != t.TrustBundleFingerprint {
+			v.add("transportTls.trustBundleFingerprint", fmt.Sprintf("mismatch: advertised %s, computed %s", t.TrustBundleFingerprint, got))
+		}
+	default:
+		v.add("transportTls.trustMode", "must be system or bundle")
+	}
+}
+
+// validateAddons validates optional control-plane add-on coordinates. The LLM
+// request router address, when advertised, must be a host:port.
+func (v *validator) validateAddons() {
+	addr := strings.TrimSpace(v.doc.ControlPlane.Addons.LLM.RequestRouterAddress)
+	if addr == "" {
+		return
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+		v.add("controlPlane.addons.llm.requestRouterAddress", "must be host:port")
+	}
+}
+
+// assertCertificatesOnly verifies a trust PEM contains at least one block and
+// that every block is a parseable X.509 CERTIFICATE. It rejects PRIVATE KEY or
+// any other block type so private keys and secrets cannot ride into the worker
+// or CLI via the profile trust material (POR section 9.1).
+func assertCertificatesOnly(pemStr string) error {
+	rest := []byte(pemStr)
+	var n int
+	for {
+		var block *pem.Block
+		beforeDecode := rest
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			if len(bytes.TrimSpace(rest)) != 0 {
+				return fmt.Errorf("unexpected non-whitespace data outside PEM CERTIFICATE blocks")
+			}
+			break
+		}
+		consumed := beforeDecode[:len(beforeDecode)-len(rest)]
+		beginMarker := []byte("-----BEGIN " + block.Type + "-----")
+		begin := bytes.LastIndex(consumed, beginMarker)
+		if begin < 0 {
+			begin = bytes.Index(consumed, []byte("-----BEGIN "))
+		}
+		if begin > 0 && len(bytes.TrimSpace(consumed[:begin])) != 0 {
+			return fmt.Errorf("unexpected non-whitespace data outside PEM CERTIFICATE blocks")
+		}
+		if block.Type != "CERTIFICATE" {
+			return fmt.Errorf("forbidden non-certificate PEM block %q (private keys and secrets are not allowed)", block.Type)
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return fmt.Errorf("unparseable CERTIFICATE block: %w", err)
+		}
+		n++
+	}
+	if n == 0 {
+		return fmt.Errorf("no PEM CERTIFICATE blocks found")
+	}
+	return nil
 }
 
 func endpointScopeRequired(mode RequireMode, scope RequireMode) bool {

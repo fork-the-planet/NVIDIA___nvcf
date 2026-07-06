@@ -31,6 +31,7 @@ import (
 	"nvcf-cli/internal/client"
 	"nvcf-cli/internal/selfhosted"
 	"nvcf-cli/internal/selfhosted/controlplaneprofile"
+	"nvcf-cli/internal/selfhosted/managementtls"
 	"nvcf-cli/internal/selfhosted/nvca"
 	"nvcf-cli/internal/selfhosted/reachability"
 )
@@ -176,6 +177,7 @@ type nvcaValuesMetadataDoc struct {
 	NCAIDLower     string                 `yaml:"ncaId,omitempty"`
 	Region         string                 `yaml:"region,omitempty"`
 	SelfManaged    nvca.SelfManagedValues `yaml:"selfManaged,omitempty"`
+	Agent          *nvca.AgentValues      `yaml:"agent,omitempty"`
 }
 
 func stringMapValue(values map[string]any, key string) string {
@@ -238,7 +240,16 @@ func runSelfHostedComputePlaneRegister(c *cobra.Command, _ []string) error {
 	}
 
 	cp := validation.Profile.ControlPlane
-	registration, handoff, err := registerComputePlaneCluster(c, registrationICMSURL, cp, selected.Endpoints, identity)
+	registration, handoff, err := registerComputePlaneCluster(
+		c,
+		registrationICMSURL,
+		cp,
+		selected.Endpoints,
+		identity,
+		validation.Profile.ManagementTLS,
+		validation.Profile.TransportTLS,
+		cp.Addons.LLM.RequestRouterAddress,
+	)
 	if err != nil {
 		return err
 	}
@@ -301,6 +312,9 @@ func registerComputePlaneCluster(
 	cp controlplaneprofile.ControlPlane,
 	endpoints controlplaneprofile.EndpointScope,
 	identity computePlaneClusterIdentity,
+	managementTLS controlplaneprofile.ManagementTLS,
+	transport controlplaneprofile.TransportTLS,
+	requestRouterAddress string,
 ) (*selfhosted.RegisterResponse, *computePlaneRegisterHandoff, error) {
 	if computePlaneRegisterDryRun {
 		return nil, nil, nil
@@ -309,7 +323,11 @@ func registerComputePlaneCluster(
 	if err != nil {
 		return nil, nil, err
 	}
-	cc, err := newClusterClientForSelfHosted(registrationICMSURL)
+	mtls, err := managementtls.TLSConfig(managementTLS)
+	if err != nil {
+		return nil, nil, fmt.Errorf("building management-API trust: %w", err)
+	}
+	cc, err := newClusterClientForSelfHostedWithTrust(registrationICMSURL, mtls)
 	if err != nil {
 		return nil, nil, fmt.Errorf("constructing cluster client: %w", err)
 	}
@@ -326,14 +344,16 @@ func registerComputePlaneCluster(
 		return nil, nil, fmt.Errorf("cluster register: %w", err)
 	}
 	if err := writeComputePlaneNVCAValues(computePlaneNVCAValuesRequest{
-		Path:           handoff.ValuesPath,
-		ClusterName:    computePlaneRegisterClusterName,
-		NCAID:          cp.NCAID,
-		Region:         computePlaneRegisterRegion,
-		IdentitySource: identity.IdentitySource,
-		Registration:   registration,
-		Endpoints:      endpoints,
-		Hosts:          cp.Hosts,
+		Path:                 handoff.ValuesPath,
+		ClusterName:          computePlaneRegisterClusterName,
+		NCAID:                cp.NCAID,
+		Region:               computePlaneRegisterRegion,
+		IdentitySource:       identity.IdentitySource,
+		Registration:         registration,
+		Endpoints:            endpoints,
+		Hosts:                cp.Hosts,
+		TransportTLS:         transport,
+		RequestRouterAddress: requestRouterAddress,
 	}); err != nil {
 		return nil, nil, err
 	}
@@ -500,14 +520,16 @@ func prepareComputePlaneRegisterHandoff(c *cobra.Command, clusterName string) (*
 }
 
 type computePlaneNVCAValuesRequest struct {
-	Path           string
-	ClusterName    string
-	NCAID          string
-	Region         string
-	IdentitySource string
-	Registration   *selfhosted.RegisterResponse
-	Endpoints      controlplaneprofile.EndpointScope
-	Hosts          controlplaneprofile.Hosts
+	Path                 string
+	ClusterName          string
+	NCAID                string
+	Region               string
+	IdentitySource       string
+	Registration         *selfhosted.RegisterResponse
+	Endpoints            controlplaneprofile.EndpointScope
+	Hosts                controlplaneprofile.Hosts
+	TransportTLS         controlplaneprofile.TransportTLS
+	RequestRouterAddress string
 }
 
 func writeComputePlaneNVCAValues(req computePlaneNVCAValuesRequest) error {
@@ -525,8 +547,40 @@ func writeComputePlaneNVCAValues(req computePlaneNVCAValuesRequest) error {
 			ReValServiceHostHeaderOverride: req.Hosts.ReVal,
 			NATSURL:                        req.Endpoints.NATSURL,
 			NATSHostOverride:               req.Hosts.NATS,
+			TransportTLS:                   transportTLSValues(req.TransportTLS),
 		},
+		Agent: agentValues(req.RequestRouterAddress),
 	})
+}
+
+// agentValues renders the control-plane profile's LLM request router address
+// (controlPlane.addons.llm.requestRouterAddress) into agent.llm.requestRouterAddress
+// so LLM workloads that do not set STARGATE_ADDRESS bootstrap against it. The
+// section is omitted when the profile advertises no address.
+func agentValues(requestRouterAddress string) *nvca.AgentValues {
+	addr := strings.TrimSpace(requestRouterAddress)
+	if addr == "" {
+		return nil
+	}
+	return &nvca.AgentValues{LLM: &nvca.AgentLLMValues{RequestRouterAddress: addr}}
+}
+
+// transportTLSValues renders the control-plane profile's transportTls into the
+// nvca-operator values (contract C-2). The profile transportTls has already
+// been validated by controlplaneprofile.ParseAndValidate (cert-only PEM and, in
+// bundle mode, a recomputed/matched fingerprint), so it is rendered unchanged:
+// bundle carries the fingerprint + PEM; system carries only the mode; an absent
+// transportTls renders nothing and the chart defaults trustMode to system.
+func transportTLSValues(t controlplaneprofile.TransportTLS) *nvca.TransportTLSValues {
+	if strings.TrimSpace(t.TrustMode) == "" {
+		return nil
+	}
+	values := &nvca.TransportTLSValues{TrustMode: t.TrustMode}
+	if t.TrustMode == controlplaneprofile.TrustModeBundle {
+		values.TrustBundleFingerprint = t.TrustBundleFingerprint
+		values.TrustBundlePem = t.TrustBundlePEM
+	}
+	return values
 }
 
 func computePlaneChartFromStack(stackPath string) (chart, version string, err error) {
@@ -536,7 +590,7 @@ func computePlaneChartFromStack(stackPath string) (chart, version string, err er
 		return "", "", fmt.Errorf("reading compute-plane helmfile directory: %w", err)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), "-nvca.yaml.gotmpl") {
+		if !entry.IsDir() && isHelmfileTemplate(entry.Name()) {
 			body, err := os.ReadFile(filepath.Join(helmfileDir, entry.Name()))
 			if err != nil {
 				return "", "", fmt.Errorf("reading compute-plane nvca helmfile: %w", err)
@@ -549,15 +603,29 @@ func computePlaneChartFromStack(stackPath string) (chart, version string, err er
 	return "", "", fmt.Errorf("compute-plane chart reference not found in stack")
 }
 
+func isHelmfileTemplate(name string) bool {
+	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yaml.gotmpl")
+}
+
 func parseComputePlaneChart(body string) (string, string) {
 	var chart, version string
+	inNVCARelease := false
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
+		case strings.HasPrefix(line, "- name:"):
+			inNVCARelease = strings.TrimSpace(strings.TrimPrefix(line, "- name:")) == "nvca-operator"
+			chart = ""
+			version = ""
+		case !inNVCARelease:
+			continue
 		case strings.HasPrefix(line, "chart:") && chart == "":
 			chart = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "chart:")), "\"'")
 		case strings.HasPrefix(line, "version:") && version == "":
 			version = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "version:")), "\"'")
+		}
+		if inNVCARelease && chart != "" && version != "" {
+			return chart, version
 		}
 	}
 	return chart, version

@@ -18,17 +18,25 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"nvcf-cli/internal/client"
+	"nvcf-cli/internal/openbao"
 	"nvcf-cli/internal/selfhosted/controlplaneprofile"
+	"nvcf-cli/internal/trustbundle"
 )
 
 const controlPlaneProfileFileName = "control-plane-profile.yaml"
+const defaultControlPlaneRootPKIPath = "services/all/pki/root"
 
 type controlPlaneProfileWriteRequest struct {
+	Ctx                 context.Context
 	StackPath           string
 	ClusterName         string
 	NCAID               string
@@ -38,10 +46,29 @@ type controlPlaneProfileWriteRequest struct {
 	ComputePlaneContext string
 	ICMSURL             string
 	NATSURL             string
+	SourceRootCA        bool
+	RootCAPEM           string
 }
 
 func writeControlPlaneProfile(req controlPlaneProfileWriteRequest) (string, error) {
 	doc := buildControlPlaneProfile(req)
+	rootCAPEM := strings.TrimSpace(req.RootCAPEM)
+	if rootCAPEM == "" && req.SourceRootCA {
+		ctx := req.Ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		var err error
+		rootCAPEM, err = fetchControlPlaneRootCAPEM(ctx, req.ControlPlaneContext)
+		if err != nil {
+			return "", err
+		}
+	}
+	if rootCAPEM != "" {
+		if err := applyControlPlaneRootCATrust(&doc, rootCAPEM); err != nil {
+			return "", err
+		}
+	}
 	path := controlPlaneProfilePath(req.StackPath)
 	if err := controlplaneprofile.WriteFile(path, doc); err != nil {
 		return "", err
@@ -51,6 +78,50 @@ func writeControlPlaneProfile(req controlPlaneProfileWriteRequest) (string, erro
 
 func controlPlaneProfilePath(stackPath string) string {
 	return filepath.Join(stackPath, "out", controlPlaneProfileFileName)
+}
+
+var fetchControlPlaneRootCAPEM = func(ctx context.Context, kctx string) (string, error) {
+	cfg := controlPlaneRootCAOpenBaoConfig(kctx)
+	pem, err := openbao.NewClient(cfg, nil).ReadPKICertificatePEM(ctx, controlPlaneRootPKIPath())
+	if errors.Is(err, openbao.ErrPKICertificateNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("sourcing control-plane root CA from OpenBao: %w", err)
+	}
+	return strings.TrimSpace(pem), nil
+}
+
+func controlPlaneRootCAOpenBaoConfig(kctx string) *openbao.Config {
+	return &openbao.Config{
+		OpenBaoURL:        defaultString(firstNonEmptyEnv("NVCF_OPENBAO_URL", "OPENBAO_URL", "VAULT_ADDR", "BAO_ADDR"), "http://openbao-server.vault-system.svc.cluster.local:8200"),
+		OpenBaoNamespace:  defaultString(os.Getenv("NVCF_OPENBAO_NAMESPACE"), "vault-system"),
+		OpenBaoSecretName: defaultString(os.Getenv("NVCF_OPENBAO_SECRET_NAME"), "openbao-server-root-token"),
+		KubeContext:       kctx,
+		ClusterNamespace:  defaultString(os.Getenv("NVCF_CLUSTER_NAMESPACE"), "nvcf"),
+		UtilityImage:      defaultString(os.Getenv("NVCF_CLUSTER_UTILITY_IMAGE"), "curlimages/curl:latest"),
+	}
+}
+
+func controlPlaneRootPKIPath() string {
+	return defaultString(os.Getenv("NVCF_OPENBAO_ROOT_PKI_PATH"), defaultControlPlaneRootPKIPath)
+}
+
+func applyControlPlaneRootCATrust(doc *controlplaneprofile.ControlPlaneProfile, rootCAPEM string) error {
+	fingerprint, err := trustbundle.Fingerprint([]byte(rootCAPEM))
+	if err != nil {
+		return fmt.Errorf("fingerprinting control-plane root CA bundle: %w", err)
+	}
+	doc.ManagementTLS = controlplaneprofile.ManagementTLS{
+		TrustMode:   controlplaneprofile.TrustModeBundle,
+		CABundlePEM: rootCAPEM,
+	}
+	doc.TransportTLS = controlplaneprofile.TransportTLS{
+		TrustMode:              controlplaneprofile.TrustModeBundle,
+		TrustBundlePEM:         rootCAPEM,
+		TrustBundleFingerprint: fingerprint,
+	}
+	return nil
 }
 
 func buildControlPlaneProfile(req controlPlaneProfileWriteRequest) controlplaneprofile.ControlPlaneProfile {

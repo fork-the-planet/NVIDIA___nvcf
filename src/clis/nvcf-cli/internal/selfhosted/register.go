@@ -19,6 +19,7 @@ package selfhosted
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"strings"
 
@@ -142,6 +143,20 @@ func NewClusterClient(sisURL string) (ClusterClient, error) {
 // CI/non-interactive flows. An empty token preserves the LoadConfig result so
 // existing behavior is unchanged.
 func NewClusterClientWithToken(sisURL, token string) (ClusterClient, error) {
+	return NewClusterClientWithTokenAndTrust(sisURL, token, nil)
+}
+
+// NewClusterClientWithTrust builds a cluster client whose management-API TLS
+// trust is set from tlsCfg (R-4: system/bundle built by managementtls).
+// Pass nil for default system trust. Trust is established before the client
+// makes any request to the management API (POR R-4).
+func NewClusterClientWithTrust(sisURL string, tlsCfg *tls.Config) (ClusterClient, error) {
+	return NewClusterClientWithTokenAndTrust(sisURL, "", tlsCfg)
+}
+
+// NewClusterClientWithTokenAndTrust combines the token override used by
+// non-interactive self-hosted flows with optional management-API TLS trust.
+func NewClusterClientWithTokenAndTrust(sisURL, token string, tlsCfg *tls.Config) (ClusterClient, error) {
 	cfg, err := client.LoadConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load client config: %w", err)
@@ -149,6 +164,7 @@ func NewClusterClientWithToken(sisURL, token string) (ClusterClient, error) {
 	if token != "" {
 		cfg.Token = token
 	}
+	cfg.TLSConfig = tlsCfg
 	c, err := client.NewClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client: %w", err)

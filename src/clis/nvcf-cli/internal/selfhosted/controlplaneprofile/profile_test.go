@@ -131,5 +131,9 @@ controlPlane:
     reval: reval.nvcf-cp.internal
     nats: nats.nvcf-cp.internal
     invocation: invocation.nvcf-cp.internal
+
+  addons:
+    llm:
+      requestRouterAddress: llm-request-router.nvcf-cp.internal:50071
 `
 }

@@ -20,6 +20,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"log"
@@ -34,6 +35,7 @@ import (
 	"nvcf-cli/internal/state"
 
 	"github.com/spf13/viper"
+	"golang.org/x/oauth2"
 )
 
 func ptrInt(v int) *int { return &v }
@@ -156,6 +158,36 @@ func TestBaseHTTPURLHost(t *testing.T) {
 				t.Errorf("baseHTTPURLHost(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewClientOAuth2UsesConfiguredTLSConfig(t *testing.T) {
+	tlsConfig := &tls.Config{ServerName: "private-ca.example.test"}
+	client, err := NewClient(&Config{
+		AuthType:            AuthTypeOAuth2,
+		OAuth2ClientID:      "client-id",
+		OAuth2ClientSecret:  "client-secret",
+		OAuth2TokenEndpoint: "https://auth.example.test/token",
+		BaseHTTPURL:         "https://api.example.test",
+		BaseGRPCURL:         "127.0.0.1:0",
+		DefaultTimeout:      time.Second,
+		TLSConfig:           tlsConfig,
+	})
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	defer client.Close()
+
+	oauthTransport, ok := client.httpClient.Transport.(*oauth2.Transport)
+	if !ok {
+		t.Fatalf("HTTP transport = %T, want *oauth2.Transport", client.httpClient.Transport)
+	}
+	baseTransport, ok := oauthTransport.Base.(*http.Transport)
+	if !ok {
+		t.Fatalf("OAuth2 base transport = %T, want *http.Transport", oauthTransport.Base)
+	}
+	if baseTransport.TLSClientConfig != tlsConfig {
+		t.Fatalf("TLSClientConfig = %p, want configured TLS config %p", baseTransport.TLSClientConfig, tlsConfig)
 	}
 }
 

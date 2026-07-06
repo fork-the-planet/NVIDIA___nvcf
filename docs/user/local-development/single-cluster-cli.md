@@ -291,6 +291,22 @@ The control-plane profile can be re-validated against the live cluster:
     --require in-cluster
 ```
 
+If the generated profile is deleted, recreate it from the control-plane stack
+and OpenBao root CA without re-running the full install:
+
+```bash
+nvcf-cli \
+  --config tests/bdd/fixtures/nvcf-cli-local.yaml \
+  self-hosted \
+    --control-plane-stack deploy/stacks/self-managed \
+    --env local \
+    --plain \
+  control-plane profile export \
+    --cluster-name ncp-local \
+    --nca-id nvcf-default \
+    --region us-west-1
+```
+
 ## Teardown
 
 Remove the helm releases but keep the cluster (stack-only):
