@@ -111,6 +111,14 @@
       "version_major_minor_source_file": "otel-collector-build.yaml"
     },
     {
+      "id": "nvca",
+      "path": "src/compute-plane-services/nvca",
+      "service_name": "nvca",
+      "tag_format": "nvca-v${version}",
+      "version_file": "VERSION",
+      "dev_prerelease": true
+    },
+    {
       "id": "container-cache",
       "path": "deploy/helm/container-cache",
       "service_name": "nvcf-container-cache",

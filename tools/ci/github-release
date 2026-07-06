@@ -273,6 +273,13 @@ def auto_release(args):
 
         print(f"::group::github-release {service['id']}")
         try:
+            if service.get("dev_prerelease"):
+                print(
+                    f"[github-release] {service['id']}: dev prerelease tags are cut by GitLab release CI; "
+                    "skipping branch-push semantic-release"
+                )
+                continue
+
             if service.get("version_file"):
                 publish_version_file_release(root, service, dry_run=dry_run, draft=draft)
                 continue
