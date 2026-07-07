@@ -16,14 +16,17 @@
 
 set -euo pipefail
 
-curr_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-if [ ! -f "${curr_dir}/utils/utils.sh" ]; then
-    echo "Error: log.sh not found in ${curr_dir}/utils/utils.sh"
+# Source utilities from the migrations directory
+migrations_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../../migrations" && pwd )"
+if [ ! -f "${migrations_dir}/utils/utils.sh" ]; then
+    echo "Error: utils.sh not found in ${migrations_dir}/utils/utils.sh"
     return 1
 else
-  source "${curr_dir}/utils/utils.sh"
-  source "${curr_dir}/utils/functions.sh"
+  source "${migrations_dir}/utils/utils.sh"
+  source "${migrations_dir}/utils/functions.sh"
 fi
+
+log_section "Setting up nvcf-ui service"
 
 SERVICE_ACCOUNT_NAMESPACE="nvcf-ui"
 SERVICE_ACCOUNT_NAME="nvcf-ui"
@@ -75,6 +78,10 @@ VAULT_JWT_AUTH_ROLE_POLICIES="${VAULT_JWT_AUTH_ROLE_POLICIES},${policy_name}"
 
 #-------------------------------------------
 # Add Access to NVCT API via JWT Secret Role
+#
+# The NVCT JWT secrets mount only exists to let the UI mint NVCT tokens, so the
+# addon owns it. Enable it here (idempotent) instead of in core migration
+# 20_setup_nvct.sh, keeping the NVCT signing path out of non-UI installs.
 #-------------------------------------------
 
 NVCT_API_SERVICE_ACCOUNT_NAMESPACE="nvcf"
@@ -83,6 +90,12 @@ NVCT_API_SERVICE_ACCOUNT_NAME="nvct-api"
 NVCT_API_SECRET_BASE_PATH="services/${NVCT_API_SERVICE_ACCOUNT_NAME}"
 NVCT_API_SECRET_POLICY_PATH="services-${NVCT_API_SERVICE_ACCOUNT_NAME}"
 SCOPES="admin:cancel_task,admin:delete_task,admin:launch_task,admin:list_tasks,admin:task_details,admin:update_secrets,admin:list_events,admin:list_results"
+
+# Create the NVCT JWT secret engine (mounted only when the UI addon runs)
+enable_secrets_mount "${NVCT_API_SECRET_BASE_PATH}/jwt" "vault-plugin-secrets-jwt"
+
+jwt_secret_mount_config=$(generate_jwt_secret_mount_config)
+config_jwt_secret_mount_config "${NVCT_API_SECRET_BASE_PATH}/jwt" "${jwt_secret_mount_config}"
 
 # Issuer: http://nvct-api.nvcf.svc.cluster.local
 jwt_secret_role=$(generate_jwt_secret_role "${NVCT_API_SERVICE_ACCOUNT_NAMESPACE}" "${NVCT_API_SERVICE_NAME}" "${SERVICE_ACCOUNT_NAME}" "${SCOPES}")
@@ -101,3 +114,5 @@ VAULT_JWT_AUTH_ROLE_POLICIES="${VAULT_JWT_AUTH_ROLE_POLICIES},${policy_name}"
 #-------------------------------------------
 jwt_auth_role=$(generate_jwt_auth_role "${SERVICE_ACCOUNT_NAME}" "${SERVICE_ACCOUNT_NAMESPACE}" "$VAULT_JWT_AUTH_ROLE_POLICIES")
 create_auth_jwt_role "${SERVICE_ACCOUNT_NAME}" "${jwt_auth_role}"
+
+log_success "nvcf-ui service setup complete"

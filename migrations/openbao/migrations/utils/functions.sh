@@ -48,7 +48,9 @@ function enable_auth_mount() {
     local mount_path=$1
     local mount_type=$2
 
-    if bao auth list -format=json 2>/dev/null | grep -q "\"${mount_path}/\""; then
+    local auth_mounts
+    auth_mounts=$(bao auth list -format=json 2>/dev/null) || true
+    if [[ "$auth_mounts" == *"\"${mount_path}/\""* ]]; then
         log_success "$mount_type auth engine mounted at path '$mount_path'"
         return 0
     fi
@@ -130,7 +132,9 @@ function enable_secrets_mount() {
     local mount_path=$1
     local mount_type=$2
 
-    if bao secrets list -format=json 2>/dev/null | grep -q "\"${mount_path}/\""; then
+    local secrets_mounts
+    secrets_mounts=$(bao secrets list -format=json 2>/dev/null) || true
+    if [[ "$secrets_mounts" == *"\"${mount_path}/\""* ]]; then
         log_info "$mount_type secrets engine already mounted at path '$mount_path'"
         return 0
     fi

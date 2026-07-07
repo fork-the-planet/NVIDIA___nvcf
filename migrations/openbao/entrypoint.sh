@@ -162,6 +162,22 @@ else
   log_info "LLM addon disabled (ADDONS_LLM_ENABLED != true), skipping..."
 fi
 
+if [ "${ADDONS_NVCF_UI_ENABLED:-false}" = "true" ]; then
+  log_section "nvcf-ui addon enabled, running setup..."
+  if [ -f "/app/addons/nvcf-ui/setup_nvcf-ui.sh" ]; then
+    if ! bash -c "source /app/addons/nvcf-ui/setup_nvcf-ui.sh"; then
+      log_error "nvcf-ui addon setup failed"
+      FAILED_MIGRATIONS+=("addons/nvcf-ui/setup_nvcf-ui.sh")
+    else
+      log_success "nvcf-ui addon setup completed successfully"
+    fi
+  else
+    log_warn "nvcf-ui addon script not found at /app/addons/nvcf-ui/setup_nvcf-ui.sh"
+  fi
+else
+  log_info "nvcf-ui addon disabled (ADDONS_NVCF_UI_ENABLED != true), skipping..."
+fi
+
 if [ "${#FAILED_MIGRATIONS[@]}" -gt 0 ]; then
   log_error "Required-task failures (${#FAILED_MIGRATIONS[@]}):"
   for m in "${FAILED_MIGRATIONS[@]}"; do
