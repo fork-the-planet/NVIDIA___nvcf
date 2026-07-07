@@ -20,6 +20,7 @@ package nvca
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -103,7 +104,8 @@ const (
 )
 
 var (
-	useUUIDForRequestObjName atomic.Bool
+	errICMSRequestFinalizerRetained = errors.New("ICMS request finalizer retained")
+	useUUIDForRequestObjName        atomic.Bool
 )
 
 func init() {
@@ -1127,6 +1129,10 @@ func (c *BackendK8sCache) processICMSRequestWork(ctx context.Context) bool {
 					return
 				}
 				// Forget the ICMS request so it does not stay enqueued.
+				c.icmsRequestWQ.Forget(obj)
+				return
+			case errors.Is(rerr, errICMSRequestFinalizerRetained):
+				log.WithError(rerr).Info("ICMS request is deleting but not ready for finalizer removal")
 				c.icmsRequestWQ.Forget(obj)
 				return
 			case storage.IsRequeableStorageError(rerr):
@@ -2565,7 +2571,7 @@ func (c *BackendK8sCache) syncICMSRequest(ctx context.Context, req *nvcav2beta1n
 		if containsString(req.ObjectMeta.Finalizers, NVCAFinalizer) {
 			// our finalizer is present, so lets handle our external dependency
 			if !c.icmsRequestHelper.AllInstancesTerminatedAndReported(ctx, req) {
-				return fmt.Errorf("instances are not terminated and reported for %s, retain finalizer", req.Name)
+				return fmt.Errorf("%w: instances are not terminated and reported for %s", errICMSRequestFinalizerRetained, req.Name)
 			}
 
 			retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {

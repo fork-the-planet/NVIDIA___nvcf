@@ -53,6 +53,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/version"
@@ -4941,6 +4942,34 @@ type terminatedSet struct {
 
 func (ts terminatedSet) AllInstancesTerminatedAndReported(_ context.Context, req *nvcav2beta1.ICMSRequest) bool {
 	return ts.ids[req.Spec.RequestID]
+}
+
+func TestProcessICMSRequestWorkDoesNotRateLimitDeletingRequestRetainingFinalizer(t *testing.T) {
+	ctx := newTestContext()
+	deletionTime := metav1.Now()
+	req := &nvcav2beta1.ICMSRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sr-stuck-finalizer",
+			Namespace:         RequestsNamespace,
+			DeletionTimestamp: &deletionTime,
+			Finalizers:        []string{NVCAFinalizer},
+		},
+	}
+
+	reqIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, reqIndexer.Add(req))
+
+	key := apitypes.NamespacedName{Namespace: req.Namespace, Name: req.Name}
+	bc := &BackendK8sCache{
+		icmsRequestWQ:     workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+		icmsRequestLister: nvcav2beta1listers.NewICMSRequestLister(reqIndexer),
+		icmsRequestHelper: noopICMSRequestHelper{},
+		tracer:            noop.NewTracerProvider().Tracer("test"),
+	}
+	bc.icmsRequestWQ.Add(key)
+
+	require.True(t, bc.processICMSRequestWork(ctx))
+	assert.Zero(t, bc.icmsRequestWQ.NumRequeues(key))
 }
 
 func TestUpdateSchedulerWorkloadMetrics(t *testing.T) {

@@ -161,6 +161,15 @@ above.
          repository: <mirror-sub-path>
    ```
 
+   > The manifest has a mix of OCI and non-OCI artifacts, so convert non-OCI charts before
+   > mirroring. Container images (`nvcr.io/...`) are already OCI and mirror as-is. Some Helm
+   > charts, though, are published to an `https://` Helm repository (for example
+   > `helm.ngc.nvidia.com`). Those are not OCI and cannot be resolved by `global.helm.sources`
+   > (OCI) or mirrored directly. Before pointing the stack at your mirror, convert each
+   > `https://` chart to OCI: `helm repo add`/`helm pull` the `.tgz`, then
+   > `helm push <chart>.tgz oci://<your-registry>/<mirror-sub-path>`. Only OCI charts can live
+   > under `global.helm.sources`.
+
 2. Skip the credential steps above. When the cluster authenticates to the registry
    automatically (the node or workload identity has pull access), the pull needs no
    Kubernetes secret, so you do not need: the per-namespace `nvcr-pull-secret` from step 1
