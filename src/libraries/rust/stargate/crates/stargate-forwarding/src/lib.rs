@@ -14,11 +14,12 @@
 // limitations under the License.
 
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use futures::{Stream, StreamExt};
 use quinn::{ClientConfig, Endpoint, TransportConfig};
 use tracing::{info, warn};
 
@@ -43,15 +44,14 @@ impl Default for RelayEndpointConfig {
 #[derive(Debug)]
 pub struct RelayEndpoints {
     endpoint_v4: Endpoint,
-    endpoint_v6: Option<Endpoint>,
-    endpoint_v6_unavailable_reason: Option<String>,
+    endpoint_v6: std::result::Result<Endpoint, String>,
 }
 
 impl RelayEndpoints {
-    fn endpoint_for_resolved_addrs<I>(&self, addrs: I) -> Result<(SocketAddr, &Endpoint)>
-    where
-        I: IntoIterator<Item = SocketAddr>,
-    {
+    fn endpoint_for_resolved_addrs(
+        &self,
+        addrs: impl IntoIterator<Item = SocketAddr>,
+    ) -> Result<(SocketAddr, &Endpoint)> {
         let mut unavailable_reasons = Vec::new();
         for addr in addrs {
             match self.endpoint_for_addr(&addr) {
@@ -71,18 +71,12 @@ impl RelayEndpoints {
     }
 
     fn endpoint_for_addr(&self, addr: &SocketAddr) -> Result<&Endpoint> {
-        if addr.is_ipv6() {
-            self.endpoint_v6.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "IPv6 relay endpoint unavailable: {}",
-                    self.endpoint_v6_unavailable_reason
-                        .as_deref()
-                        .unwrap_or("IPv6 client endpoint failed to bind")
-                )
-            })
-        } else {
-            Ok(&self.endpoint_v4)
+        if addr.is_ipv4() {
+            return Ok(&self.endpoint_v4);
         }
+        self.endpoint_v6
+            .as_ref()
+            .map_err(|reason| anyhow!("IPv6 relay endpoint unavailable: {reason}"))
     }
 }
 
@@ -103,6 +97,33 @@ pub trait ForwardingResolver: Send + Sync {
     fn resolve_peer(&self, host: &str, port: u16) -> PeerResolution;
 }
 
+/// Forwards successes while a bounded error side channel applies backpressure until consumption.
+pub fn forward_stream_messages<S, T, E>(
+    inbound: S,
+    report_error: fn(&E),
+) -> (impl Stream<Item = T> + Send, tokio::sync::mpsc::Receiver<E>)
+where
+    S: Stream<Item = std::result::Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    let (error_tx, error_rx) = tokio::sync::mpsc::channel(1);
+    let messages = inbound.filter_map(move |result| {
+        let error_tx = error_tx.clone();
+        async move {
+            match result {
+                Ok(message) => Some(message),
+                Err(error) => {
+                    report_error(&error);
+                    let _ = error_tx.send(error).await;
+                    None
+                }
+            }
+        }
+    });
+    (messages, error_rx)
+}
+
 pub struct HeadlessDnsResolver {
     pub self_pod_name: String,
     pub advertised_hostname_template: String,
@@ -112,23 +133,17 @@ pub struct HeadlessDnsResolver {
 
 impl ForwardingResolver for HeadlessDnsResolver {
     fn resolve_peer(&self, host: &str, port: u16) -> PeerResolution {
-        let Some(pod_name) =
-            extract_pod_from_hostname(host, &self.advertised_hostname_template, &self.namespace)
-        else {
-            return PeerResolution::NotPeer;
-        };
-
-        if pod_name == self.self_pod_name {
-            return PeerResolution::Local;
+        match extract_pod_from_hostname(host, &self.advertised_hostname_template, &self.namespace) {
+            None => PeerResolution::NotPeer,
+            Some(pod_name) if pod_name == self.self_pod_name => PeerResolution::Local,
+            Some(pod_name) => PeerResolution::Peer(PeerTarget {
+                // Headless Service DNS is backed by ready EndpointSlices. Keep the
+                // original advertised hostname as the QUIC server name so verified
+                // relays still validate the client-facing certificate identity.
+                dial_addr: format!("{pod_name}.{}:{port}", self.headless_dns_suffix),
+                server_name: host.to_string(),
+            }),
         }
-
-        PeerResolution::Peer(PeerTarget {
-            // Headless Service DNS is backed by ready EndpointSlices. Keep the
-            // original advertised hostname as the QUIC server name so verified
-            // relays still validate the client-facing certificate identity.
-            dial_addr: format!("{pod_name}.{}:{port}", self.headless_dns_suffix),
-            server_name: host.to_string(),
-        })
     }
 }
 
@@ -138,17 +153,13 @@ pub async fn forward_quic_connection(
     endpoints: &RelayEndpoints,
     peer_connect_timeout: Duration,
 ) -> Result<()> {
+    let peer_connect_timeout_ms = peer_connect_timeout.as_millis();
     let mut resolved_addrs = tokio::time::timeout(
         peer_connect_timeout,
         tokio::net::lookup_host(&peer.dial_addr),
     )
     .await
-    .with_context(|| {
-        format!(
-            "DNS resolve peer timed out after {}ms",
-            peer_connect_timeout.as_millis()
-        )
-    })?
+    .with_context(|| format!("DNS resolve peer timed out after {peer_connect_timeout_ms}ms"))?
     .context("DNS resolve peer")?;
     let (resolved, endpoint) = endpoints.endpoint_for_resolved_addrs(&mut resolved_addrs)?;
     let connecting = endpoint
@@ -177,14 +188,10 @@ where
     F: Future<Output = std::result::Result<T, E>>,
     E: std::error::Error + Send + Sync + 'static,
 {
+    let peer_connect_timeout_ms = peer_connect_timeout.as_millis();
     tokio::time::timeout(peer_connect_timeout, connect)
         .await
-        .with_context(|| {
-            format!(
-                "peer QUIC connect timed out after {}ms",
-                peer_connect_timeout.as_millis()
-            )
-        })?
+        .with_context(|| format!("peer QUIC connect timed out after {peer_connect_timeout_ms}ms"))?
         .context("peer QUIC connect failed")
 }
 
@@ -200,39 +207,35 @@ async fn relay_connections(client: quinn::Connection, peer: quinn::Connection) {
     }
 }
 
+macro_rules! spawn_stream_relay {
+    ($tasks:expr, $stream:expr, $initiator:expr, $relay:ident, $accept_error:literal, $relay_error:literal) => {{
+        let stream = match $stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                warn!(%error, $accept_error);
+                break;
+            }
+        };
+        let initiator = $initiator.clone();
+        $tasks.spawn(async move {
+            if let Err(error) = $relay(stream, &initiator).await {
+                warn!(%error, $relay_error);
+            }
+        });
+    }};
+}
+
 async fn relay_direction(acceptor: quinn::Connection, initiator: quinn::Connection) {
     let mut tasks = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             bi = acceptor.accept_bi() => {
-                let bi = match bi {
-                    Ok(bi) => bi,
-                    Err(e) => {
-                        warn!(error = %e, "accept_bi failed in relay");
-                        break;
-                    }
-                };
-                let initiator = initiator.clone();
-                tasks.spawn(async move {
-                    if let Err(e) = relay_bi_stream(bi, &initiator).await {
-                        warn!(error = %e, "bi-stream relay error");
-                    }
-                });
+                spawn_stream_relay!(tasks, bi, initiator, relay_bi_stream,
+                    "accept_bi failed in relay", "bi-stream relay error");
             }
             uni = acceptor.accept_uni() => {
-                let uni = match uni {
-                    Ok(uni) => uni,
-                    Err(e) => {
-                        warn!(error = %e, "accept_uni failed in relay");
-                        break;
-                    }
-                };
-                let initiator = initiator.clone();
-                tasks.spawn(async move {
-                    if let Err(e) = relay_uni_stream(uni, &initiator).await {
-                        warn!(error = %e, "uni-stream relay error");
-                    }
-                });
+                spawn_stream_relay!(tasks, uni, initiator, relay_uni_stream,
+                    "accept_uni failed in relay", "uni-stream relay error");
             }
         }
     }
@@ -240,52 +243,40 @@ async fn relay_direction(acceptor: quinn::Connection, initiator: quinn::Connecti
 }
 
 async fn relay_bi_stream(
-    (mut a_send, mut a_recv): (quinn::SendStream, quinn::RecvStream),
+    (a_send, a_recv): (quinn::SendStream, quinn::RecvStream),
     initiator: &quinn::Connection,
 ) -> Result<()> {
-    let (mut b_send, mut b_recv) = initiator
+    let (b_send, b_recv) = initiator
         .open_bi()
         .await
         .context("open bi-stream on peer")?;
 
-    let a_to_b = async {
-        tokio::io::copy(&mut a_recv, &mut b_send).await?;
-        b_send.finish()?;
-        Ok::<_, anyhow::Error>(())
-    };
-
-    let b_to_a = async {
-        tokio::io::copy(&mut b_recv, &mut a_send).await?;
-        a_send.finish()?;
-        Ok::<_, anyhow::Error>(())
-    };
-
-    let (r1, r2) = tokio::join!(a_to_b, b_to_a);
+    let (r1, r2) = tokio::join!(relay_stream(a_recv, b_send), relay_stream(b_recv, a_send));
     r1.and(r2)
 }
 
-async fn relay_uni_stream(
-    mut a_recv: quinn::RecvStream,
-    initiator: &quinn::Connection,
-) -> Result<()> {
-    let mut b_send = initiator
+async fn relay_uni_stream(a_recv: quinn::RecvStream, initiator: &quinn::Connection) -> Result<()> {
+    let b_send = initiator
         .open_uni()
         .await
         .context("open uni-stream on peer")?;
 
-    tokio::io::copy(&mut a_recv, &mut b_send).await?;
-    b_send.finish()?;
+    relay_stream(a_recv, b_send).await
+}
+
+async fn relay_stream(mut recv: quinn::RecvStream, mut send: quinn::SendStream) -> Result<()> {
+    tokio::io::copy(&mut recv, &mut send).await?;
+    send.finish()?;
     Ok(())
 }
 
 pub fn build_relay_transport_config(config: RelayEndpointConfig) -> Result<Arc<TransportConfig>> {
     let mut transport = TransportConfig::default();
-    transport.max_idle_timeout(Some(
-        config
-            .max_idle_timeout
-            .try_into()
-            .context("relay max idle timeout must fit QUIC transport parameters")?,
-    ));
+    let idle_timeout = config
+        .max_idle_timeout
+        .try_into()
+        .context("relay max idle timeout must fit QUIC transport parameters")?;
+    transport.max_idle_timeout(Some(idle_timeout));
     transport.keep_alive_interval(config.keep_alive_interval);
     Ok(Arc::new(transport))
 }
@@ -302,35 +293,27 @@ fn build_relay_endpoints_with_factory(
     client_config: ClientConfig,
     mut build_client_endpoint: impl FnMut(SocketAddr) -> std::io::Result<Endpoint>,
 ) -> Result<RelayEndpoints> {
-    let transport_config = build_relay_transport_config(config)?;
-    let mut client_config_v4 = client_config.clone();
-    let mut client_config_v6 = client_config;
-    client_config_v4.transport_config(transport_config.clone());
-    client_config_v6.transport_config(transport_config);
+    let mut client_config = client_config;
+    client_config.transport_config(build_relay_transport_config(config)?);
 
-    let mut endpoint_v4 =
-        build_client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
-            .context("bind IPv4 relay endpoint")?;
-    let (endpoint_v6, endpoint_v6_unavailable_reason) =
-        match build_client_endpoint(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)) {
-            Ok(mut endpoint) => {
-                endpoint.set_default_client_config(client_config_v6);
-                (Some(endpoint), None)
-            }
-            Err(err) => {
-                let reason = err.to_string();
-                warn!(
-                    error = %err,
-                    "IPv6 relay endpoint unavailable; continuing with IPv4-only relay endpoint"
-                );
-                (None, Some(reason))
-            }
-        };
-    endpoint_v4.set_default_client_config(client_config_v4);
+    let mut endpoint_v4 = build_client_endpoint((Ipv4Addr::UNSPECIFIED, 0).into())
+        .context("bind IPv4 relay endpoint")?;
+    let endpoint_v6 = build_client_endpoint((Ipv6Addr::UNSPECIFIED, 0).into())
+        .map(|mut endpoint| {
+            endpoint.set_default_client_config(client_config.clone());
+            endpoint
+        })
+        .map_err(|error| {
+            warn!(
+                %error,
+                "IPv6 relay endpoint unavailable; continuing with IPv4-only relay endpoint"
+            );
+            error.to_string()
+        });
+    endpoint_v4.set_default_client_config(client_config);
     Ok(RelayEndpoints {
         endpoint_v4,
         endpoint_v6,
-        endpoint_v6_unavailable_reason,
     })
 }
 
@@ -357,22 +340,10 @@ impl HostnameMatcher {
     }
 
     pub fn extract_pod<'a>(&self, hostname: &'a str) -> Option<&'a str> {
-        if !hostname.starts_with(&self.prefix) || !hostname.ends_with(&self.suffix) {
-            return None;
-        }
-
-        let start = self.prefix.len();
-        let end = hostname.len().checked_sub(self.suffix.len())?;
-        if start >= end {
-            return None;
-        }
-
-        let pod = &hostname[start..end];
-        if pod.is_empty() {
-            return None;
-        }
-
-        Some(pod)
+        let pod = hostname
+            .strip_prefix(&self.prefix)?
+            .strip_suffix(&self.suffix)?;
+        (!pod.is_empty()).then_some(pod)
     }
 }
 
@@ -388,6 +359,23 @@ pub fn extract_pod_from_hostname(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{FutureExt, StreamExt};
+
+    #[tokio::test]
+    async fn forwarded_messages_keep_order_and_apply_error_backpressure() {
+        let (messages, mut errors) = forward_stream_messages(
+            futures::stream::iter([Ok(1), Err("first"), Err("second"), Ok(2)]),
+            |_| {},
+        );
+        futures::pin_mut!(messages);
+
+        assert_eq!(messages.next().await, Some(1));
+        assert!(messages.next().now_or_never().is_none());
+        assert_eq!(errors.recv().await, Some("first"));
+        assert_eq!(messages.next().await, Some(2));
+        assert_eq!(errors.recv().await, Some("second"));
+        assert_eq!(messages.next().await, None);
+    }
 
     #[test]
     fn render_hostname_substitutes_pod_name_and_namespace() {
@@ -409,48 +397,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn extract_pod_matches_template() {
-        assert_eq!(
-            extract_pod_from_hostname(
-                "stargate-1.stargate.external",
-                "{pod_name}.stargate.external",
-                ""
-            ),
-            Some("stargate-1".to_string())
-        );
+    macro_rules! extract_pod_tests {
+        ($($name:ident: ($hostname:expr, $template:expr, $namespace:expr) => $expected:expr;)+) => {
+            $(
+                #[test]
+                fn $name() {
+                    assert_eq!(
+                        extract_pod_from_hostname($hostname, $template, $namespace).as_deref(),
+                        $expected
+                    );
+                }
+            )+
+        };
     }
 
-    #[test]
-    fn extract_pod_returns_none_for_non_matching_host() {
-        assert_eq!(
-            extract_pod_from_hostname(
-                "stargate-1.other.domain",
-                "{pod_name}.stargate.external",
-                ""
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn extract_pod_returns_none_for_empty_pod() {
-        assert_eq!(
-            extract_pod_from_hostname(".stargate.external", "{pod_name}.stargate.external", ""),
-            None
-        );
-    }
-
-    #[test]
-    fn extract_pod_with_namespace_in_template() {
-        assert_eq!(
-            extract_pod_from_hostname(
-                "stargate-1.prod.stargate.external",
-                "{pod_name}.{namespace}.stargate.external",
-                "prod"
-            ),
-            Some("stargate-1".to_string())
-        );
+    extract_pod_tests! {
+        extract_pod_matches_template:
+            ("stargate-1.stargate.external", "{pod_name}.stargate.external", "")
+            => Some("stargate-1");
+        extract_pod_returns_none_for_non_matching_host:
+            ("stargate-1.other.domain", "{pod_name}.stargate.external", "") => None;
+        extract_pod_returns_none_for_empty_pod:
+            (".stargate.external", "{pod_name}.stargate.external", "") => None;
+        extract_pod_with_namespace_in_template:
+            ("stargate-1.prod.stargate.external",
+             "{pod_name}.{namespace}.stargate.external", "prod") => Some("stargate-1");
+        extract_pod_rejects_template_without_placeholder:
+            ("stargate-1.stargate.external", "static.stargate.external", "") => None;
     }
 
     fn make_resolver() -> HeadlessDnsResolver {
@@ -464,56 +437,38 @@ mod tests {
 
     #[test]
     fn resolve_peer_returns_local_for_self() {
-        let resolver = make_resolver();
-        assert_eq!(
-            resolver.resolve_peer("stargate-0.stargate.external", 50072),
-            PeerResolution::Local
-        );
+        assert_resolution("stargate-0.stargate.external", PeerResolution::Local);
     }
 
     #[test]
     fn resolve_peer_returns_not_peer_for_non_matching_host() {
-        let resolver = make_resolver();
-        assert_eq!(
-            resolver.resolve_peer("something.other.domain", 50072),
-            PeerResolution::NotPeer
-        );
+        assert_resolution("something.other.domain", PeerResolution::NotPeer);
     }
 
     #[test]
     fn resolve_peer_returns_headless_dns_addr_and_original_hostname_for_peer() {
-        let resolver = make_resolver();
-        assert_eq!(
-            resolver.resolve_peer("stargate-1.stargate.external", 50072),
+        assert_resolution(
+            "stargate-1.stargate.external",
             PeerResolution::Peer(PeerTarget {
                 dial_addr: "stargate-1.stargate-headless.prod.svc.cluster.local:50072".to_string(),
                 server_name: "stargate-1.stargate.external".to_string(),
-            })
+            }),
         );
     }
 
     #[test]
     fn resolve_peer_treats_matching_non_self_host_as_peer_dns_name() {
-        let resolver = make_resolver();
-        assert_eq!(
-            resolver.resolve_peer("stargate-2.stargate.external", 50072),
+        assert_resolution(
+            "stargate-2.stargate.external",
             PeerResolution::Peer(PeerTarget {
                 dial_addr: "stargate-2.stargate-headless.prod.svc.cluster.local:50072".to_string(),
                 server_name: "stargate-2.stargate.external".to_string(),
-            })
+            }),
         );
     }
 
-    #[test]
-    fn extract_pod_rejects_template_without_placeholder() {
-        assert_eq!(
-            extract_pod_from_hostname(
-                "stargate-1.stargate.external",
-                "static.stargate.external",
-                ""
-            ),
-            None
-        );
+    fn assert_resolution(host: &str, expected: PeerResolution) {
+        assert_eq!(make_resolver().resolve_peer(host, 50072), expected);
     }
 
     #[test]
@@ -530,27 +485,22 @@ mod tests {
         );
     }
 
-    fn parse_host(addr: &str) -> String {
-        let authority: http::uri::Authority = addr.parse().unwrap();
-        authority.host().to_string()
+    macro_rules! host_tests {
+        ($($name:ident: $addr:literal => $expected:literal;)+) => {
+            $(
+                #[test]
+                fn $name() {
+                    let authority: http::uri::Authority = $addr.parse().unwrap();
+                    assert_eq!(authority.host(), $expected);
+                }
+            )+
+        };
     }
 
-    #[test]
-    fn ipv6_bracketed_host_extraction() {
-        assert_eq!(parse_host("[::1]:50072"), "[::1]");
-    }
-
-    #[test]
-    fn ipv4_host_extraction() {
-        assert_eq!(parse_host("10.0.0.1:50072"), "10.0.0.1");
-    }
-
-    #[test]
-    fn hostname_host_extraction() {
-        assert_eq!(
-            parse_host("pod-a.stargate.external:50072"),
-            "pod-a.stargate.external"
-        );
+    host_tests! {
+        ipv6_bracketed_host_extraction: "[::1]:50072" => "[::1]";
+        ipv4_host_extraction: "10.0.0.1:50072" => "10.0.0.1";
+        hostname_host_extraction: "pod-a.stargate.external:50072" => "pod-a.stargate.external";
     }
 
     fn test_server_config() -> quinn::ServerConfig {
@@ -570,6 +520,35 @@ mod tests {
         quinn::ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(tls_config).unwrap(),
         ))
+    }
+
+    fn ipv4_only_relay_endpoints() -> RelayEndpoints {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        build_relay_endpoints_with_factory(
+            RelayEndpointConfig::default(),
+            stargate_tls::build_insecure_quic_client_config().unwrap(),
+            |addr| {
+                if addr.is_ipv6() {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "IPv6 disabled for test",
+                    ))
+                } else {
+                    Endpoint::client(addr)
+                }
+            },
+        )
+        .expect("relay endpoints should allow IPv4-only nodes")
+    }
+
+    fn assert_relay_endpoint_family(endpoints: &RelayEndpoints, target: &str, expect_ipv6: bool) {
+        let target = target.parse().unwrap();
+        let local = endpoints
+            .endpoint_for_addr(&target)
+            .expect("relay endpoint")
+            .local_addr()
+            .expect("relay endpoint address");
+        assert_eq!(local.is_ipv6(), expect_ipv6);
     }
 
     #[test]
@@ -602,66 +581,19 @@ mod tests {
         let relay_client_config = stargate_tls::build_insecure_quic_client_config().unwrap();
         let endpoints = build_relay_endpoints(RelayEndpointConfig::default(), relay_client_config)
             .expect("relay endpoints");
-        let ipv4_target: SocketAddr = "127.0.0.1:50072".parse().unwrap();
-        let ipv6_target: SocketAddr = "[::1]:50072".parse().unwrap();
-
-        assert!(
-            endpoints
-                .endpoint_for_addr(&ipv4_target)
-                .expect("ipv4 relay endpoint")
-                .local_addr()
-                .expect("ipv4 relay endpoint addr")
-                .is_ipv4()
-        );
-        if let Some(endpoint_v6) = endpoints.endpoint_v6.as_ref() {
-            assert!(
-                endpoint_v6
-                    .local_addr()
-                    .expect("ipv6 relay endpoint addr")
-                    .is_ipv6()
-            );
-            assert!(
-                endpoints
-                    .endpoint_for_addr(&ipv6_target)
-                    .expect("ipv6 relay endpoint")
-                    .local_addr()
-                    .expect("selected ipv6 relay endpoint addr")
-                    .is_ipv6()
-            );
+        assert_relay_endpoint_family(&endpoints, "127.0.0.1:50072", false);
+        if endpoints.endpoint_v6.is_ok() {
+            assert_relay_endpoint_family(&endpoints, "[::1]:50072", true);
         }
     }
 
     #[tokio::test]
     async fn relay_endpoints_allow_ipv4_when_ipv6_bind_fails() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let relay_client_config = stargate_tls::build_insecure_quic_client_config().unwrap();
-        let endpoints = build_relay_endpoints_with_factory(
-            RelayEndpointConfig::default(),
-            relay_client_config,
-            |addr| {
-                if addr.is_ipv6() {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "IPv6 disabled for test",
-                    ))
-                } else {
-                    Endpoint::client(addr)
-                }
-            },
-        )
-        .expect("relay endpoints should allow IPv4-only nodes");
+        let endpoints = ipv4_only_relay_endpoints();
 
-        let ipv4_target: SocketAddr = "127.0.0.1:50072".parse().unwrap();
         let ipv6_target: SocketAddr = "[::1]:50072".parse().unwrap();
 
-        assert!(
-            endpoints
-                .endpoint_for_addr(&ipv4_target)
-                .expect("ipv4 relay endpoint")
-                .local_addr()
-                .expect("ipv4 relay endpoint addr")
-                .is_ipv4()
-        );
+        assert_relay_endpoint_family(&endpoints, "127.0.0.1:50072", false);
         assert_eq!(
             endpoints
                 .endpoint_for_addr(&ipv6_target)
@@ -673,23 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn relay_endpoint_selection_skips_ipv6_when_ipv6_bind_fails() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let relay_client_config = stargate_tls::build_insecure_quic_client_config().unwrap();
-        let endpoints = build_relay_endpoints_with_factory(
-            RelayEndpointConfig::default(),
-            relay_client_config,
-            |addr| {
-                if addr.is_ipv6() {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "IPv6 disabled for test",
-                    ))
-                } else {
-                    Endpoint::client(addr)
-                }
-            },
-        )
-        .expect("relay endpoints should allow IPv4-only nodes");
+        let endpoints = ipv4_only_relay_endpoints();
 
         let selected = endpoints
             .endpoint_for_resolved_addrs([
@@ -699,13 +615,7 @@ mod tests {
             .expect("ipv4 target should be selected");
 
         assert_eq!(selected.0, "127.0.0.1:50072".parse().unwrap());
-        assert!(
-            selected
-                .1
-                .local_addr()
-                .expect("selected relay endpoint addr")
-                .is_ipv4()
-        );
+        assert!(selected.1.local_addr().unwrap().is_ipv4());
     }
 
     #[tokio::test]

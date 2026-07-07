@@ -89,12 +89,10 @@ pub(super) fn decide_upstream_response_retry(
 
     let retry_reason = retry_reason_from_headers(headers);
     if !retry_budget_remaining {
-        return RetryDecision::Final(FinalRetryDisposition::Exhausted(
-            "retry_budget_exhausted".to_string(),
-        ));
+        return retry_exhausted("retry_budget_exhausted");
     }
     if request_retries >= retry.max_request_retries {
-        return RetryDecision::Final(FinalRetryDisposition::Exhausted(retry_reason));
+        return retry_exhausted(retry_reason);
     }
 
     match replay_readiness {
@@ -120,18 +118,17 @@ pub(super) fn decide_proxy_error_retry(
     connect_retries: u32,
     replay_readiness: ReplayReadiness,
 ) -> RetryDecision<()> {
-    if !is_retryable_proxy_error(status) {
+    if !matches!(
+        status,
+        StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT | StatusCode::SERVICE_UNAVAILABLE
+    ) {
         return RetryDecision::Final(FinalRetryDisposition::PassThrough);
     }
     if !retry_budget_remaining {
-        return RetryDecision::Final(FinalRetryDisposition::Exhausted(
-            "retry_budget_exhausted".to_string(),
-        ));
+        return retry_exhausted("retry_budget_exhausted");
     }
     if connect_retries >= retry.max_connect_retries {
-        return RetryDecision::Final(FinalRetryDisposition::Exhausted(
-            "connect_retries_exhausted".to_string(),
-        ));
+        return retry_exhausted("connect_retries_exhausted");
     }
 
     match replay_readiness {
@@ -150,18 +147,11 @@ fn should_retry_upstream_response(
     headers: &HeaderMap,
     retry: &ProxyRetryConfig,
 ) -> bool {
-    if !retry.retryable_status_codes.contains(&status) {
-        return false;
-    }
-
-    if let Some(retryable) = headers
-        .get(HEADER_STARGATE_RETRYABLE)
-        .and_then(|value| value.to_str().ok())
-    {
-        return retryable.eq_ignore_ascii_case("true");
-    }
-
-    !retry.require_pylon_retry_signal
+    retry.retryable_status_codes.contains(&status)
+        && match header_str(headers, HEADER_STARGATE_RETRYABLE) {
+            Some(retryable) => retryable.eq_ignore_ascii_case("true"),
+            None => !retry.require_pylon_retry_signal,
+        }
 }
 
 pub(super) fn should_release_queue_mismatch_reservation(
@@ -169,13 +159,9 @@ pub(super) fn should_release_queue_mismatch_reservation(
     headers: &HeaderMap,
 ) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS
-        && headers
-            .get(HEADER_STARGATE_RETRYABLE)
-            .and_then(|value| value.to_str().ok())
+        && header_str(headers, HEADER_STARGATE_RETRYABLE)
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-        && headers
-            .get(HEADER_STARGATE_RETRY_REASON)
-            .and_then(|value| value.to_str().ok())
+        && header_str(headers, HEADER_STARGATE_RETRY_REASON)
             == Some(RETRY_REASON_QUEUE_ESTIMATE_MISMATCH)
 }
 
@@ -184,10 +170,11 @@ pub(super) fn retry_budget_deadline(
     retry: &ProxyRetryConfig,
     request_start: Instant,
 ) -> Result<Option<Instant>, StatusCode> {
-    let Some(header_name) = &retry.request_retry_budget_ms_header else {
-        return Ok(None);
-    };
-    let Some(header_value) = headers.get(header_name) else {
+    let Some(header_value) = retry
+        .request_retry_budget_ms_header
+        .as_ref()
+        .and_then(|header_name| headers.get(header_name))
+    else {
         return Ok(None);
     };
     let budget_ms = header_value
@@ -196,11 +183,10 @@ pub(super) fn retry_budget_deadline(
         .trim()
         .parse::<u64>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    Ok(Some(
-        request_start
-            .checked_add(Duration::from_millis(budget_ms))
-            .ok_or(StatusCode::BAD_REQUEST)?,
-    ))
+    request_start
+        .checked_add(Duration::from_millis(budget_ms))
+        .map(Some)
+        .ok_or(StatusCode::BAD_REQUEST)
 }
 
 pub(super) fn retry_budget_has_remaining(deadline: Option<Instant>) -> bool {
@@ -208,20 +194,19 @@ pub(super) fn retry_budget_has_remaining(deadline: Option<Instant>) -> bool {
 }
 
 fn retry_reason_from_headers(headers: &HeaderMap) -> String {
-    headers
-        .get(HEADER_STARGATE_RETRY_REASON)
-        .and_then(|value| value.to_str().ok())
+    header_str(headers, HEADER_STARGATE_RETRY_REASON)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| "retryable_upstream_response".to_string())
+        .unwrap_or("retryable_upstream_response")
+        .to_owned()
 }
 
-fn is_retryable_proxy_error(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT | StatusCode::SERVICE_UNAVAILABLE
-    )
+fn header_str<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str> {
+    headers.get(name)?.to_str().ok()
+}
+
+fn retry_exhausted<T>(reason: impl Into<String>) -> RetryDecision<T> {
+    RetryDecision::Final(FinalRetryDisposition::Exhausted(reason.into()))
 }
 
 #[cfg(test)]
@@ -229,6 +214,30 @@ mod tests {
     use super::*;
 
     use axum::http::HeaderValue;
+
+    fn retry_headers(retryable: &'static str, reason: Option<&'static str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_STARGATE_RETRYABLE,
+            HeaderValue::from_static(retryable),
+        );
+        if let Some(reason) = reason {
+            headers.insert(
+                HEADER_STARGATE_RETRY_REASON,
+                HeaderValue::from_static(reason),
+            );
+        }
+        headers
+    }
+
+    fn budget_headers(value: &'static str) -> HeaderMap {
+        [(
+            HeaderName::from_static(DEFAULT_RETRY_BUDGET_MS_HEADER),
+            HeaderValue::from_static(value),
+        )]
+        .into_iter()
+        .collect()
+    }
 
     #[test]
     fn retry_requires_explicit_pylon_signal_by_default() {
@@ -240,11 +249,7 @@ mod tests {
             &retry
         ));
 
-        let mut retryable_headers = HeaderMap::new();
-        retryable_headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRYABLE),
-            HeaderValue::from_static("true"),
-        );
+        let retryable_headers = retry_headers("true", None);
         assert!(should_retry_upstream_response(
             StatusCode::TOO_MANY_REQUESTS,
             &retryable_headers,
@@ -255,11 +260,7 @@ mod tests {
     #[test]
     fn retry_signal_is_ignored_for_non_retryable_status() {
         let retry = ProxyRetryConfig::default();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRYABLE),
-            HeaderValue::from_static("true"),
-        );
+        let headers = retry_headers("true", None);
 
         assert!(!should_retry_upstream_response(
             StatusCode::BAD_REQUEST,
@@ -270,12 +271,7 @@ mod tests {
 
     #[test]
     fn only_explicit_queue_mismatch_rejection_releases_optimistic_reservation() {
-        let mut headers = HeaderMap::new();
-        headers.insert(HEADER_STARGATE_RETRYABLE, HeaderValue::from_static("true"));
-        headers.insert(
-            HEADER_STARGATE_RETRY_REASON,
-            HeaderValue::from_static(RETRY_REASON_QUEUE_ESTIMATE_MISMATCH),
-        );
+        let mut headers = retry_headers("true", Some(RETRY_REASON_QUEUE_ESTIMATE_MISMATCH));
 
         assert!(should_release_queue_mismatch_reservation(
             StatusCode::TOO_MANY_REQUESTS,
@@ -302,11 +298,7 @@ mod tests {
             require_pylon_retry_signal: false,
             ..ProxyRetryConfig::default()
         };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRYABLE),
-            HeaderValue::from_static("false"),
-        );
+        let headers = retry_headers("false", None);
 
         assert!(!should_retry_upstream_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -318,15 +310,7 @@ mod tests {
     #[test]
     fn upstream_response_retry_decision_retries_when_budget_limit_and_replay_allow() {
         let retry = ProxyRetryConfig::default();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRYABLE),
-            HeaderValue::from_static("true"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRY_REASON),
-            HeaderValue::from_static("upstream_overloaded"),
-        );
+        let headers = retry_headers("true", Some("upstream_overloaded"));
 
         assert_eq!(
             decide_upstream_response_retry(
@@ -346,15 +330,7 @@ mod tests {
     #[test]
     fn queue_mismatch_retry_decision_retries_a_sibling_before_excluding_the_cluster() {
         let retry = ProxyRetryConfig::default();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRYABLE),
-            HeaderValue::from_static("true"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRY_REASON),
-            HeaderValue::from_static(RETRY_REASON_QUEUE_ESTIMATE_MISMATCH),
-        );
+        let headers = retry_headers("true", Some(RETRY_REASON_QUEUE_ESTIMATE_MISMATCH));
 
         assert_eq!(
             decide_upstream_response_retry(
@@ -374,15 +350,7 @@ mod tests {
     #[test]
     fn upstream_response_retry_decision_preserves_exhaustion_precedence() {
         let retry = ProxyRetryConfig::default();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRYABLE),
-            HeaderValue::from_static("true"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRY_REASON),
-            HeaderValue::from_static("upstream_overloaded"),
-        );
+        let headers = retry_headers("true", Some("upstream_overloaded"));
 
         assert_eq!(
             decide_upstream_response_retry(
@@ -489,11 +457,7 @@ mod tests {
     #[test]
     fn retry_budget_header_zero_blocks_retry() {
         let retry = ProxyRetryConfig::default();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(DEFAULT_RETRY_BUDGET_MS_HEADER),
-            HeaderValue::from_static("0"),
-        );
+        let headers = budget_headers("0");
 
         let deadline = retry_budget_deadline(&headers, &retry, Instant::now()).unwrap();
         assert!(!retry_budget_has_remaining(deadline));
@@ -511,11 +475,7 @@ mod tests {
     #[test]
     fn retry_budget_header_rejects_invalid_values() {
         let retry = ProxyRetryConfig::default();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(DEFAULT_RETRY_BUDGET_MS_HEADER),
-            HeaderValue::from_static("not-a-number"),
-        );
+        let headers = budget_headers("not-a-number");
 
         assert_eq!(
             retry_budget_deadline(&headers, &retry, Instant::now()),

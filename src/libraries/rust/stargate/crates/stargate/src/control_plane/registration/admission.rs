@@ -15,6 +15,7 @@
 
 use std::net::IpAddr;
 
+use anyhow::Context;
 use tonic::Status;
 use tracing::warn;
 use url::Url;
@@ -41,12 +42,9 @@ pub(super) fn admit_initial_registration(
         return Err(Status::invalid_argument("inference_server_url is empty"));
     }
 
-    let url_validation = if update.reverse_tunnel {
-        validate_reverse_tunnel_inference_server_url(&update.inference_server_url)
-    } else {
-        validate_inference_server_url(&update.inference_server_url)
-    };
-    if let Err(error) = url_validation {
+    if let Err(error) =
+        validate_inference_server_url(&update.inference_server_url, update.reverse_tunnel)
+    {
         warn!(
             inference_server_id = %update.inference_server_id,
             inference_server_url = %update.inference_server_url,
@@ -71,11 +69,10 @@ pub(super) fn admit_initial_registration(
 
     Ok(RegistrationIdentity {
         inference_server_id: update.inference_server_id.clone(),
-        cluster_id: effective_cluster_id(update),
+        cluster_id: effective_cluster_id(update).to_owned(),
         inference_server_url: update.inference_server_url.clone(),
         routing_key: routing_key.map(ToOwned::to_owned),
         reverse_tunnel: update.reverse_tunnel,
-        coordinated_calibration: update.coordinated_calibration,
     })
 }
 
@@ -114,55 +111,30 @@ pub(super) fn validate_running_update(
         );
         return Some(Status::invalid_argument("cluster_id changed"));
     }
-    if update.coordinated_calibration != identity.coordinated_calibration {
-        warn!(
-            inference_server_id = %update.inference_server_id,
-            coordinated_calibration = update.coordinated_calibration,
-            "coordinated_calibration changed; denying registration"
-        );
-        return Some(Status::invalid_argument("coordinated_calibration changed"));
-    }
     None
 }
 
-fn effective_cluster_id(update: &InferenceServerRegistration) -> String {
-    if update.cluster_id.is_empty() {
-        update.inference_server_id.clone()
-    } else {
-        update.cluster_id.clone()
+fn effective_cluster_id(update: &InferenceServerRegistration) -> &str {
+    match update.cluster_id.as_str() {
+        "" => &update.inference_server_id,
+        cluster_id => cluster_id,
     }
 }
 
-fn validate_inference_server_url(url: &str) -> Result<(), anyhow::Error> {
-    use anyhow::Context;
+fn validate_inference_server_url(url: &str, reverse_tunnel: bool) -> anyhow::Result<()> {
     let parsed = Url::parse(url).context("inference_server_url must be a valid URL")?;
-    if parsed.scheme() != "quic" {
+    if reverse_tunnel {
+        if !matches!(parsed.scheme(), "http" | "https") {
+            anyhow::bail!("inference_server_url scheme must be http or https");
+        }
+    } else if parsed.scheme() != "quic" {
         anyhow::bail!("inference_server_url scheme must be quic");
     }
-    if parsed.host_str().is_none() {
-        anyhow::bail!("inference_server_url must include host");
-    }
-    if parsed
+    let host = parsed
         .host_str()
-        .and_then(|host| host.parse::<IpAddr>().ok())
-        .is_none()
-    {
+        .context("inference_server_url must include host")?;
+    if !reverse_tunnel && host.parse::<IpAddr>().is_err() {
         anyhow::bail!("inference_server_url host must be an IP address");
-    }
-    if parsed.port_or_known_default().is_none() {
-        anyhow::bail!("inference_server_url must include port");
-    }
-    Ok(())
-}
-
-fn validate_reverse_tunnel_inference_server_url(url: &str) -> Result<(), anyhow::Error> {
-    use anyhow::Context;
-    let parsed = Url::parse(url).context("inference_server_url must be a valid URL")?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        anyhow::bail!("inference_server_url scheme must be http or https");
-    }
-    if parsed.host_str().is_none() {
-        anyhow::bail!("inference_server_url must include host");
     }
     if parsed.port_or_known_default().is_none() {
         anyhow::bail!("inference_server_url must include port");
@@ -181,7 +153,6 @@ mod tests {
             inference_server_url: url.to_string(),
             reverse_tunnel,
             models: Default::default(),
-            coordinated_calibration: false,
         }
     }
 
@@ -192,13 +163,29 @@ mod tests {
             inference_server_url: "quic://10.0.0.1:8080".to_string(),
             routing_key: None,
             reverse_tunnel: false,
-            coordinated_calibration: false,
         }
     }
 
     fn assert_invalid_argument(status: Status, expected_message: &str) {
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains(expected_message), "got: {status}");
+        assert_eq!(status.message(), expected_message);
+    }
+
+    fn assert_url_error(url: &str, expected_message: &str) {
+        let error = validate_inference_server_url(url, false).expect_err("URL should be rejected");
+        assert_eq!(
+            error.to_string(),
+            format!("inference_server_url {expected_message}")
+        );
+    }
+
+    fn assert_running_update_rejected(
+        update: &InferenceServerRegistration,
+        expected_message: &str,
+    ) {
+        let status = validate_running_update(&make_identity(), update)
+            .expect("changed registration identity should be rejected");
+        assert_invalid_argument(status, expected_message);
     }
 
     #[test]
@@ -225,7 +212,6 @@ mod tests {
     fn direct_registration_accepts_ip_quic_url_and_derives_identity() {
         let update = InferenceServerRegistration {
             cluster_id: "cluster-a".to_string(),
-            coordinated_calibration: true,
             ..make_update("server-1", "quic://10.0.0.1:8080", false)
         };
 
@@ -237,7 +223,6 @@ mod tests {
         assert_eq!(identity.inference_server_url, "quic://10.0.0.1:8080");
         assert_eq!(identity.routing_key.as_deref(), Some("tenant-a"));
         assert!(!identity.reverse_tunnel);
-        assert!(identity.coordinated_calibration);
     }
 
     #[test]
@@ -252,37 +237,31 @@ mod tests {
 
     #[test]
     fn validate_inference_server_url_rejects_http() {
-        let result = validate_inference_server_url("http://10.0.0.1:8080");
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("scheme must be quic"), "got: {msg}");
+        assert_url_error("http://10.0.0.1:8080", "scheme must be quic");
     }
 
     #[test]
     fn validate_inference_server_url_rejects_missing_port() {
-        let result = validate_inference_server_url("quic://10.0.0.1");
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("must include port"), "got: {msg}");
+        assert_url_error("quic://10.0.0.1", "must include port");
     }
 
     #[test]
     fn validate_inference_server_url_accepts_ip_host() {
-        validate_inference_server_url("quic://10.0.0.1:8080")
+        validate_inference_server_url("quic://10.0.0.1:8080", false)
             .expect("direct quic URL with IP host and port should be valid");
     }
 
     #[test]
     fn validate_inference_server_url_rejects_hostname_host() {
-        let result = validate_inference_server_url("quic://backend.default.svc:8080");
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("host must be an IP address"), "got: {msg}");
+        assert_url_error(
+            "quic://backend.default.svc:8080",
+            "host must be an IP address",
+        );
     }
 
     #[test]
     fn validate_inference_server_url_rejects_garbage() {
-        let result = validate_inference_server_url("not a url at all");
+        let result = validate_inference_server_url("not a url at all", false);
         assert!(result.is_err());
     }
 
@@ -293,7 +272,10 @@ mod tests {
         let status = admit_initial_registration(&update, true, None)
             .expect_err("reverse-tunnel registration with non-HTTP URL should be rejected");
 
-        assert_invalid_argument(status, "inference_server_url scheme must be http or https");
+        assert_invalid_argument(
+            status,
+            "invalid inference_server_url: inference_server_url scheme must be http or https",
+        );
     }
 
     #[test]
@@ -325,56 +307,29 @@ mod tests {
 
     #[test]
     fn validate_running_update_rejects_changed_url() {
-        let identity = make_identity();
         let update = make_update("server-1", "quic://10.0.0.2:9090", false);
-        let status = validate_running_update(&identity, &update);
-        assert!(status.is_some());
-        assert_eq!(status.unwrap().code(), tonic::Code::InvalidArgument);
+        assert_running_update_rejected(&update, "inference_server_url changed");
     }
 
     #[test]
     fn validate_running_update_rejects_changed_id() {
-        let identity = make_identity();
         let update = make_update("server-2", "quic://10.0.0.1:8080", false);
-        let status = validate_running_update(&identity, &update);
-        assert!(status.is_some());
-        assert_eq!(status.unwrap().code(), tonic::Code::InvalidArgument);
+        assert_running_update_rejected(&update, "inference_server_id changed");
     }
 
     #[test]
     fn validate_running_update_rejects_toggled_reverse_tunnel() {
-        let identity = make_identity();
         let update = make_update("server-1", "quic://10.0.0.1:8080", true);
-        let status = validate_running_update(&identity, &update);
-        assert!(status.is_some());
-        assert_eq!(status.unwrap().code(), tonic::Code::InvalidArgument);
+        assert_running_update_rejected(&update, "reverse tunnel flag changed");
     }
 
     #[test]
     fn validate_running_update_rejects_changed_cluster_id() {
-        let identity = make_identity();
         let update = InferenceServerRegistration {
             cluster_id: "different-cluster".to_string(),
             ..make_update("server-1", "quic://10.0.0.1:8080", false)
         };
 
-        let status = validate_running_update(&identity, &update);
-
-        assert!(status.is_some());
-        assert_eq!(status.unwrap().code(), tonic::Code::InvalidArgument);
-    }
-
-    #[test]
-    fn validate_running_update_rejects_changed_coordinated_calibration() {
-        let identity = make_identity();
-        let update = InferenceServerRegistration {
-            coordinated_calibration: true,
-            ..make_update("server-1", "quic://10.0.0.1:8080", false)
-        };
-
-        let status = validate_running_update(&identity, &update);
-
-        assert!(status.is_some());
-        assert_eq!(status.unwrap().code(), tonic::Code::InvalidArgument);
+        assert_running_update_rejected(&update, "cluster_id changed");
     }
 }

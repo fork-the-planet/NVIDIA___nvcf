@@ -17,13 +17,14 @@ use std::cmp::Ordering;
 
 use crate::load_balancer::{LoadBalancerRequest, input_work_units};
 use crate::routing_state::RoutedClusterSnapshot;
+use stargate_protocol::common::valid_last_mean_input_tps;
 
 use super::GroqMultiregionConfig;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct TtftEstimate {
-    pub(super) queue_ms: f64,
-    pub(super) ttft_ms: f64,
+pub(in crate::load_balancer) struct TtftEstimate {
+    pub(in crate::load_balancer) queue_ms: f64,
+    pub(in crate::load_balancer) ttft_ms: f64,
 }
 
 pub(super) struct CandidateEstimateAccumulator<'a> {
@@ -53,8 +54,8 @@ impl<'a> CandidateEstimateAccumulator<'a> {
             input_tokens: request.input_tokens,
             priority: request.priority,
             max_queue_time_ms,
-            ignore_queue_time: config.ignore_queue_time(),
-            ignore_input_processing_time: config.ignore_input_processing_time(),
+            ignore_queue_time: config.ignore_queue_time,
+            ignore_input_processing_time: config.ignore_input_processing_time,
             fastest_ttft: f64::INFINITY,
             slowest_ttft: f64::NEG_INFINITY,
             all_estimates_finite: true,
@@ -141,13 +142,10 @@ pub(super) fn has_capacity(candidate: &RoutedClusterSnapshot, max_queued: u64) -
 }
 
 fn within_queue_slo(estimate: &TtftEstimate, max_queue_time_ms: Option<f64>) -> bool {
-    match max_queue_time_ms {
-        Some(max_queue_time_ms) => estimate.queue_ms <= max_queue_time_ms,
-        None => true,
-    }
+    max_queue_time_ms.is_none_or(|max_queue_time_ms| estimate.queue_ms <= max_queue_time_ms)
 }
 
-pub(super) fn estimate_ttft_ms(
+pub(in crate::load_balancer) fn estimate_ttft_ms(
     candidate: &RoutedClusterSnapshot,
     input_tokens: Option<u64>,
     priority: u32,
@@ -204,8 +202,7 @@ fn estimate_queue_delay_ms(
 }
 
 fn effective_input_tps(candidate: &RoutedClusterSnapshot) -> f64 {
-    if candidate.stats.last_mean_input_tps > 0.0 && candidate.stats.last_mean_input_tps.is_finite()
-    {
+    if valid_last_mean_input_tps(candidate.stats.last_mean_input_tps) {
         candidate.stats.last_mean_input_tps
     } else {
         0.0

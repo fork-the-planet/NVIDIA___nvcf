@@ -14,30 +14,32 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, request::Parts};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use stargate_tls::ServerTlsIdentity;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span};
 
 use crate::load_balancer::LoadBalancerRouter;
 use crate::metrics::StargateMetrics;
 use crate::routing_state::StargateState;
-use crate::tunnel::QuicHttpProxy;
+use crate::tunnel::{QuicHttpProxy, QuicTunnelConfig};
 
 mod attempt;
+mod diagnostics;
 mod request;
 mod retry;
 mod routing;
 mod run;
 mod trace;
 mod upstream;
+pub(crate) use diagnostics::DebugConfig;
+use diagnostics::{debug_state, http_list_models};
 use request::{
     parse_proxy_request_inputs, reject_invalid_routing_algorithm,
     validate_load_balancer_request_requirements,
@@ -54,40 +56,30 @@ const HEADER_REQUEST_SLO_MS: &str = "x-request-slo-ms";
 const HEADER_CACHE_AFFINITY_KEY: &str = "x-cache-affinity-key";
 const HEADER_STARGATE_ERROR_CODE: &str = "x-stargate-error-code";
 
-#[derive(Clone, Copy, Debug)]
-enum OpenAiProxyEndpoint {
-    ChatCompletions,
-    Responses,
-    Embeddings,
+#[derive(Clone, Copy)]
+struct OpenAiProxyEndpoint {
+    path: &'static str,
+    name: &'static str,
 }
 
 impl OpenAiProxyEndpoint {
-    fn path(self) -> &'static str {
-        match self {
-            Self::ChatCompletions => "/v1/chat/completions",
-            Self::Responses => "/v1/responses",
-            Self::Embeddings => "/v1/embeddings",
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::ChatCompletions => "chat_completions",
-            Self::Responses => "responses",
-            Self::Embeddings => "embeddings",
-        }
-    }
+    const CHAT_COMPLETIONS: Self = Self {
+        path: "/v1/chat/completions",
+        name: "chat_completions",
+    };
+    const RESPONSES: Self = Self {
+        path: "/v1/responses",
+        name: "responses",
+    };
+    const EMBEDDINGS: Self = Self {
+        path: "/v1/embeddings",
+        name: "embeddings",
+    };
 }
 
 #[derive(Clone, Debug)]
 pub struct ProxyTransportConfig {
-    pub quic_connect_timeout: Duration,
-    pub quic_request_timeout: Duration,
-    pub tls_cert_pem: Option<Vec<u8>>,
-    pub server_tls_identity: ServerTlsIdentity,
-    pub quic_insecure: bool,
-    pub tunnel_protocol: stargate_protocol::TunnelTransportProtocol,
-    pub direct_quic_connections: usize,
+    pub quic: QuicTunnelConfig,
     pub retry: ProxyRetryConfig,
 }
 
@@ -104,37 +96,30 @@ pub struct ProxyAppState {
     pub lb_router: Arc<LoadBalancerRouter>,
     pub metrics: Arc<StargateMetrics>,
     pub retry: ProxyRetryConfig,
+    pub debug_config: DebugConfig,
 }
 
 pub fn make_router(app: ProxyAppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/v1/chat/completions", post(proxy_chat_completions))
-        .route("/v1/responses", post(proxy_responses))
-        .route("/v1/embeddings", post(proxy_embeddings))
+        .route("/v1/models", get(http_list_models))
+        .route("/debug/state", get(debug_state))
+        .route(
+            OpenAiProxyEndpoint::CHAT_COMPLETIONS.path,
+            post(|State(app), req| {
+                proxy_openai_request(app, req, OpenAiProxyEndpoint::CHAT_COMPLETIONS)
+            }),
+        )
+        .route(
+            OpenAiProxyEndpoint::RESPONSES.path,
+            post(|State(app), req| proxy_openai_request(app, req, OpenAiProxyEndpoint::RESPONSES)),
+        )
+        .route(
+            OpenAiProxyEndpoint::EMBEDDINGS.path,
+            post(|State(app), req| proxy_openai_request(app, req, OpenAiProxyEndpoint::EMBEDDINGS)),
+        )
         .with_state(app)
-}
-
-async fn proxy_chat_completions(
-    State(app): State<ProxyAppState>,
-    req: Request,
-) -> Result<Response<Body>, StatusCode> {
-    proxy_openai_request(app, req, OpenAiProxyEndpoint::ChatCompletions).await
-}
-
-async fn proxy_responses(
-    State(app): State<ProxyAppState>,
-    req: Request,
-) -> Result<Response<Body>, StatusCode> {
-    proxy_openai_request(app, req, OpenAiProxyEndpoint::Responses).await
-}
-
-async fn proxy_embeddings(
-    State(app): State<ProxyAppState>,
-    req: Request,
-) -> Result<Response<Body>, StatusCode> {
-    proxy_openai_request(app, req, OpenAiProxyEndpoint::Embeddings).await
 }
 
 async fn proxy_openai_request(
@@ -145,37 +130,38 @@ async fn proxy_openai_request(
     let request_start = Instant::now();
     let (parts, body) = req.into_parts();
     let span = proxy_openai_request_span(&parts.headers);
-
-    proxy_openai_request_inner(app, parts, body, endpoint, request_start)
-        .instrument(span)
-        .await
+    async move {
+        let request = prepare_proxy_request(&app, parts, body, endpoint, request_start)?;
+        ProxyRequestRun::new(&app, request).execute().await
+    }
+    .instrument(span)
+    .await
 }
 
-async fn proxy_openai_request_inner(
-    app: ProxyAppState,
-    parts: Parts,
+fn prepare_proxy_request(
+    app: &ProxyAppState,
+    parts: axum::http::request::Parts,
     body: Body,
     endpoint: OpenAiProxyEndpoint,
     request_start: Instant,
-) -> Result<Response<Body>, StatusCode> {
-    let request_path = parts.uri.path().to_string();
+) -> Result<PreparedProxyRequest, StatusCode> {
+    let request_path = parts.uri.path();
     let path_and_query = parts
         .uri
         .path_and_query()
         .map(|pq| pq.to_string())
-        .unwrap_or_else(|| endpoint.path().to_string());
+        .unwrap_or_else(|| endpoint.path.to_string());
     let request_inputs = parse_proxy_request_inputs(&parts.headers)?;
     let target = &request_inputs.target;
-    let rk_ref = target.routing_key.as_deref();
     let model_id = target.model_id.as_str();
 
-    Span::current().record("request.endpoint", endpoint.name());
+    Span::current().record("request.endpoint", endpoint.name);
     record_request_to_span(
         &Span::current(),
         RequestTraceFields {
-            routing_key: rk_ref,
+            routing_key: target.routing_key.as_deref(),
             model_id,
-            request_path: &request_path,
+            request_path,
             input_tokens: request_inputs.input_tokens,
             priority: request_inputs.priority,
             max_wait_ms: request_inputs.max_wait_ms,
@@ -184,39 +170,26 @@ async fn proxy_openai_request_inner(
         },
     );
 
-    let lb_resolution = match app
+    let lb_resolution = app
         .lb_router
         .resolve_algorithm_override(model_id, request_inputs.routing_algorithm_override.as_ref())
-    {
-        Ok(resolution) => resolution,
-        Err(error) => {
-            return Err(reject_invalid_routing_algorithm(target, &error));
-        }
-    };
+        .map_err(|error| reject_invalid_routing_algorithm(target, &error))?;
     validate_load_balancer_request_requirements(lb_resolution.config(), &request_inputs)?;
-
-    let method = parts.method.clone();
-    let forwarded_headers = prepare_forwarded_headers(&parts.headers);
     let retry_deadline = retry_budget_deadline(&parts.headers, &app.retry, request_start)?;
     let replay_body =
         ReplayableRequestBody::new(&parts.headers, body, app.retry.max_replay_body_bytes)?;
 
-    ProxyRequestRun::new(
-        &app,
-        PreparedProxyRequest {
-            request_inputs,
-            lb_resolution,
-            endpoint_name: endpoint.name(),
-            method,
-            path_and_query,
-            forwarded_headers,
-            retry_deadline,
-            request_start,
-            replay_body,
-        },
-    )
-    .execute()
-    .await
+    Ok(PreparedProxyRequest {
+        request_inputs,
+        lb_resolution,
+        endpoint_name: endpoint.name,
+        method: parts.method,
+        path_and_query,
+        forwarded_headers: prepare_forwarded_headers(&parts.headers),
+        retry_deadline,
+        request_start,
+        replay_body,
+    })
 }
 
 async fn healthz() -> StatusCode {
@@ -245,7 +218,7 @@ mod test_support {
     use crate::routing_state::StargateState;
     use crate::tunnel::{QuicHttpProxy, QuicTunnelConfig};
 
-    use super::{ProxyAppState, ProxyRetryConfig, ProxyTrafficState, readyz};
+    use super::{DebugConfig, ProxyAppState, ProxyRetryConfig, ProxyTrafficState, readyz};
 
     pub(super) fn test_proxy_app_state() -> ProxyAppState {
         test_proxy_app_state_with_lb_config(LoadBalancerConfig::default())
@@ -282,6 +255,7 @@ mod test_support {
             ),
             metrics,
             retry: ProxyRetryConfig::default(),
+            debug_config: DebugConfig::default(),
         }
     }
 

@@ -33,21 +33,6 @@ impl RegistrationRouterTopology {
             Self::Published(routers) => Some(routers),
         }
     }
-
-    fn publish_if_changed(
-        &mut self,
-        active_routers: &BTreeSet<StargateGrpcEndpoint>,
-        initial_publish_ready: bool,
-    ) -> bool {
-        let changed = match self {
-            Self::AwaitingInitial => initial_publish_ready && !active_routers.is_empty(),
-            Self::Published(previous) => previous != active_routers,
-        };
-        if changed {
-            *self = Self::Published(active_routers.clone());
-        }
-        changed
-    }
 }
 
 pub(super) fn publish_registration_router_topology(
@@ -56,6 +41,15 @@ pub(super) fn publish_registration_router_topology(
     initial_publish_ready: bool,
 ) -> bool {
     topology_tx.send_if_modified(|topology| {
-        topology.publish_if_changed(active_routers, initial_publish_ready)
+        let changed = match topology {
+            RegistrationRouterTopology::AwaitingInitial => {
+                initial_publish_ready && !active_routers.is_empty()
+            }
+            RegistrationRouterTopology::Published(routers) => routers != active_routers,
+        };
+        if changed {
+            *topology = RegistrationRouterTopology::Published(active_routers.clone());
+        }
+        changed
     })
 }

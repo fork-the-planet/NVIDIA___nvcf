@@ -45,27 +45,21 @@ pub(super) fn build_inference_server_registration(
     inference_server_url: &str,
     models: &HashMap<String, InferenceServerModelRegistration>,
     reverse_tunnel: bool,
-    coordinated_calibration: bool,
     reverse_connected: bool,
 ) -> InferenceServerRegistration {
-    let models = models
-        .iter()
-        .map(|(model_id, model)| {
-            let mut model = model.clone();
-            let model_status = InferenceServerStatus::try_from(model.status)
-                .unwrap_or(InferenceServerStatus::Unknown);
-            model.status =
-                router_advertised_status(model_status, reverse_tunnel, reverse_connected).into();
-            (model_id.clone(), model)
-        })
-        .collect();
+    let mut models = models.clone();
+    for model in models.values_mut() {
+        let model_status =
+            InferenceServerStatus::try_from(model.status).unwrap_or(InferenceServerStatus::Unknown);
+        model.status =
+            router_advertised_status(model_status, reverse_tunnel, reverse_connected).into();
+    }
     InferenceServerRegistration {
         inference_server_id: inference_server_id.to_string(),
         cluster_id: cluster_id.to_string(),
         inference_server_url: inference_server_url.to_string(),
         models,
         reverse_tunnel,
-        coordinated_calibration,
     }
 }
 

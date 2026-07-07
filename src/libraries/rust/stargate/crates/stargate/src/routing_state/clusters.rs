@@ -24,11 +24,6 @@ use super::*;
 
 #[derive(Debug, Default)]
 pub(super) struct RoutingLifecycle {
-    pub(super) targets: RoutingTargetStore,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct RoutingTargetStore {
     targets: SccHashMap<RoutingTargetKey, Arc<RoutingTargetState>>,
     metrics: Option<Arc<StargateMetrics>>,
 }
@@ -53,51 +48,32 @@ impl RoutingTargetState {
             return Err(backend);
         };
 
-        let Some(cluster_state) = clusters.get(&cluster_id).cloned() else {
+        let Some(cluster_state) = clusters.get(&cluster_id) else {
             let cluster_state = Arc::new(RoutedClusterState::new(cluster_generation));
-            assert_eq!(
-                cluster_state.upsert_backend(backend),
-                ClusterBackendUpsert::Inserted,
-                "new routed cluster generation must insert its first backend"
-            );
+            cluster_state.upsert_backend(backend);
             clusters.insert(cluster_id, cluster_state);
-            *active_backend_count = active_backend_count
-                .checked_add(1)
-                .expect("routing target active backend count overflow");
+            update_active_backend_count(active_backend_count, 0, 1);
             return Ok(());
         };
 
-        if Arc::ptr_eq(cluster_state.cluster_generation(), &cluster_generation) {
+        if Arc::ptr_eq(&cluster_state.cluster_generation, &cluster_generation) {
             if cluster_state.upsert_backend(backend) == ClusterBackendUpsert::Inserted {
-                *active_backend_count = active_backend_count
-                    .checked_add(1)
-                    .expect("routing target active backend count overflow");
+                update_active_backend_count(active_backend_count, 0, 1);
             }
             return Ok(());
         }
 
         assert!(
-            cluster_state.cluster_generation().is_retired(),
+            cluster_state.cluster_generation.is_retired(),
             "one routing target cannot contain different active generations of the same cluster"
         );
-        let stale_backend_count = cluster_state.backend_count();
+        let stale_backend_count = cluster_state.generation.lock().backends.len();
         let replacement = Arc::new(RoutedClusterState::new(cluster_generation));
-        assert_eq!(
-            replacement.upsert_backend(backend),
-            ClusterBackendUpsert::Inserted,
-            "replacement routed cluster generation must insert its first backend"
-        );
-        let replaced = clusters
+        replacement.upsert_backend(backend);
+        clusters
             .insert(cluster_id, replacement)
             .expect("existing routed cluster generation should be replaced");
-        assert!(
-            Arc::ptr_eq(&replaced, &cluster_state),
-            "replaced routed cluster generation should match the inspected generation"
-        );
-        *active_backend_count = active_backend_count
-            .checked_sub(stale_backend_count)
-            .and_then(|count| count.checked_add(1))
-            .expect("routing target active backend count replacement overflow");
+        update_active_backend_count(active_backend_count, stale_backend_count, 1);
         Ok(())
     }
 
@@ -111,50 +87,39 @@ impl RoutingTargetState {
         else {
             return;
         };
-        let Some(cluster_state) = clusters.get(cluster_id).cloned() else {
+        let Some(cluster_state) = clusters.get(cluster_id) else {
             return;
         };
 
-        if !Arc::ptr_eq(
-            cluster_state.cluster_generation(),
+        let removed_backend_count = if !Arc::ptr_eq(
+            &cluster_state.cluster_generation,
             &registration.cluster_generation,
         ) {
-            if !cluster_state.cluster_generation().is_retired() {
+            if !cluster_state.cluster_generation.is_retired() {
                 assert!(
                     registration.cluster_generation.is_retired(),
                     "one routing target cannot contain different active generations of the same cluster"
                 );
                 return;
             }
-            let removed = clusters.remove(cluster_id).expect(
+            let backend_count = cluster_state.generation.lock().backends.len();
+            clusters.remove(cluster_id).expect(
                 "retired routed cluster generation should remain target-owned until removal",
             );
-            assert!(
-                Arc::ptr_eq(&removed, &cluster_state),
-                "removed routed cluster generation should match the inspected generation"
-            );
-            *active_backend_count = active_backend_count
-                .checked_sub(cluster_state.backend_count())
-                .expect("routing target active backend count underflow");
-            return;
-        }
-
-        match cluster_state.remove_backend(registration) {
-            ClusterBackendRemoval::Missing => return,
-            ClusterBackendRemoval::Removed => {}
-            ClusterBackendRemoval::Emptied => {
-                let removed = clusters
-                    .remove(cluster_id)
-                    .expect("emptied cluster should remain target-owned until removal");
-                assert!(
-                    Arc::ptr_eq(&removed, &cluster_state),
-                    "removed cluster should match the mutated target-owned generation"
-                );
+            backend_count
+        } else {
+            match cluster_state.remove_backend(registration) {
+                ClusterBackendRemoval::Missing => return,
+                ClusterBackendRemoval::Removed => 1,
+                ClusterBackendRemoval::Emptied => {
+                    clusters
+                        .remove(cluster_id)
+                        .expect("emptied cluster should remain target-owned until removal");
+                    1
+                }
             }
-        }
-        *active_backend_count = active_backend_count
-            .checked_sub(1)
-            .expect("routing target active backend count underflow");
+        };
+        update_active_backend_count(active_backend_count, removed_backend_count, 0);
     }
 
     fn cluster_states(&self) -> Vec<Arc<RoutedClusterState>> {
@@ -176,35 +141,32 @@ impl RoutingTargetState {
         }
     }
 
-    fn is_routable(&self) -> bool {
-        self.active_backend_count() > 0
-    }
-
     fn retire_if_empty(&self) -> bool {
         let mut generation = self.generation.lock();
-        match &*generation {
-            RoutingTargetGeneration::Retired => return true,
-            RoutingTargetGeneration::Active {
-                clusters,
-                active_backend_count,
-            } if clusters.is_empty() => {
-                assert_eq!(
-                    *active_backend_count, 0,
-                    "empty routing target generation must not retain active backends"
-                );
-            }
-            RoutingTargetGeneration::Active { .. } => return false,
+        let RoutingTargetGeneration::Active {
+            clusters,
+            active_backend_count,
+        } = &*generation
+        else {
+            return true;
+        };
+        if !clusters.is_empty() {
+            return false;
         }
+        assert_eq!(
+            *active_backend_count, 0,
+            "empty routing target generation must not retain active backends"
+        );
         *generation = RoutingTargetGeneration::Retired;
         true
     }
 }
 
-impl RoutingTargetStore {
-    fn new(metrics: Option<Arc<StargateMetrics>>) -> Self {
+impl RoutingLifecycle {
+    pub(super) fn new(metrics: Option<Arc<StargateMetrics>>) -> Self {
         Self {
-            targets: SccHashMap::default(),
             metrics,
+            ..Self::default()
         }
     }
 
@@ -222,23 +184,27 @@ impl RoutingTargetStore {
         target: &RoutingTargetKey,
     ) -> Arc<RoutingTargetState> {
         loop {
-            if let Some(existing) = self.target_state(target).await {
-                return existing;
+            if let Some(state) = self.existing_or_inserted_target(target).await {
+                return state;
             }
+        }
+    }
 
-            let candidate = Arc::new(RoutingTargetState::default());
-            if self
-                .targets
-                .insert_async(target.clone(), candidate.clone())
-                .await
-                .is_ok()
-            {
-                return candidate;
-            }
-
-            if let Some(existing) = self.target_state(target).await {
-                return existing;
-            }
+    async fn existing_or_inserted_target(
+        &self,
+        target: &RoutingTargetKey,
+    ) -> Option<Arc<RoutingTargetState>> {
+        if let Some(existing) = self.target_state(target).await {
+            return Some(existing);
+        }
+        let candidate = Arc::new(RoutingTargetState::default());
+        match self
+            .targets
+            .insert_async(target.clone(), candidate.clone())
+            .await
+        {
+            Ok(()) => Some(candidate),
+            Err(_) => None,
         }
     }
 
@@ -270,11 +236,8 @@ impl RoutingTargetStore {
 
         let routing_key = routing_key.map(ToOwned::to_owned);
         let mut targets = Vec::new();
-        for model_id in model_ids.iter().cloned().collect::<BTreeSet<_>>() {
-            let target = RoutingTargetKey {
-                routing_key: routing_key.clone(),
-                model_id,
-            };
+        for model_id in model_ids.iter().collect::<BTreeSet<_>>() {
+            let target = RoutingTargetKey::new(routing_key.clone(), model_id);
             if let Some(target_state) = self.target_state(&target).await {
                 targets.push((target, target_state));
             }
@@ -297,15 +260,13 @@ impl RoutingTargetStore {
                 count,
             );
 
-            let after = self.target_state(target).await;
-            let unchanged = match (&before, &after) {
-                (None, None) => true,
-                (Some(before), Some(after)) => {
-                    Arc::ptr_eq(before, after) && after.active_backend_count() == count
-                }
-                _ => false,
+            let stable = match &before {
+                None => self.target_state(target).await.is_none(),
+                Some(before) => self.target_state(target).await.is_some_and(|after| {
+                    Arc::ptr_eq(before, &after) && after.active_backend_count() == count
+                }),
             };
-            if unchanged {
+            if stable {
                 return;
             }
         }
@@ -325,28 +286,6 @@ impl RoutingTargetStore {
             .await
             .is_some()
     }
-}
-
-impl RoutingLifecycle {
-    pub(super) fn new(metrics: Option<Arc<StargateMetrics>>) -> Self {
-        Self {
-            targets: RoutingTargetStore::new(metrics),
-        }
-    }
-
-    pub(super) async fn target_state(
-        &self,
-        target: &RoutingTargetKey,
-    ) -> Option<Arc<RoutingTargetState>> {
-        self.targets.target_state(target).await
-    }
-
-    pub(super) async fn target_state_or_insert(
-        &self,
-        target: &RoutingTargetKey,
-    ) -> Arc<RoutingTargetState> {
-        self.targets.target_state_or_insert(target).await
-    }
 
     pub(super) async fn upsert_inference_server_target(
         &self,
@@ -360,9 +299,9 @@ impl RoutingLifecycle {
                 break;
             };
             snapshot = rejected;
-            let _ = self.targets.remove_if_empty(target, target_state).await;
+            let _ = self.remove_if_empty(target, target_state).await;
         }
-        self.targets.publish_active_backend_count(target).await;
+        self.publish_active_backend_count(target).await;
     }
 
     pub(super) async fn remove_inference_server_from_target(
@@ -375,11 +314,8 @@ impl RoutingLifecycle {
         };
 
         target_state.remove_backend(registration);
-        let _ = self
-            .targets
-            .remove_if_empty(target, target_state.clone())
-            .await;
-        self.targets.publish_active_backend_count(target).await;
+        let _ = self.remove_if_empty(target, target_state).await;
+        self.publish_active_backend_count(target).await;
     }
 
     pub(super) async fn remove_inference_server_targets(
@@ -397,15 +333,12 @@ impl RoutingLifecycle {
         &self,
         target: &RoutingTargetKey,
     ) -> Vec<RoutedInferenceServerSnapshot> {
-        let Some(target_state) = self.target_state(target).await else {
-            return Vec::new();
-        };
-
-        let mut candidates = Vec::new();
-        for cluster_state in target_state.cluster_states() {
-            candidates.extend(cluster_state.backend_snapshot_values());
-        }
-        candidates
+        self.target_state(target)
+            .await
+            .into_iter()
+            .flat_map(|target_state| target_state.cluster_states())
+            .flat_map(|cluster| cluster.backend_snapshot_values())
+            .collect()
     }
 
     pub(super) async fn cluster_candidates_for_target(
@@ -414,8 +347,7 @@ impl RoutingLifecycle {
     ) -> Vec<RoutedClusterSnapshot> {
         self.routing_target_snapshot(target)
             .await
-            .map(RoutingTargetSnapshot::into_clusters)
-            .unwrap_or_default()
+            .map_or_else(Vec::new, RoutingTargetSnapshot::into_clusters)
     }
 
     pub(super) async fn routing_target_snapshot(
@@ -426,12 +358,7 @@ impl RoutingLifecycle {
 
         let mut clusters = Vec::new();
         for cluster_state in target_state.cluster_states() {
-            let calibrated_last_mean_input_tps = cluster_state
-                .cluster_generation()
-                .calibrations
-                .completed_last_mean_input_tps(&target.model_id)
-                .await;
-            if let Some(snapshot) = cluster_state.routing_snapshot(calibrated_last_mean_input_tps) {
+            if let Some(snapshot) = cluster_state.routing_snapshot() {
                 clusters.push((snapshot, cluster_state));
             }
         }
@@ -443,12 +370,26 @@ impl RoutingLifecycle {
         routing_key: Option<&str>,
         model_ids: &[String],
     ) -> Vec<String> {
-        let mut active_models = BTreeSet::new();
-        for (target, target_state) in self.targets.matching_targets(routing_key, model_ids).await {
-            if target_state.is_routable() {
-                active_models.insert(target.model_id);
-            }
-        }
-        active_models.into_iter().collect()
+        active_model_ids(self.matching_targets(routing_key, model_ids).await)
     }
+
+    pub(super) async fn list_active_models_for_debug(&self) -> Vec<String> {
+        active_model_ids(self.targets().await)
+    }
+}
+
+fn update_active_backend_count(count: &mut usize, removed: usize, added: usize) {
+    *count = count
+        .checked_sub(removed)
+        .and_then(|count| count.checked_add(added))
+        .expect("routing target active backend count overflow or underflow");
+}
+
+fn active_model_ids(targets: Vec<(RoutingTargetKey, Arc<RoutingTargetState>)>) -> Vec<String> {
+    targets
+        .into_iter()
+        .filter_map(|(target, state)| (state.active_backend_count() > 0).then_some(target.model_id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }

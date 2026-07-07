@@ -14,18 +14,16 @@
 // limitations under the License.
 
 use std::borrow::Cow;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
-use quinn::ClientConfig;
+use anyhow::{Context, Result, bail, ensure};
+use quinn::{ClientConfig, ServerConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error, SignatureScheme};
 
-/// Generates a self-signed certificate and private key in PEM format.
-///
-/// The certificate has SANs for `localhost` and `stargate`.
+/// Generates a PEM self-signed certificate and key with SANs for `localhost` and `stargate`.
 pub fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>)> {
     generate_self_signed_cert_for_names(vec!["localhost".to_string(), "stargate".to_string()])
 }
@@ -41,33 +39,22 @@ pub fn generate_self_signed_cert_for_names(names: Vec<String>) -> Result<(Vec<u8
 
 pub type ServerTlsPemPair<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
 
-/// Orders resolved dial addresses while preserving each address family's
-/// resolver order. IPv4 remains preferred for compatibility with existing
-/// deployments, but IPv6 candidates stay available for fallback.
+/// Prefers IPv4 dial addresses, preserving each family's resolver order and IPv6 fallback.
 pub fn ordered_dial_candidates(
     resolved_addrs: impl IntoIterator<Item = SocketAddr>,
 ) -> Vec<SocketAddr> {
-    let mut ipv4 = Vec::new();
-    let mut ipv6 = Vec::new();
-    for addr in resolved_addrs {
-        if addr.is_ipv4() {
-            ipv4.push(addr);
-        } else {
-            ipv6.push(addr);
-        }
-    }
+    let (mut ipv4, ipv6): (Vec<_>, Vec<_>) =
+        resolved_addrs.into_iter().partition(SocketAddr::is_ipv4);
     ipv4.extend(ipv6);
     ipv4
 }
 
 /// Returns an ephemeral unspecified local address compatible with `remote_addr`.
 pub fn quic_client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
-    let ip = if remote_addr.is_ipv4() {
-        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-    } else {
-        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
-    };
-    SocketAddr::new(ip, 0)
+    match remote_addr {
+        SocketAddr::V4(_) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
+        SocketAddr::V6(_) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
+    }
 }
 
 /// TLS identity used by QUIC tunnel servers.
@@ -95,13 +82,9 @@ impl ServerTlsIdentity {
     /// Returns the PEM pair to parse when building a server config.
     pub fn pem_pair(&self) -> Result<ServerTlsPemPair<'_>> {
         match self {
-            Self::SelfSigned => {
-                let (cert_pem, key_pem) = generate_self_signed_cert()?;
-                Ok((Cow::Owned(cert_pem), Cow::Owned(key_pem)))
-            }
-            Self::Provided { cert_pem, key_pem } => {
-                Ok((Cow::Borrowed(cert_pem), Cow::Borrowed(key_pem)))
-            }
+            Self::SelfSigned => generate_self_signed_cert()
+                .map(|(cert_pem, key_pem)| (Cow::Owned(cert_pem), Cow::Owned(key_pem))),
+            Self::Provided { cert_pem, key_pem } => Ok((cert_pem.into(), key_pem.into())),
         }
     }
 }
@@ -111,8 +94,7 @@ pub fn build_insecure_quic_client_config() -> Result<ClientConfig> {
     build_insecure_quic_client_config_with_alpn(Vec::new())
 }
 
-/// Builds a QUIC client config that skips server certificate verification and
-/// advertises the supplied ALPN protocol list.
+/// Builds a QUIC client config that skips verification and advertises the supplied ALPN list.
 pub fn build_insecure_quic_client_config_with_alpn(
     alpn_protocols: Vec<Vec<u8>>,
 ) -> Result<ClientConfig> {
@@ -121,13 +103,26 @@ pub fn build_insecure_quic_client_config_with_alpn(
         .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
         .with_no_client_auth();
     tls_config.alpn_protocols = alpn_protocols;
-    Ok(ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)?,
-    )))
+    quic_client_config(tls_config)
 }
 
-/// Builds a QUIC client config that verifies servers against the supplied PEM
-/// trust anchor and advertises the supplied ALPN protocol list.
+/// Selects verified or insecure QUIC client TLS from the supplied trust policy.
+pub fn build_quic_client_config(
+    cert_pem: Option<&[u8]>,
+    insecure: bool,
+    alpn_protocols: Vec<Vec<u8>>,
+    missing_trust_error: &'static str,
+) -> Result<ClientConfig> {
+    if insecure {
+        return build_insecure_quic_client_config_with_alpn(alpn_protocols);
+    }
+    build_trusted_quic_client_config_with_alpn(
+        cert_pem.context(missing_trust_error)?,
+        alpn_protocols,
+    )
+}
+
+/// Builds a QUIC client config using the supplied PEM trust anchor and ALPN list.
 pub fn build_trusted_quic_client_config_with_alpn(
     cert_pem: &[u8],
     alpn_protocols: Vec<Vec<u8>>,
@@ -142,8 +137,45 @@ pub fn build_trusted_quic_client_config_with_alpn(
         .with_root_certificates(roots)
         .with_no_client_auth();
     tls_config.alpn_protocols = alpn_protocols;
+    quic_client_config(tls_config)
+}
+
+/// Builds a QUIC server config from one identity and ALPN policy.
+pub fn build_quic_server_config(
+    identity: &ServerTlsIdentity,
+    alpn_protocols: Vec<Vec<u8>>,
+) -> Result<ServerConfig> {
+    let (cert_pem, key_pem) = identity.pem_pair()?;
+    build_quic_server_config_from_pem(&cert_pem, &key_pem, alpn_protocols)
+}
+
+/// Builds a QUIC server config from PEM-encoded identity material and ALPN policy.
+pub fn build_quic_server_config_from_pem(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    alpn_protocols: Vec<Vec<u8>>,
+) -> Result<ServerConfig> {
+    let cert_chain = rustls_pemfile::certs(&mut &*cert_pem)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to parse TLS certificate PEM")?;
+    ensure!(!cert_chain.is_empty(), "no certificate found in TLS PEM");
+    let key = rustls_pemfile::private_key(&mut &*key_pem)
+        .context("failed to parse TLS private key PEM")?
+        .context("no private key found in TLS PEM")?;
+    let mut tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)
+        .context("failed to build TLS server config")?;
+    tls.alpn_protocols = alpn_protocols;
+    Ok(ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(tls)
+            .context("failed to build QUIC server config")?,
+    )))
+}
+
+fn quic_client_config(tls: rustls::ClientConfig) -> Result<ClientConfig> {
     Ok(ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)?,
+        quinn::crypto::rustls::QuicClientConfig::try_from(tls)?,
     )))
 }
 

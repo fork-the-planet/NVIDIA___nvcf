@@ -20,6 +20,12 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::routing_state::{RoutedClusterSnapshot, RoutedInferenceServerSnapshot};
 use crate::telemetry::parent_context_from_headers;
 
+macro_rules! record_fields {
+    ($span:expr; $($name:literal = $value:expr),+ $(,)?) => {
+        $($span.record($name, $value);)+
+    };
+}
+
 pub(super) fn proxy_openai_request_span(headers: &HeaderMap) -> Span {
     let span = tracing::info_span!(
         "proxy_openai_request",
@@ -81,16 +87,15 @@ pub(super) struct RequestTraceFields<'a> {
 }
 
 pub(super) fn record_request_to_span(span: &Span, fields: RequestTraceFields<'_>) {
-    span.record("request.routing_key", fields.routing_key.unwrap_or(""));
-    span.record("request.model_id", fields.model_id);
-    span.record("request.path", fields.request_path);
-    span.record("request.input_tokens", fields.input_tokens);
-    span.record("request.priority", fields.priority);
-    span.record("request.max_wait_ms", fields.max_wait_ms.unwrap_or(0));
-    span.record("request.slo_ms", fields.request_slo_ms.unwrap_or(0));
-    span.record(
-        "request.cache_affinity_key_present",
-        fields.cache_affinity_key_present,
+    record_fields!(span;
+        "request.routing_key" = fields.routing_key.unwrap_or(""),
+        "request.model_id" = fields.model_id,
+        "request.path" = fields.request_path,
+        "request.input_tokens" = fields.input_tokens,
+        "request.priority" = fields.priority,
+        "request.max_wait_ms" = fields.max_wait_ms.unwrap_or(0),
+        "request.slo_ms" = fields.request_slo_ms.unwrap_or(0),
+        "request.cache_affinity_key_present" = fields.cache_affinity_key_present,
     );
 }
 
@@ -105,178 +110,38 @@ pub(super) struct RoutingTraceFields<'a> {
 }
 
 pub(super) fn record_routing_to_span(span: &Span, routing: RoutingTraceFields<'_>) {
-    let fields = SelectedInstanceTraceFields::from_route(routing.cluster, routing.chosen);
-    span.record("routing.algorithm", routing.routing_algorithm);
-    span.record(
-        "routing.requested_algorithm",
-        routing.requested_algorithm.unwrap_or(""),
+    let stats = &routing.cluster.stats;
+    record_fields!(span;
+        "routing.algorithm" = routing.routing_algorithm,
+        "routing.requested_algorithm" = routing.requested_algorithm.unwrap_or(""),
+        "routing.num_candidates" = routing.num_candidates,
+        "routing.rank_depth" = routing.rank_depth as i64,
+        "routing.selected_after_kv_free_tokens_skip" = routing.selected_after_kv_free_tokens_skip,
+        "selected_cluster.id" = &routing.cluster.cluster_id,
+        "selected_inst.id" = routing.chosen.inference_server_id.as_str(),
+        "selected_inst.output_tps" = stats.output_tps,
+        "selected_inst.last_mean_input_tps" = stats.last_mean_input_tps,
+        "selected_inst.max_output_tps" = stats.max_output_tps,
+        "selected_inst.queue_size" = stats.queue_size,
+        "selected_inst.queued_input_size" = stats.queued_input_size,
+        "selected_inst.num_running_queries" = stats.num_running_queries,
+        "selected_inst.max_engine_concurrency" = stats.max_engine_concurrency,
+        "selected_inst.total_query_input_size" = stats.total_query_input_size,
+        "selected_inst.kv_cache_capacity_tokens" = stats.kv_cache_capacity_tokens,
+        "selected_inst.kv_cache_used_tokens" = stats.kv_cache_used_tokens,
+        "selected_inst.kv_cache_free_tokens" = stats.kv_cache_free_tokens,
+        "selected_inst.rtt_ms" = routing.cluster.rtt.as_secs_f64() * 1000.0,
+        "selected_inst.snapshot_age_ms" = routing.cluster.snapshot_updated_at.elapsed().as_secs_f64() * 1000.0,
     );
-    span.record("routing.num_candidates", routing.num_candidates);
-    span.record("routing.rank_depth", routing.rank_depth as i64);
-    span.record(
-        "routing.selected_after_kv_free_tokens_skip",
-        routing.selected_after_kv_free_tokens_skip,
-    );
-    span.record("selected_cluster.id", &routing.cluster.cluster_id);
-    span.record("selected_inst.id", &fields.inference_server_id);
-    span.record("selected_inst.output_tps", fields.output_tps);
-    span.record(
-        "selected_inst.last_mean_input_tps",
-        fields.last_mean_input_tps,
-    );
-    span.record("selected_inst.max_output_tps", fields.max_output_tps);
-    span.record("selected_inst.queue_size", fields.queue_size);
-    span.record("selected_inst.queued_input_size", fields.queued_input_size);
-    span.record(
-        "selected_inst.num_running_queries",
-        fields.num_running_queries,
-    );
-    span.record(
-        "selected_inst.max_engine_concurrency",
-        fields.max_engine_concurrency,
-    );
-    span.record(
-        "selected_inst.total_query_input_size",
-        fields.total_query_input_size,
-    );
-    span.record(
-        "selected_inst.kv_cache_capacity_tokens",
-        fields.kv_cache_capacity_tokens,
-    );
-    span.record(
-        "selected_inst.kv_cache_used_tokens",
-        fields.kv_cache_used_tokens,
-    );
-    span.record(
-        "selected_inst.kv_cache_free_tokens",
-        fields.kv_cache_free_tokens,
-    );
-    span.record("selected_inst.rtt_ms", fields.rtt_ms);
-    span.record("selected_inst.snapshot_age_ms", fields.snapshot_age_ms);
-}
-
-#[derive(Debug, Clone)]
-struct SelectedInstanceTraceFields {
-    inference_server_id: String,
-    output_tps: f64,
-    last_mean_input_tps: f64,
-    max_output_tps: f64,
-    queue_size: u64,
-    queued_input_size: u64,
-    kv_cache_capacity_tokens: u64,
-    kv_cache_used_tokens: u64,
-    kv_cache_free_tokens: u64,
-    num_running_queries: u64,
-    max_engine_concurrency: u64,
-    total_query_input_size: u64,
-    rtt_ms: f64,
-    snapshot_age_ms: f64,
-}
-
-impl SelectedInstanceTraceFields {
-    fn from_route(
-        cluster: &RoutedClusterSnapshot,
-        backend: &RoutedInferenceServerSnapshot,
-    ) -> Self {
-        Self {
-            inference_server_id: backend.inference_server_id.clone(),
-            output_tps: cluster.stats.output_tps,
-            last_mean_input_tps: cluster.stats.last_mean_input_tps,
-            max_output_tps: cluster.stats.max_output_tps,
-            queue_size: cluster.stats.queue_size,
-            queued_input_size: cluster.stats.queued_input_size,
-            kv_cache_capacity_tokens: cluster.stats.kv_cache_capacity_tokens,
-            kv_cache_used_tokens: cluster.stats.kv_cache_used_tokens,
-            kv_cache_free_tokens: cluster.stats.kv_cache_free_tokens,
-            num_running_queries: cluster.stats.num_running_queries,
-            max_engine_concurrency: cluster.stats.max_engine_concurrency,
-            total_query_input_size: cluster.stats.total_query_input_size,
-            rtt_ms: cluster.rtt.as_secs_f64() * 1000.0,
-            snapshot_age_ms: cluster.snapshot_updated_at.elapsed().as_secs_f64() * 1000.0,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
+    use crate::telemetry::parent_context_from_headers;
     use axum::http::{HeaderMap, HeaderName, HeaderValue};
     use opentelemetry::global;
     use opentelemetry::trace::TraceContextExt;
     use opentelemetry_sdk::propagation::TraceContextPropagator;
-    use stargate_proto::pb::{InferenceServerStatus, ModelStats};
-
-    use crate::routing_state::{
-        RegistrationIdentity, RoutedClusterSnapshot, RoutedInferenceServerSnapshot,
-        test_registration_generation,
-    };
-    use crate::telemetry::parent_context_from_headers;
-
-    use super::*;
-
-    #[test]
-    fn selected_instance_trace_fields_exclude_url_and_include_pulsar_metrics() {
-        let registration = test_registration_generation(RegistrationIdentity {
-            inference_server_id: "inst-a".to_string(),
-            cluster_id: "cluster-a".to_string(),
-            inference_server_url: "quic://127.0.0.1:5000".to_string(),
-            routing_key: None,
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-        });
-        let snapshot = RoutedInferenceServerSnapshot {
-            registration,
-            cluster_id: "cluster-a".to_string(),
-            inference_server_id: "inst-a".to_string(),
-            inference_server_url: "quic://127.0.0.1:5000".to_string(),
-            stats: ModelStats {
-                output_tps: 20.0,
-                last_mean_input_tps: 30.0,
-                max_output_tps: 40.0,
-                queue_size: 5,
-                queued_input_size: 6,
-                kv_cache_capacity_tokens: 4096,
-                kv_cache_used_tokens: 1024,
-                kv_cache_free_tokens: 3072,
-                num_running_queries: 3,
-                max_engine_concurrency: 8,
-                total_query_input_size: 512,
-                queue_time_estimate_ms_by_priority: std::collections::HashMap::new(),
-                ..ModelStats::default()
-            },
-            rtt: Duration::from_millis(12),
-            snapshot_updated_at: Instant::now(),
-            status: InferenceServerStatus::Active,
-            reverse_tunnel: false,
-        };
-        let cluster = RoutedClusterSnapshot {
-            cluster_id: "cluster-a".to_string(),
-            stats: ModelStats {
-                output_tps: 20.0,
-                last_mean_input_tps: 30.0,
-                max_output_tps: 40.0,
-                queue_size: 5,
-                queued_input_size: 6,
-                kv_cache_capacity_tokens: 4096,
-                kv_cache_used_tokens: 1024,
-                kv_cache_free_tokens: 3072,
-                ..ModelStats::default()
-            },
-            rtt: Duration::from_millis(12),
-            snapshot_updated_at: Instant::now(),
-            status: InferenceServerStatus::Active,
-            active_backend_count: 1,
-        };
-
-        let fields = SelectedInstanceTraceFields::from_route(&cluster, &snapshot);
-        assert_eq!(fields.inference_server_id, "inst-a");
-        assert_eq!(fields.kv_cache_capacity_tokens, 4096);
-        assert_eq!(fields.kv_cache_used_tokens, 1024);
-        assert_eq!(fields.kv_cache_free_tokens, 3072);
-        assert_eq!(fields.rtt_ms, 12.0);
-        assert!(fields.snapshot_age_ms >= 0.0);
-    }
 
     #[test]
     fn traceparent_header_extracts_remote_parent_context() {

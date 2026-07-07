@@ -17,7 +17,6 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//vendor/github.com/pelletier/go-toml/v2/internal/characters",
-        "//vendor/github.com/pelletier/go-toml/v2/internal/danger",
         "//vendor/github.com/pelletier/go-toml/v2/internal/tracker",
         "//vendor/github.com/pelletier/go-toml/v2/unstable",
     ],

@@ -33,60 +33,39 @@ use tokio::sync::{Mutex, Semaphore, broadcast};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-#[cfg(test)]
-use kv_cache::*;
-#[cfg(test)]
-use openai::*;
-#[cfg(test)]
-use stats_stream::*;
-#[cfg(test)]
-use test_control::*;
-#[cfg(test)]
-use timing::*;
-
 #[derive(clap::Parser, Debug)]
 #[command(name = "mock-dynamo")]
 struct Args {
     /// HTTP listen address for the mock inference server
     #[arg(long, default_value = "127.0.0.1:8090", value_name = "ADDR")]
     http_listen_addr: String,
-
     /// Model name served by this server
     #[arg(long, default_value = "dummy-model", value_name = "MODEL")]
     model_name: String,
-
     /// Number of dummy tokens to generate
     #[arg(long, default_value_t = 10, value_name = "N")]
     num_tokens: usize,
-
     /// Delay between tokens in milliseconds
     #[arg(long, default_value_t = 100, value_name = "MS")]
     token_delay_ms: u64,
-
     /// Deterministic bounded jitter added to each decode token delay based on request id
     #[arg(long, default_value_t = 0, value_name = "MS")]
     decode_jitter_ms: u64,
-
     /// Delay before the first output token in milliseconds
     #[arg(long, default_value_t = 0, value_name = "MS")]
     ttft_ms: u64,
-
     /// Deterministic bounded jitter added to TTFT based on request id
     #[arg(long, default_value_t = 0, value_name = "MS")]
     ttft_jitter_ms: u64,
-
     /// Approximate prefill throughput. When set, TTFT scales with input token count
     #[arg(long, default_value_t = 0.0, value_name = "TPS")]
     prefill_tokens_per_s: f64,
-
     /// Maximum concurrent requests the mock backend processes. 0 means unlimited
     #[arg(long, default_value_t = 0, value_name = "N")]
     max_concurrent_requests: usize,
-
     /// Delay /health responses to create deterministic RTT differences in tests
     #[arg(long, default_value_t = 0, value_name = "MS")]
     health_delay_ms: u64,
-
     /// Total mock KV-cache capacity in tokens. 0 disables cache tracking
     #[arg(long, default_value_t = 0, value_name = "TOKENS")]
     kv_cache_capacity_tokens: u64,
@@ -123,7 +102,7 @@ async fn main() -> Result<()> {
 
     let (stats_events, _) = broadcast::channel(1024);
     let state = AppState {
-        model_name: args.model_name.clone(),
+        model_name: args.model_name,
         num_tokens: args.num_tokens,
         token_delay: Duration::from_millis(args.token_delay_ms),
         decode_jitter_ms: args.decode_jitter_ms,
@@ -161,9 +140,7 @@ async fn main() -> Result<()> {
     info!("send POST to http://{actual_http_addr}/v1/responses");
     info!("send POST to http://{actual_http_addr}/v1/embeddings");
 
-    axum::serve(listener, app).await?;
-
-    Ok(())
+    Ok(axum::serve(listener, app).await?)
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use xxhash_rust::xxh3::xxh3_64;
 
-use super::{GroqMultiregionConfig, double_excluded_cluster_ids, single_excluded_cluster_id};
+use super::{GroqMultiregionConfig, RequestExclusions};
 use crate::load_balancer::{
     HashInputBuilder, LoadBalancerRequest, cache_affinity_key_is_cacheable,
 };
@@ -40,130 +40,73 @@ impl CacheAffinitySelector {
         candidates: &[RoutedClusterSnapshot],
     ) -> Option<Arc<Vec<usize>>> {
         let cache_affinity_key = request.cache_affinity_key?;
-        let selection_count = config.cache_affinity_backend_selection_count()?;
+        let selection_count = config.cache_affinity_backend_selection_count?;
         if candidates.is_empty() {
             return None;
         }
 
         let selection_count = selection_count.min(candidates.len());
-        let single_excluded_cluster_id = single_excluded_cluster_id(request);
-        let double_excluded_cluster_ids = double_excluded_cluster_ids(request);
+        let exclusions = RequestExclusions::from(request);
         let cacheable_selection = cache_affinity_key_is_cacheable(cache_affinity_key)
-            && (!request.has_excluded_clusters()
-                || single_excluded_cluster_id.is_some()
-                || double_excluded_cluster_ids.is_some());
-        let selected_indices = match self.cached_or_computed_selection(
-            config,
-            request,
-            candidates,
-            cache_affinity_key,
-            selection_count,
-            cacheable_selection,
-        ) {
-            CacheAffinitySelectionLookup::Hit(indices) => indices,
-            CacheAffinitySelectionLookup::Computed(indices) => {
-                if cacheable_selection && !indices.is_empty() {
-                    let mut cache = self.cache.write();
-                    if cache.matches(request.routing_target, candidates) {
-                        cache.insert_selection(
-                            cache_affinity_key,
-                            single_excluded_cluster_id,
-                            double_excluded_cluster_ids,
-                            indices.clone(),
-                        );
-                    }
+            && !matches!(exclusions, RequestExclusions::Many);
+        let select = |ring: &[CacheAffinityRingEntry]| {
+            Arc::new(select_candidate_indices(
+                request,
+                ring,
+                candidates,
+                cache_affinity_key,
+                selection_count,
+                config,
+                exclusions,
+            ))
+        };
+        let cached_selection = {
+            let cache = self.cache.read();
+            if cache.matches(request.routing_target, candidates) {
+                if cacheable_selection
+                    && let Some(indices) = cache.selection(cache_affinity_key, exclusions)
+                {
+                    return Some(indices);
                 }
-                indices
-            }
-            CacheAffinitySelectionLookup::Stale => {
-                let ring = build_ring(config, request, candidates);
-                let indices = Arc::new(select_candidate_indices(
-                    request,
-                    &ring,
-                    cache_affinity_key,
-                    selection_count,
-                    config,
-                ));
-                let mut cache = self.cache.write();
-                cache.replace(request.routing_target, candidates, ring);
-                if cacheable_selection && !indices.is_empty() {
-                    cache.insert_selection(
-                        cache_affinity_key,
-                        single_excluded_cluster_id,
-                        double_excluded_cluster_ids,
-                        indices.clone(),
-                    );
-                }
-                indices
+                Some(select(&cache.ring))
+            } else {
+                None
             }
         };
+        let (selected_indices, replacement_ring) = match cached_selection {
+            Some(indices) => (indices, None),
+            None => {
+                let ring = build_ring(config, request, candidates);
+                let indices = select(&ring);
+                (indices, Some(ring))
+            }
+        };
+
+        if replacement_ring.is_some() || cacheable_selection && !selected_indices.is_empty() {
+            let mut cache = self.cache.write();
+            if let Some(ring) = replacement_ring {
+                cache.replace(request.routing_target, candidates, ring);
+            }
+            if cacheable_selection
+                && !selected_indices.is_empty()
+                && cache.matches(request.routing_target, candidates)
+            {
+                cache.insert_selection(cache_affinity_key, exclusions, selected_indices.clone());
+            }
+        }
 
         (!selected_indices.is_empty()).then_some(selected_indices)
     }
 
-    fn cached_or_computed_selection(
-        &self,
-        config: &GroqMultiregionConfig,
-        request: &LoadBalancerRequest<'_>,
-        candidates: &[RoutedClusterSnapshot],
-        cache_affinity_key: &str,
-        selection_count: usize,
-        cacheable_key: bool,
-    ) -> CacheAffinitySelectionLookup {
-        let cache = self.cache.read();
-        if !cache.matches(request.routing_target, candidates) {
-            return CacheAffinitySelectionLookup::Stale;
-        }
-
-        if cacheable_key {
-            if let Some(excluded_cluster_id) = single_excluded_cluster_id(request) {
-                if let Some(indices) =
-                    cache.single_excluded_selection(cache_affinity_key, excluded_cluster_id)
-                {
-                    return CacheAffinitySelectionLookup::Hit(indices);
-                }
-            } else if let Some((first_excluded, second_excluded)) =
-                double_excluded_cluster_ids(request)
-            {
-                if let Some(indices) = cache.two_excluded_selection(
-                    cache_affinity_key,
-                    first_excluded,
-                    second_excluded,
-                ) {
-                    return CacheAffinitySelectionLookup::Hit(indices);
-                }
-            } else if let Some(indices) = cache.selection(cache_affinity_key) {
-                return CacheAffinitySelectionLookup::Hit(indices);
-            }
-        }
-
-        let indices = Arc::new(select_candidate_indices(
-            request,
-            &cache.ring,
-            cache_affinity_key,
-            selection_count,
-            config,
-        ));
-        CacheAffinitySelectionLookup::Computed(indices)
-    }
-
     #[cfg(test)]
     pub(super) fn cached_key_bytes(&self) -> usize {
-        let cache = self.cache.read();
-        cache.cached_key_bytes()
+        self.cache.read().cached_key_bytes()
     }
-}
-
-enum CacheAffinitySelectionLookup {
-    Hit(Arc<Vec<usize>>),
-    Computed(Arc<Vec<usize>>),
-    Stale,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CacheAffinityRingEntry {
     hash: u64,
-    cluster_id: String,
     candidate_index: usize,
 }
 
@@ -175,22 +118,15 @@ struct ExcludedClusterPair {
 
 impl ExcludedClusterPair {
     fn new(first: &str, second: &str) -> Self {
-        if first <= second {
-            Self {
-                first: first.to_string(),
-                second: second.to_string(),
-            }
+        let (first, second) = if first <= second {
+            (first, second)
         } else {
-            Self {
-                first: second.to_string(),
-                second: first.to_string(),
-            }
+            (second, first)
+        };
+        Self {
+            first: first.to_string(),
+            second: second.to_string(),
         }
-    }
-
-    #[cfg(test)]
-    fn key_bytes(&self) -> usize {
-        self.first.len() + self.second.len()
     }
 }
 
@@ -201,19 +137,11 @@ struct CacheAffinityRingCache {
     ring: Vec<CacheAffinityRingEntry>,
     selections: HashMap<String, Arc<Vec<usize>>>,
     selection_order: VecDeque<String>,
-    // Retry selections depend on both the affinity key and the backend excluded
-    // by the previous attempt. Keep them separate from the no-exclusion cache so
-    // the hot first-attempt lookup can still borrow just `&str` without building
-    // a composite owned key on every request.
-    single_excluded_selections: HashMap<String, HashMap<String, Arc<Vec<usize>>>>,
-    single_excluded_selection_order: VecDeque<(String, String)>,
-    single_excluded_selection_count: usize,
-    // Two-exclusion retries happen after two failed attempts. Cache those
-    // separately so the common no-exclusion and single-exclusion lookup shapes
-    // stay simple while repeated retry keys avoid another affinity-ring walk.
-    two_excluded_selections: HashMap<String, HashMap<ExcludedClusterPair, Arc<Vec<usize>>>>,
-    two_excluded_selection_order: VecDeque<(String, ExcludedClusterPair)>,
-    two_excluded_selection_count: usize,
+    single_excluded: HashMap<String, HashMap<String, Arc<Vec<usize>>>>,
+    single_order: VecDeque<(String, String)>,
+    two_excluded: HashMap<String, HashMap<ExcludedClusterPair, Arc<Vec<usize>>>>,
+    two_order: VecDeque<(String, ExcludedClusterPair)>,
+    selection_count: usize,
 }
 
 impl CacheAffinityRingCache {
@@ -231,12 +159,11 @@ impl CacheAffinityRingCache {
         self.ring = ring;
         self.selections.clear();
         self.selection_order.clear();
-        self.single_excluded_selections.clear();
-        self.single_excluded_selection_order.clear();
-        self.single_excluded_selection_count = 0;
-        self.two_excluded_selections.clear();
-        self.two_excluded_selection_order.clear();
-        self.two_excluded_selection_count = 0;
+        self.single_excluded.clear();
+        self.single_order.clear();
+        self.two_excluded.clear();
+        self.two_order.clear();
+        self.selection_count = 0;
     }
 
     fn matches(&self, target: &RoutingTargetKey, candidates: &[RoutedClusterSnapshot]) -> bool {
@@ -249,209 +176,163 @@ impl CacheAffinityRingCache {
                 .all(|(cached, candidate)| cached == &candidate.cluster_id)
     }
 
-    fn selection(&self, cache_affinity_key: &str) -> Option<Arc<Vec<usize>>> {
-        self.selections.get(cache_affinity_key).cloned()
-    }
-
-    fn single_excluded_selection(
+    fn selection(
         &self,
         cache_affinity_key: &str,
-        excluded_cluster_id: &str,
+        exclusions: RequestExclusions<'_>,
     ) -> Option<Arc<Vec<usize>>> {
-        self.single_excluded_selections
-            .get(cache_affinity_key)
-            .and_then(|by_excluded| by_excluded.get(excluded_cluster_id))
-            .cloned()
+        self.lookup(cache_affinity_key, exclusions).cloned()
     }
 
-    fn two_excluded_selection(
-        &self,
-        cache_affinity_key: &str,
-        first_excluded: &str,
-        second_excluded: &str,
-    ) -> Option<Arc<Vec<usize>>> {
-        let excluded_pair = ExcludedClusterPair::new(first_excluded, second_excluded);
-        self.two_excluded_selections
-            .get(cache_affinity_key)
-            .and_then(|by_excluded| by_excluded.get(&excluded_pair))
-            .cloned()
+    fn lookup(&self, key: &str, exclusions: RequestExclusions<'_>) -> Option<&Arc<Vec<usize>>> {
+        match exclusions {
+            RequestExclusions::None => self.selections.get(key),
+            RequestExclusions::One(excluded) => self.single_excluded.get(key)?.get(excluded),
+            RequestExclusions::Two(first, second) => self
+                .two_excluded
+                .get(key)?
+                .get(&ExcludedClusterPair::new(first, second)),
+            RequestExclusions::Many => None,
+        }
     }
 
     fn insert_selection(
         &mut self,
         cache_affinity_key: &str,
-        single_excluded_cluster_id: Option<&str>,
-        double_excluded_cluster_ids: Option<(&str, &str)>,
+        exclusions: RequestExclusions<'_>,
         selected_indices: Arc<Vec<usize>>,
     ) {
-        if let Some(excluded_cluster_id) = single_excluded_cluster_id {
-            self.insert_single_excluded_selection(
-                cache_affinity_key,
-                excluded_cluster_id,
-                selected_indices,
-            );
-            return;
+        match exclusions {
+            RequestExclusions::None => {
+                self.insert_plain(cache_affinity_key, selected_indices);
+                return;
+            }
+            RequestExclusions::One(excluded) => {
+                if self
+                    .single_excluded
+                    .get_mut(cache_affinity_key)
+                    .is_some_and(|selections| replace(selections, excluded, &selected_indices))
+                {
+                    return;
+                }
+                self.evict_selection_entries();
+                let (key, excluded) = (cache_affinity_key.to_string(), excluded.to_string());
+                self.single_order.push_back((key.clone(), excluded.clone()));
+                self.single_excluded
+                    .entry(key)
+                    .or_default()
+                    .insert(excluded, selected_indices);
+            }
+            RequestExclusions::Two(first, second) => {
+                self.insert_pair(cache_affinity_key, first, second, selected_indices);
+                return;
+            }
+            RequestExclusions::Many => panic!("only cacheable exclusion shapes are inserted"),
         }
-        if let Some((first_excluded, second_excluded)) = double_excluded_cluster_ids {
-            self.insert_two_excluded_selection(
-                cache_affinity_key,
-                first_excluded,
-                second_excluded,
-                selected_indices,
-            );
-            return;
-        }
-
-        if let Some(existing) = self.selections.get_mut(cache_affinity_key) {
-            *existing = selected_indices;
-            return;
-        }
-
-        self.evict_selection_entries();
-        self.selection_order
-            .push_back(cache_affinity_key.to_string());
-        self.selections
-            .insert(cache_affinity_key.to_string(), selected_indices);
+        self.selection_count += 1;
     }
 
-    fn insert_single_excluded_selection(
-        &mut self,
-        cache_affinity_key: &str,
-        excluded_cluster_id: &str,
-        selected_indices: Arc<Vec<usize>>,
-    ) {
-        if let Some(by_excluded) = self.single_excluded_selections.get_mut(cache_affinity_key)
-            && let Some(existing) = by_excluded.get_mut(excluded_cluster_id)
-        {
-            *existing = selected_indices;
+    fn insert_plain(&mut self, key: &str, selected: Arc<Vec<usize>>) {
+        if replace(&mut self.selections, key, &selected) {
             return;
         }
-
         self.evict_selection_entries();
-        self.single_excluded_selections
-            .entry(cache_affinity_key.to_string())
-            .or_default()
-            .insert(excluded_cluster_id.to_string(), selected_indices);
-        self.single_excluded_selection_order.push_back((
-            cache_affinity_key.to_string(),
-            excluded_cluster_id.to_string(),
-        ));
-        self.single_excluded_selection_count += 1;
+        let key = key.to_string();
+        self.selection_order.push_back(key.clone());
+        self.selections.insert(key, selected);
+        self.selection_count += 1;
     }
 
-    fn insert_two_excluded_selection(
-        &mut self,
-        cache_affinity_key: &str,
-        first_excluded: &str,
-        second_excluded: &str,
-        selected_indices: Arc<Vec<usize>>,
-    ) {
-        let excluded_pair = ExcludedClusterPair::new(first_excluded, second_excluded);
-        if let Some(by_excluded) = self.two_excluded_selections.get_mut(cache_affinity_key)
-            && let Some(existing) = by_excluded.get_mut(&excluded_pair)
+    fn insert_pair(&mut self, key: &str, first: &str, second: &str, selected: Arc<Vec<usize>>) {
+        let excluded = ExcludedClusterPair::new(first, second);
+        if self
+            .two_excluded
+            .get_mut(key)
+            .is_some_and(|selections| replace(selections, &excluded, &selected))
         {
-            *existing = selected_indices;
             return;
         }
-
         self.evict_selection_entries();
-        self.two_excluded_selections
-            .entry(cache_affinity_key.to_string())
+        let key = key.to_string();
+        self.two_order.push_back((key.clone(), excluded.clone()));
+        self.two_excluded
+            .entry(key)
             .or_default()
-            .insert(excluded_pair.clone(), selected_indices);
-        self.two_excluded_selection_order
-            .push_back((cache_affinity_key.to_string(), excluded_pair));
-        self.two_excluded_selection_count += 1;
+            .insert(excluded, selected);
+        self.selection_count += 1;
     }
 
     fn evict_selection_entries(&mut self) {
         // All affinity-selection caches share the same entry budget. On
         // pressure, evict retry-specific entries first so normal affinity hits
         // keep the same behavior they had before retry caching existed.
-        while self.selection_count() >= SELECTION_CACHE_LIMIT {
-            if let Some((cache_affinity_key, excluded_pair)) =
-                self.two_excluded_selection_order.pop_front()
-            {
-                self.remove_two_excluded_selection(&cache_affinity_key, &excluded_pair);
-                continue;
-            }
-
-            if let Some((cache_affinity_key, excluded_cluster_id)) =
-                self.single_excluded_selection_order.pop_front()
-            {
-                self.remove_single_excluded_selection(&cache_affinity_key, &excluded_cluster_id);
-                continue;
-            }
-
-            let Some(oldest) = self.selection_order.pop_front() else {
+        while self.selection_count >= SELECTION_CACHE_LIMIT {
+            let removed = if let Some((key, excluded)) = self.two_order.pop_front() {
+                remove_nested(&mut self.two_excluded, &key, &excluded)
+            } else if let Some((key, excluded)) = self.single_order.pop_front() {
+                remove_nested(&mut self.single_excluded, &key, &excluded)
+            } else if let Some(key) = self.selection_order.pop_front() {
+                self.selections.remove(&key).is_some()
+            } else {
                 break;
             };
-            self.selections.remove(&oldest);
+            self.selection_count -= usize::from(removed);
         }
-    }
-
-    fn remove_single_excluded_selection(
-        &mut self,
-        cache_affinity_key: &str,
-        excluded_cluster_id: &str,
-    ) {
-        let Some(by_excluded) = self.single_excluded_selections.get_mut(cache_affinity_key) else {
-            return;
-        };
-        if by_excluded.remove(excluded_cluster_id).is_some() {
-            self.single_excluded_selection_count -= 1;
-        }
-        if by_excluded.is_empty() {
-            self.single_excluded_selections.remove(cache_affinity_key);
-        }
-    }
-
-    fn remove_two_excluded_selection(
-        &mut self,
-        cache_affinity_key: &str,
-        excluded_pair: &ExcludedClusterPair,
-    ) {
-        let Some(by_excluded) = self.two_excluded_selections.get_mut(cache_affinity_key) else {
-            return;
-        };
-        if by_excluded.remove(excluded_pair).is_some() {
-            self.two_excluded_selection_count -= 1;
-        }
-        if by_excluded.is_empty() {
-            self.two_excluded_selections.remove(cache_affinity_key);
-        }
-    }
-
-    fn selection_count(&self) -> usize {
-        self.selections.len()
-            + self.single_excluded_selection_count
-            + self.two_excluded_selection_count
     }
 
     #[cfg(test)]
     fn cached_key_bytes(&self) -> usize {
-        let plain_key_bytes = self.selections.keys().map(String::len).sum::<usize>();
-        let single_excluded_key_bytes = self
-            .single_excluded_selections
+        let plain = self.selections.keys().map(String::len).sum::<usize>();
+        let single = self
+            .single_excluded
             .iter()
-            .map(|(cache_affinity_key, by_excluded)| {
-                cache_affinity_key.len() * by_excluded.len()
-                    + by_excluded.keys().map(String::len).sum::<usize>()
+            .map(|(key, selections)| {
+                key.len() * selections.len() + selections.keys().map(String::len).sum::<usize>()
             })
             .sum::<usize>();
-        let two_excluded_key_bytes = self
-            .two_excluded_selections
+        let two = self
+            .two_excluded
             .iter()
-            .map(|(cache_affinity_key, by_excluded)| {
-                cache_affinity_key.len() * by_excluded.len()
-                    + by_excluded
+            .map(|(key, selections)| {
+                key.len() * selections.len()
+                    + selections
                         .keys()
-                        .map(ExcludedClusterPair::key_bytes)
+                        .map(|pair| pair.first.len() + pair.second.len())
                         .sum::<usize>()
             })
             .sum::<usize>();
-        plain_key_bytes + single_excluded_key_bytes + two_excluded_key_bytes
+        plain + single + two
     }
+}
+
+fn replace<K, Q>(
+    selections: &mut HashMap<K, Arc<Vec<usize>>>,
+    key: &Q,
+    selected: &Arc<Vec<usize>>,
+) -> bool
+where
+    K: std::borrow::Borrow<Q> + std::hash::Hash + Eq,
+    Q: std::hash::Hash + Eq + ?Sized,
+{
+    selections.get_mut(key).is_some_and(|existing| {
+        existing.clone_from(selected);
+        true
+    })
+}
+
+fn remove_nested<K: std::hash::Hash + Eq>(
+    selections: &mut HashMap<String, HashMap<K, Arc<Vec<usize>>>>,
+    cache_affinity_key: &str,
+    excluded: &K,
+) -> bool {
+    let Some(by_exclusion) = selections.get_mut(cache_affinity_key) else {
+        return false;
+    };
+    let removed = by_exclusion.remove(excluded).is_some();
+    if by_exclusion.is_empty() {
+        selections.remove(cache_affinity_key);
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -460,18 +341,9 @@ pub(in crate::load_balancer) fn cache_affinity_candidate_indices(
     request: &LoadBalancerRequest<'_>,
     candidates: &[RoutedClusterSnapshot],
 ) -> Option<Vec<usize>> {
-    let cache_affinity_key = request.cache_affinity_key?;
-    let selection_count = config.cache_affinity_backend_selection_count()?;
-    if candidates.is_empty() {
-        return None;
-    }
-
-    let selection_count = selection_count.min(candidates.len());
-    let ring = build_ring(config, request, candidates);
-    let selected_indices =
-        select_candidate_indices(request, &ring, cache_affinity_key, selection_count, config);
-
-    (!selected_indices.is_empty()).then_some(selected_indices)
+    CacheAffinitySelector::default()
+        .candidate_indices(config, request, candidates)
+        .map(Arc::unwrap_or_clone)
 }
 
 #[cfg(test)]
@@ -493,12 +365,11 @@ fn build_ring(
     request: &LoadBalancerRequest<'_>,
     candidates: &[RoutedClusterSnapshot],
 ) -> Vec<CacheAffinityRingEntry> {
-    let mut ring = Vec::with_capacity(candidates.len() * config.cache_affinity_virtual_nodes());
+    let mut ring = Vec::with_capacity(candidates.len() * config.cache_affinity_virtual_nodes);
     for (candidate_index, candidate) in candidates.iter().enumerate() {
-        for virtual_node in 0..config.cache_affinity_virtual_nodes() {
+        for virtual_node in 0..config.cache_affinity_virtual_nodes {
             ring.push(CacheAffinityRingEntry {
                 hash: cache_affinity_virtual_node_hash(config, request, candidate, virtual_node),
-                cluster_id: candidate.cluster_id.clone(),
                 candidate_index,
             });
         }
@@ -506,7 +377,11 @@ fn build_ring(
     ring.sort_unstable_by(|a, b| {
         a.hash
             .cmp(&b.hash)
-            .then_with(|| a.cluster_id.cmp(&b.cluster_id))
+            .then_with(|| {
+                candidates[a.candidate_index]
+                    .cluster_id
+                    .cmp(&candidates[b.candidate_index].cluster_id)
+            })
             .then_with(|| a.candidate_index.cmp(&b.candidate_index))
     });
     ring
@@ -515,9 +390,11 @@ fn build_ring(
 fn select_candidate_indices(
     request: &LoadBalancerRequest<'_>,
     ring: &[CacheAffinityRingEntry],
+    candidates: &[RoutedClusterSnapshot],
     cache_affinity_key: &str,
     selection_count: usize,
     config: &GroqMultiregionConfig,
+    exclusions: RequestExclusions<'_>,
 ) -> Vec<usize> {
     if ring.is_empty() {
         return Vec::new();
@@ -526,53 +403,50 @@ fn select_candidate_indices(
     let start_index = ring
         .binary_search_by(|entry| entry.hash.cmp(&key_hash))
         .unwrap_or_else(|index| index);
-    if let Some(excluded_cluster_id) = single_excluded_cluster_id(request) {
-        // Affinity retries normally exclude the single backend that failed the
-        // prior attempt. Keep the ring walk identical, but compare against that
-        // borrowed id directly instead of paying for a HashSet lookup at each
-        // virtual node.
-        return select_candidate_indices_from_ring(
+    // Common retry shapes use direct borrowed comparisons in the ring hot path.
+    match exclusions {
+        RequestExclusions::One(excluded) => select_candidate_indices_from_ring(
             ring,
+            candidates,
             start_index,
             selection_count,
-            |cluster_id| cluster_id == excluded_cluster_id,
-        );
-    }
-    if let Some((first_excluded, second_excluded)) = double_excluded_cluster_ids(request) {
-        // The third attempt excludes the two earlier failed clusters. The pair
-        // case is common enough to avoid a HashSet probe during the affinity
-        // ring walk, but still small enough to keep as direct borrowed compares.
-        return select_candidate_indices_from_ring(
+            |cluster_id| cluster_id == excluded,
+        ),
+        RequestExclusions::Two(first, second) => select_candidate_indices_from_ring(
             ring,
+            candidates,
             start_index,
             selection_count,
-            |cluster_id| cluster_id == first_excluded || cluster_id == second_excluded,
-        );
+            |cluster_id| cluster_id == first || cluster_id == second,
+        ),
+        RequestExclusions::None | RequestExclusions::Many => select_candidate_indices_from_ring(
+            ring,
+            candidates,
+            start_index,
+            selection_count,
+            |cluster_id| request.excludes_cluster(cluster_id),
+        ),
     }
-
-    select_candidate_indices_from_ring(ring, start_index, selection_count, |cluster_id| {
-        request.excludes_cluster(cluster_id)
-    })
 }
 
 fn select_candidate_indices_from_ring(
     ring: &[CacheAffinityRingEntry],
+    candidates: &[RoutedClusterSnapshot],
     start_index: usize,
     selection_count: usize,
     mut excludes_cluster: impl FnMut(&str) -> bool,
 ) -> Vec<usize> {
-    let mut selected_indices = Vec::with_capacity(selection_count);
-    let mut selected_cluster_ids = Vec::with_capacity(selection_count);
+    let mut selected_indices: Vec<usize> = Vec::with_capacity(selection_count);
     for offset in 0..ring.len() {
         let entry = &ring[(start_index + offset) % ring.len()];
-        if excludes_cluster(&entry.cluster_id) {
+        let cluster_id = candidates[entry.candidate_index].cluster_id.as_str();
+        if excludes_cluster(cluster_id) {
             continue;
         }
-        if selected_cluster_ids
+        if selected_indices
             .iter()
-            .all(|cluster_id| *cluster_id != entry.cluster_id.as_str())
+            .all(|&selected| candidates[selected].cluster_id != cluster_id)
         {
-            selected_cluster_ids.push(entry.cluster_id.as_str());
             selected_indices.push(entry.candidate_index);
             if selected_indices.len() >= selection_count {
                 break;
@@ -615,7 +489,7 @@ fn append_ring_prefix(
     request: &LoadBalancerRequest<'_>,
 ) {
     bytes.push(HASH_VERSION);
-    bytes.append_tagged_bytes(b"seed", config.seed().unwrap_or("").as_bytes());
+    bytes.append_tagged_bytes(b"seed", config.seed.as_deref().unwrap_or("").as_bytes());
     bytes.append_tagged_bytes(
         b"routing_key",
         request
@@ -626,4 +500,33 @@ fn append_ring_prefix(
             .as_bytes(),
     );
     bytes.append_tagged_bytes(b"model_id", request.routing_target.model_id.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::{size_of, size_of_val};
+
+    use super::*;
+
+    #[test]
+    fn plain_selection_entries_remain_compact() {
+        let mut cache = CacheAffinityRingCache::default();
+        for index in 0..SELECTION_CACHE_LIMIT {
+            cache.insert_selection(
+                &format!("plain-{index}"),
+                RequestExclusions::None,
+                Arc::new(vec![index]),
+            );
+        }
+
+        assert_eq!(
+            size_of_val(&cache.selections["plain-0"]),
+            size_of::<Arc<Vec<usize>>>()
+        );
+        assert_eq!(cache.selection_count, SELECTION_CACHE_LIMIT);
+        assert_eq!(cache.single_excluded.capacity(), 0);
+        assert_eq!(cache.single_order.capacity(), 0);
+        assert_eq!(cache.two_excluded.capacity(), 0);
+        assert_eq!(cache.two_order.capacity(), 0);
+    }
 }

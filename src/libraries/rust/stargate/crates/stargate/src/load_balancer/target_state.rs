@@ -21,69 +21,38 @@ use scc::HashMap as SccHashMap;
 
 use super::{LoadBalancer, LoadBalancerAlgorithmConfig, create_load_balancer_with_config};
 
-// The non-zero-sized token guarantees each Arc has a distinct stable pointer.
-struct LoadBalancerDefinitionToken {
-    _unique_allocation: u8,
-}
+#[derive(Clone, Debug)]
+pub(super) struct LoadBalancerDefinition(Arc<LoadBalancerAlgorithmConfig>);
 
-#[derive(Clone)]
-struct LoadBalancerDefinitionId(Arc<LoadBalancerDefinitionToken>);
-
-impl LoadBalancerDefinitionId {
-    fn new() -> Self {
-        Self(Arc::new(LoadBalancerDefinitionToken {
-            _unique_allocation: 0,
-        }))
-    }
-}
-
-impl fmt::Debug for LoadBalancerDefinitionId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("LoadBalancerDefinitionId")
-    }
-}
-
-impl PartialEq for LoadBalancerDefinitionId {
+impl PartialEq for LoadBalancerDefinition {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl Eq for LoadBalancerDefinitionId {}
+impl Eq for LoadBalancerDefinition {}
 
-impl Hash for LoadBalancerDefinitionId {
+impl Hash for LoadBalancerDefinition {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Arc::as_ptr(&self.0).hash(state);
     }
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct LoadBalancerDefinition {
-    id: LoadBalancerDefinitionId,
-    config: LoadBalancerAlgorithmConfig,
-}
-
 impl LoadBalancerDefinition {
     pub(super) fn new(config: LoadBalancerAlgorithmConfig) -> anyhow::Result<Self> {
         let _ = create_load_balancer_with_config(&config)?;
-        Ok(Self {
-            id: LoadBalancerDefinitionId::new(),
-            config,
-        })
+        Ok(Self(Arc::new(config)))
     }
 
     pub(super) fn config(&self) -> &LoadBalancerAlgorithmConfig {
-        &self.config
+        &self.0
     }
 }
 
-/// Stateful load-balancer instances owned by one routing-target generation.
-///
-/// Keep this value alive exactly as long as its routing target. Replacing it
-/// intentionally resets target-local counters and caches.
+/// Load balancers owned by one routing-target generation; replacement resets target-local counters and caches.
 #[derive(Default)]
 pub struct LoadBalancerTargetState {
-    instances: SccHashMap<LoadBalancerDefinitionId, Arc<dyn LoadBalancer>>,
+    instances: SccHashMap<LoadBalancerDefinition, Arc<dyn LoadBalancer>>,
 }
 
 impl LoadBalancerTargetState {
@@ -93,7 +62,7 @@ impl LoadBalancerTargetState {
     ) -> Arc<dyn LoadBalancer> {
         if let Some(lb) = self
             .instances
-            .read_sync(&definition.id, |_definition_id, lb| lb.clone())
+            .read_sync(definition, |_definition, lb| lb.clone())
         {
             return lb;
         }
@@ -102,14 +71,14 @@ impl LoadBalancerTargetState {
             .expect("load balancer config validated during router construction");
         if self
             .instances
-            .insert_sync(definition.id.clone(), lb.clone())
+            .insert_sync(definition.clone(), lb.clone())
             .is_ok()
         {
             return lb;
         }
 
         self.instances
-            .read_sync(&definition.id, |_definition_id, lb| lb.clone())
+            .read_sync(definition, |_definition, lb| lb.clone())
             .expect("target-local load balancer should exist after insert race")
     }
 

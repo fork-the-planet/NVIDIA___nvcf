@@ -20,6 +20,7 @@ use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder};
 pub struct RouterMetrics {
     registry: Registry,
     quic_connections_total: IntCounterVec,
+    webtransport_sessions_total: IntCounterVec,
 }
 
 impl RouterMetrics {
@@ -33,15 +34,30 @@ impl RouterMetrics {
             &["outcome"],
         )?;
         registry.register(Box::new(quic_connections_total.clone()))?;
+        let webtransport_sessions_total = IntCounterVec::new(
+            Opts::new(
+                "stargate_k8s_router_webtransport_sessions_total",
+                "WebTransport reverse-tunnel router sessions by outcome.",
+            ),
+            &["outcome"],
+        )?;
+        registry.register(Box::new(webtransport_sessions_total.clone()))?;
 
         Ok(Self {
             registry,
             quic_connections_total,
+            webtransport_sessions_total,
         })
     }
 
     pub fn observe_quic_connection(&self, outcome: &str) {
         self.quic_connections_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    pub fn observe_webtransport_session(&self, outcome: &str) {
+        self.webtransport_sessions_total
             .with_label_values(&[outcome])
             .inc();
     }
@@ -72,6 +88,26 @@ mod tests {
         );
         assert!(
             body.contains(r#"stargate_k8s_router_quic_connections_total{outcome="unknown_sni"} 1"#)
+        );
+    }
+
+    #[test]
+    fn metrics_exports_webtransport_session_outcomes() {
+        let metrics = RouterMetrics::new().expect("metrics should initialize");
+        metrics.observe_webtransport_session("accepted");
+        metrics.observe_webtransport_session("completed");
+
+        let body = metrics.gather().expect("metrics should encode");
+
+        assert!(
+            body.contains(
+                r#"stargate_k8s_router_webtransport_sessions_total{outcome="accepted"} 1"#
+            )
+        );
+        assert!(
+            body.contains(
+                r#"stargate_k8s_router_webtransport_sessions_total{outcome="completed"} 1"#
+            )
         );
     }
 }

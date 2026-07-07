@@ -17,6 +17,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
+use stargate_protocol::common::valid_last_mean_input_tps;
 use tokio::time::Instant as TokioInstant;
 
 use crate::{CurrentModelStats, PylonRuntimeState};
@@ -26,6 +27,7 @@ use super::collector::{
     StatsUpdateSource,
 };
 use super::token_metrics::TpsDistribution;
+const ENGINE_STATS_SOURCE: &str = "engine_stats_stream";
 
 #[derive(Debug, Default)]
 pub(super) struct ModelMetricsState {
@@ -46,7 +48,6 @@ pub(super) struct ModelMetricsState {
     pub(super) last_stats_event_at: Option<TokioInstant>,
     pub(super) stats_observed_at_unix_ms: u64,
 }
-
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub(super) struct KvCacheStatsSnapshot {
     pub(super) model: String,
@@ -54,55 +55,75 @@ pub(super) struct KvCacheStatsSnapshot {
     pub(super) kv_cache_used_tokens: u64,
     pub(super) kv_cache_free_tokens: u64,
 }
-
-#[derive(Debug)]
 struct RequestCounterState {
     model_id: String,
     input: CounterSampleState,
     output: CounterSampleState,
     last_seen_at: TokioInstant,
 }
-
 impl RequestCounterState {
-    fn from_observed(
-        model_id: String,
-        tokens_processed: u64,
-        tokens_generated: u64,
-        observed_at: TokioInstant,
-    ) -> Self {
-        Self {
-            model_id,
-            input: CounterSampleState::from_observed(tokens_processed, observed_at),
-            output: CounterSampleState::from_observed(tokens_generated, observed_at),
-            last_seen_at: observed_at,
-        }
+    fn new(
+        update: &RequestCounterUpdate,
+        config: &StatsCollectorConfig,
+    ) -> (Self, RequestCounterSamples) {
+        let engine_stream = update.source == StatsUpdateSource::EngineStatsStream;
+        let baseline = |counter: Option<u64>| counter.filter(|_| !engine_stream).unwrap_or(0);
+        let mut state = Self {
+            model_id: update.model_id.clone(),
+            input: CounterSampleState::new(baseline(update.tokens_processed), update.observed_at),
+            output: CounterSampleState::new(baseline(update.tokens_generated), update.observed_at),
+            last_seen_at: update.observed_at,
+        };
+        let samples = state.observe(update, config);
+        (state, samples)
     }
 
-    fn from_zero_baseline(model_id: String, observed_at: TokioInstant) -> Self {
-        Self {
-            model_id,
-            input: CounterSampleState::from_observed(0, observed_at),
-            output: CounterSampleState::from_observed(0, observed_at),
-            last_seen_at: observed_at,
-        }
+    fn regressed(&self, update: &RequestCounterUpdate) -> bool {
+        [
+            (update.tokens_processed, self.input.observed),
+            (update.tokens_generated, self.output.observed),
+        ]
+        .into_iter()
+        .any(|(next, observed)| next.is_some_and(|next| next < observed))
+    }
+
+    fn observe(
+        &mut self,
+        update: &RequestCounterUpdate,
+        config: &StatsCollectorConfig,
+    ) -> RequestCounterSamples {
+        self.last_seen_at = update.observed_at;
+        (
+            self.input.observe(
+                update.tokens_processed,
+                update.observed_at,
+                config.min_input_tokens,
+                config.duration_floor,
+            ),
+            self.output.observe(
+                update.tokens_generated,
+                update.observed_at,
+                config.min_output_tokens,
+                config.duration_floor,
+            ),
+        )
     }
 }
-
-#[derive(Debug)]
 enum RequestCounterLifecycle {
     Live(RequestCounterState),
-    Finalized { observed_at: TokioInstant },
+    Finalized(TokioInstant),
 }
-
-#[derive(Debug)]
 struct CounterSampleState {
     observed: u64,
     sampled: u64,
     sampled_at: TokioInstant,
 }
+type CounterSample = (u64, Duration);
+type RequestCounterSamples = (Option<CounterSample>, Option<CounterSample>);
+pub(super) type ModelStatsUpdate = (String, CurrentModelStats);
 
 impl CounterSampleState {
-    fn from_observed(observed: u64, observed_at: TokioInstant) -> Self {
+    fn new(observed: u64, observed_at: TokioInstant) -> Self {
         Self {
             observed,
             sampled: observed,
@@ -110,106 +131,43 @@ impl CounterSampleState {
         }
     }
 
-    fn is_regression(&self, next: u64) -> bool {
-        next < self.observed
-    }
-
     fn observe(
         &mut self,
-        next: u64,
+        next: Option<u64>,
         observed_at: TokioInstant,
         min_units: u64,
         duration_floor: Duration,
     ) -> Option<CounterSample> {
+        let next = next?;
         let prior_observed = self.observed;
         self.observed = next;
-
         let units = next.saturating_sub(self.sampled);
-        if units == 0 || units < min_units {
+        if units < min_units.max(1) {
             return None;
         }
-
-        let mut duration = observed_at
-            .checked_duration_since(self.sampled_at)
-            .unwrap_or(Duration::ZERO);
-        if duration < duration_floor && self.sampled == 0 && prior_observed == 0 {
-            duration = duration_floor;
-        }
+        let duration = observed_at.saturating_duration_since(self.sampled_at);
+        let duration = if self.sampled == 0 && prior_observed == 0 {
+            duration.max(duration_floor)
+        } else {
+            duration
+        };
         if duration < duration_floor {
             return None;
         }
-
-        self.sampled = next;
-        self.sampled_at = observed_at;
-        Some(CounterSample { units, duration })
+        (self.sampled, self.sampled_at) = (next, observed_at);
+        Some((units, duration))
     }
 }
 
-#[derive(Debug)]
-struct CounterSample {
-    units: u64,
-    duration: Duration,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub(super) struct InputThroughputSample {
     pub(super) units: u64,
     pub(super) duration: Duration,
     pub(super) clamp_duration_to_floor: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
 pub(super) struct EmbeddingThroughputSample {
     pub(super) items: u64,
     pub(super) duration: Duration,
-}
-
-#[derive(Debug)]
-struct RequestCounterEvent {
-    source: StatsUpdateSource,
-    request_id: String,
-    model_id: String,
-    tokens_processed: Option<u64>,
-    tokens_generated: Option<u64>,
-    finished: bool,
-    observed_at: TokioInstant,
-}
-
-impl RequestCounterEvent {
-    fn from_update(update: RequestCounterUpdate) -> Self {
-        let RequestCounterUpdate {
-            source,
-            request_id,
-            model_id,
-            tokens_processed,
-            tokens_generated,
-            finished,
-            observed_at,
-        } = update;
-
-        Self {
-            source,
-            request_id,
-            model_id,
-            tokens_processed,
-            tokens_generated,
-            finished,
-            observed_at,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CounterSamplingPolicy {
-    duration_floor: Duration,
-    min_input_tokens: u64,
-    min_output_tokens: u64,
-}
-
-#[derive(Debug, Default)]
-struct RequestCounterSamples {
-    input: Option<CounterSample>,
-    output: Option<CounterSample>,
 }
 
 pub(super) struct StatsAggregator {
@@ -225,7 +183,7 @@ pub(super) struct StatsAggregator {
 
 impl StatsAggregator {
     pub(super) fn new(config: StatsCollectorConfig, runtime_state: PylonRuntimeState) -> Self {
-        Self {
+        let mut aggregator = Self {
             config,
             runtime_state,
             per_model: HashMap::new(),
@@ -234,14 +192,34 @@ impl StatsAggregator {
             aggregate_model_state_count: 0,
             unix_ms_anchor: current_unix_millis(),
             instant_anchor: TokioInstant::now(),
+        };
+        for (model_id, input_tps) in &aggregator.config.bootstrap_input_tps {
+            let input_tps_distribution = TpsDistribution::bootstrap(*input_tps)
+                .expect("bootstrap input TPS must be positive and finite");
+            aggregator.per_model.insert(
+                model_id.clone(),
+                ModelMetricsState {
+                    last_mean_input_tps: *input_tps,
+                    input_tps_distribution,
+                    aggregate_state_counted: true,
+                    ..ModelMetricsState::default()
+                },
+            );
         }
+        aggregator.aggregate_model_state_count = aggregator.per_model.len();
+        aggregator
+    }
+
+    pub(super) fn bootstrap_updates(&self) -> Vec<ModelStatsUpdate> {
+        self.config
+            .bootstrap_input_tps
+            .keys()
+            .map(|model_id| (model_id.clone(), self.snapshot(model_id)))
+            .collect()
     }
 
     #[cfg(test)]
-    pub(super) fn apply_update(
-        &mut self,
-        update: StatsAggregatorUpdate,
-    ) -> Vec<(String, CurrentModelStats)> {
+    pub(super) fn apply_update(&mut self, update: StatsAggregatorUpdate) -> Vec<ModelStatsUpdate> {
         let mut updated_models = Vec::new();
         self.apply_update_into(update, &mut updated_models);
         updated_models
@@ -250,18 +228,16 @@ impl StatsAggregator {
     pub(super) fn apply_update_into(
         &mut self,
         update: StatsAggregatorUpdate,
-        updated_models: &mut Vec<(String, CurrentModelStats)>,
+        updated_models: &mut Vec<ModelStatsUpdate>,
     ) {
         match update {
             StatsAggregatorUpdate::RequestCounters(update) => {
-                self.apply_request_counters_into(update, updated_models);
+                self.apply_request_counters_into(update, updated_models)
             }
             StatsAggregatorUpdate::FinalizeRequest(update) => {
-                updated_models.extend(self.finalize_request(update));
+                updated_models.extend(self.finalize_request(update))
             }
-            StatsAggregatorUpdate::EnableOpenAiFallback => {
-                self.enable_openai_fallback();
-            }
+            StatsAggregatorUpdate::EnableOpenAiFallback => self.enable_openai_fallback(),
         }
     }
 
@@ -276,42 +252,34 @@ impl StatsAggregator {
     pub(super) fn openai_fallback_stats_enabled(&self) -> bool {
         self.config.openai_fallback_stats_enabled
     }
-
     pub(super) fn live_request_count(&self) -> usize {
         self.live_request_count
     }
-
     #[cfg(test)]
     pub(super) fn request_counter_identity_count(&self) -> usize {
         self.request_counters.len()
     }
-
     pub(super) fn model_state_count(&self) -> usize {
         self.aggregate_model_state_count
     }
-
     pub(super) fn has_request_counter(&self, request_id: &str) -> bool {
         matches!(
             self.request_counters.get(request_id),
             Some(RequestCounterLifecycle::Live(_))
         )
     }
-
     pub(super) fn unix_millis_at(&self, observed_at: TokioInstant) -> u64 {
-        if let Some(elapsed) = observed_at.checked_duration_since(self.instant_anchor) {
-            return self
+        match observed_at.checked_duration_since(self.instant_anchor) {
+            Some(elapsed) => self
                 .unix_ms_anchor
-                .saturating_add(duration_millis_u64(elapsed));
+                .saturating_add(duration_millis_u64(elapsed)),
+            None => self.unix_ms_anchor.saturating_sub(duration_millis_u64(
+                self.instant_anchor.saturating_duration_since(observed_at),
+            )),
         }
-        let elapsed = self
-            .instant_anchor
-            .checked_duration_since(observed_at)
-            .unwrap_or(Duration::ZERO);
-        self.unix_ms_anchor
-            .saturating_sub(duration_millis_u64(elapsed))
     }
 
-    pub(super) fn sweep_stale(&mut self, now: TokioInstant) -> Vec<(String, CurrentModelStats)> {
+    pub(super) fn sweep_stale(&mut self, now: TokioInstant) -> Vec<ModelStatsUpdate> {
         let mut dirty_models = Vec::new();
         let request_ttl = self.config.engine_stats_request_ttl;
         if !request_ttl.is_zero() {
@@ -320,14 +288,12 @@ impl StatsAggregator {
             self.request_counters
                 .retain(|request_id, lifecycle| match lifecycle {
                     RequestCounterLifecycle::Live(state) => {
-                        if elapsed_since(now, state.last_seen_at) < request_ttl {
+                        if now.saturating_duration_since(state.last_seen_at) < request_ttl {
                             return true;
                         }
                         let model_id = state.model_id.clone();
-                        *lifecycle = RequestCounterLifecycle::Finalized { observed_at: now };
-                        *live_request_count = (*live_request_count)
-                            .checked_sub(1)
-                            .expect("live request counter count underflowed during stale cleanup");
+                        *lifecycle = RequestCounterLifecycle::Finalized(now);
+                        adjust_live_count(live_request_count, -1);
                         tracing::warn!(
                             request_id,
                             model_id,
@@ -335,16 +301,14 @@ impl StatsAggregator {
                             "removing stale engine stats request entry"
                         );
                         if let Some(metrics) = metrics {
-                            metrics.observe_engine_stats_stale_cleanup(
-                                "request",
-                                "engine_stats_stream",
-                            );
+                            metrics
+                                .observe_engine_stats_stale_cleanup("request", ENGINE_STATS_SOURCE);
                         }
                         push_dirty_model(&mut dirty_models, model_id);
                         true
                     }
-                    RequestCounterLifecycle::Finalized { observed_at } => {
-                        elapsed_since(now, *observed_at) < request_ttl
+                    RequestCounterLifecycle::Finalized(observed_at) => {
+                        now.saturating_duration_since(*observed_at) < request_ttl
                     }
                 });
         }
@@ -352,10 +316,9 @@ impl StatsAggregator {
         let model_ttl = self.config.engine_stats_model_ttl;
         if !model_ttl.is_zero() {
             for (model_id, state) in &mut self.per_model {
-                if state
-                    .last_stats_event_at
-                    .is_some_and(|observed_at| elapsed_since(now, observed_at) >= model_ttl)
-                    && state.clear_live_output_tps()
+                if state.last_stats_event_at.is_some_and(|observed_at| {
+                    now.saturating_duration_since(observed_at) >= model_ttl
+                }) && state.clear_live_output_tps()
                 {
                     state.stats_observed_at_unix_ms = current_unix_millis();
                     tracing::warn!(
@@ -364,7 +327,7 @@ impl StatsAggregator {
                         "clearing stale engine stats output TPS"
                     );
                     if let Some(metrics) = self.runtime_state.metrics() {
-                        metrics.observe_engine_stats_stale_cleanup("stats", "engine_stats_stream");
+                        metrics.observe_engine_stats_stale_cleanup("stats", ENGINE_STATS_SOURCE);
                     }
                     push_dirty_model(&mut dirty_models, model_id.clone());
                 }
@@ -373,286 +336,182 @@ impl StatsAggregator {
 
         if let Some(metrics) = self.runtime_state.metrics() {
             metrics
-                .observe_engine_stats_model_states("engine_stats_stream", self.model_state_count());
+                .observe_engine_stats_model_states(ENGINE_STATS_SOURCE, self.model_state_count());
             for _ in &dirty_models {
-                metrics.observe_engine_stats_dirty_snapshot("engine_stats_stream", "stale");
+                metrics.observe_engine_stats_dirty_snapshot(ENGINE_STATS_SOURCE, "stale");
             }
         }
 
         dirty_models
             .into_iter()
-            .map(|model_id| {
-                let stats = self.snapshot(&model_id);
-                (model_id, stats)
-            })
+            .map(|model_id| self.snapshot_update(model_id))
             .collect()
     }
 
     pub(super) fn apply_request_counters_into(
         &mut self,
-        update: RequestCounterUpdate,
-        updated_models: &mut Vec<(String, CurrentModelStats)>,
+        mut update: RequestCounterUpdate,
+        updated_models: &mut Vec<ModelStatsUpdate>,
     ) {
-        let Some(event) = self.admit_request_counter_update(update) else {
+        if !self.request_counter_update_allowed(&update) {
             return;
-        };
-        let Some(samples) = self.apply_request_counter_transition(&event) else {
-            return;
-        };
-        self.publish_request_counter_model(event, samples, updated_models);
+        }
+        let request_id = std::mem::take(&mut update.request_id);
+        let samples = self.apply_request_counter_transition(request_id, &update);
+        self.publish_request_counter_samples(update, samples, updated_models);
     }
-
-    fn admit_request_counter_update(
-        &self,
-        update: RequestCounterUpdate,
-    ) -> Option<RequestCounterEvent> {
-        let event = RequestCounterEvent::from_update(update);
-
+    fn request_counter_update_allowed(&self, update: &RequestCounterUpdate) -> bool {
+        let current_lifecycle = self.request_counters.get(&update.request_id);
         if matches!(
-            self.request_counters.get(&event.request_id),
-            Some(RequestCounterLifecycle::Finalized { .. })
+            current_lifecycle,
+            Some(RequestCounterLifecycle::Finalized(_))
         ) {
             tracing::warn!(
-                request_id = %event.request_id,
-                source = ?event.source,
+                request_id = %update.request_id,
+                source = ?update.source,
                 "ignoring stats event after request finalization"
             );
             if let Some(metrics) = self.runtime_state.metrics() {
                 metrics.observe_engine_stats_invalid_event("post_finalize");
             }
-            return None;
+            return false;
         }
 
-        if !self.configured_model_allowed(&event.model_id) {
+        if !self.configured_model_allowed(&update.model_id) {
             tracing::warn!(
-                model_id = %event.model_id,
-                configured_models = ?self.config.configured_model_ids,
+                model_id = %update.model_id,
+                configured_models = ?self.config.bootstrap_input_tps.keys(),
                 "dropping stats event for unconfigured model"
             );
             if let Some(metrics) = self.runtime_state.metrics() {
                 metrics.observe_engine_stats_invalid_event("unconfigured_model");
             }
-            return None;
-        }
-
-        Some(event)
-    }
-
-    fn apply_request_counter_transition(
-        &mut self,
-        event: &RequestCounterEvent,
-    ) -> Option<RequestCounterSamples> {
-        self.reset_request_counter_model_if_changed(event);
-        if self.request_counter_regressed(event) {
-            return None;
-        }
-
-        let policy = self.counter_sampling_policy();
-        let mut new_request_state = None;
-        let samples = match self.request_counters.get_mut(&event.request_id) {
-            Some(RequestCounterLifecycle::Live(state)) => {
-                let samples = observe_request_counter_samples(event, state, policy);
-                state.last_seen_at = event.observed_at;
-                samples
-            }
-            Some(RequestCounterLifecycle::Finalized { .. }) => {
-                panic!("finalized request counter passed admission")
-            }
-            None => {
-                let (state, samples) = new_request_counter_state(event, policy);
-                if !event.finished {
-                    new_request_state = Some(state);
-                }
-                samples
-            }
-        };
-
-        self.store_request_counter_state(event, new_request_state);
-        Some(samples)
-    }
-
-    fn reset_request_counter_model_if_changed(&mut self, event: &RequestCounterEvent) {
-        let prior_model = match self.request_counters.get(&event.request_id) {
-            Some(RequestCounterLifecycle::Live(state)) if state.model_id != event.model_id => {
-                state.model_id.clone()
-            }
-            Some(RequestCounterLifecycle::Live(_)) | None => return,
-            Some(RequestCounterLifecycle::Finalized { .. }) => {
-                panic!("finalized request counter passed admission")
-            }
-        };
-        let removed = self.remove_request_counter_lifecycle(&event.request_id);
-        assert!(
-            matches!(removed, Some(RequestCounterLifecycle::Live(_))),
-            "live request counter disappeared during model reset"
-        );
-        tracing::warn!(
-            request_id = %event.request_id,
-            prior_model,
-            model_id = %event.model_id,
-            "resetting request stats after model changed"
-        );
-    }
-
-    fn request_counter_regressed(&self, event: &RequestCounterEvent) -> bool {
-        let state = match self.request_counters.get(&event.request_id) {
-            Some(RequestCounterLifecycle::Live(state)) => state,
-            None => return false,
-            Some(RequestCounterLifecycle::Finalized { .. }) => {
-                panic!("finalized request counter passed admission")
-            }
-        };
-        if !request_counter_event_regressed(event, state) {
             return false;
         }
 
-        tracing::warn!(
-            request_id = %event.request_id,
-            model_id = %event.model_id,
-            prior_tokens_processed = state.input.observed,
-            tokens_processed = event.tokens_processed.unwrap_or(state.input.observed),
-            prior_tokens_generated = state.output.observed,
-            tokens_generated = event.tokens_generated.unwrap_or(state.output.observed),
-            source = ?event.source,
-            "ignoring regressing request stats counters"
-        );
-        if let Some(metrics) = self.runtime_state.metrics() {
-            metrics.observe_engine_stats_invalid_event("regressing_counters");
+        if let Some(RequestCounterLifecycle::Live(state)) = current_lifecycle
+            && state.model_id == update.model_id
+            && state.regressed(update)
+        {
+            tracing::warn!(
+                request_id = %update.request_id,
+                model_id = %update.model_id,
+                prior_tokens_processed = state.input.observed,
+                tokens_processed = update.tokens_processed.unwrap_or(state.input.observed),
+                prior_tokens_generated = state.output.observed,
+                tokens_generated = update.tokens_generated.unwrap_or(state.output.observed),
+                source = ?update.source,
+                "ignoring regressing request stats counters"
+            );
+            if let Some(metrics) = self.runtime_state.metrics() {
+                metrics.observe_engine_stats_invalid_event("regressing_counters");
+            }
+            return false;
         }
         true
     }
-
-    fn counter_sampling_policy(&self) -> CounterSamplingPolicy {
-        CounterSamplingPolicy {
-            duration_floor: self.config.duration_floor,
-            min_input_tokens: self.config.min_input_tokens,
-            min_output_tokens: self.config.min_output_tokens,
-        }
-    }
-
-    fn store_request_counter_state(
-        &mut self,
-        event: &RequestCounterEvent,
-        new_request_state: Option<RequestCounterState>,
-    ) {
-        if event.finished {
-            self.replace_request_counter_lifecycle(
-                event.request_id.clone(),
-                RequestCounterLifecycle::Finalized {
-                    observed_at: event.observed_at,
-                },
-            );
-        } else if let Some(state) = new_request_state {
-            let previous = self.replace_request_counter_lifecycle(
-                event.request_id.clone(),
-                RequestCounterLifecycle::Live(state),
-            );
-            assert!(
-                previous.is_none(),
-                "new request counter state replaced an existing lifecycle"
-            );
-        }
-    }
-
-    fn replace_request_counter_lifecycle(
+    fn apply_request_counter_transition(
         &mut self,
         request_id: String,
-        next: RequestCounterLifecycle,
-    ) -> Option<RequestCounterLifecycle> {
-        let next_is_live = matches!(&next, RequestCounterLifecycle::Live(_));
-        let previous = self.request_counters.insert(request_id, next);
-        let previous_was_live = matches!(previous.as_ref(), Some(RequestCounterLifecycle::Live(_)));
-        match (previous_was_live, next_is_live) {
-            (false, true) => {
-                self.live_request_count = self
-                    .live_request_count
-                    .checked_add(1)
-                    .expect("live request counter count overflowed");
+        update: &RequestCounterUpdate,
+    ) -> RequestCounterSamples {
+        let previous = self.request_counters.remove(&request_id);
+        let previous_was_live = previous.is_some();
+        let (state, samples) = match previous {
+            Some(RequestCounterLifecycle::Live(mut state)) if state.model_id == update.model_id => {
+                let samples = state.observe(update, &self.config);
+                (state, samples)
             }
-            (true, false) => {
-                self.live_request_count = self
-                    .live_request_count
-                    .checked_sub(1)
-                    .expect("live request counter count underflowed");
+            Some(RequestCounterLifecycle::Live(state)) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    prior_model = %state.model_id,
+                    model_id = %update.model_id,
+                    "resetting request stats after model changed"
+                );
+                RequestCounterState::new(update, &self.config)
             }
-            (false, false) | (true, true) => {}
-        }
-        previous
+            Some(RequestCounterLifecycle::Finalized(_)) => unreachable!("finalized admission"),
+            None => RequestCounterState::new(update, &self.config),
+        };
+        let live_count_delta = (!update.finished as isize) - (previous_was_live as isize);
+        adjust_live_count(&mut self.live_request_count, live_count_delta);
+        let lifecycle = if update.finished {
+            RequestCounterLifecycle::Finalized(update.observed_at)
+        } else {
+            RequestCounterLifecycle::Live(state)
+        };
+        assert!(
+            self.request_counters
+                .insert(request_id, lifecycle)
+                .is_none()
+        );
+        samples
     }
-
-    fn remove_request_counter_lifecycle(
+    fn publish_request_counter_samples(
         &mut self,
-        request_id: &str,
-    ) -> Option<RequestCounterLifecycle> {
-        let removed = self.request_counters.remove(request_id);
-        if matches!(removed.as_ref(), Some(RequestCounterLifecycle::Live(_))) {
-            self.live_request_count = self
-                .live_request_count
-                .checked_sub(1)
-                .expect("live request counter count underflowed");
-        }
-        removed
-    }
-
-    fn publish_request_counter_model(
-        &mut self,
-        event: RequestCounterEvent,
-        samples: RequestCounterSamples,
-        updated_models: &mut Vec<(String, CurrentModelStats)>,
+        update: RequestCounterUpdate,
+        (input_sample, output_sample): RequestCounterSamples,
+        updated_models: &mut Vec<ModelStatsUpdate>,
     ) {
-        let stats_observed_at_unix_ms = self.unix_millis_at(event.observed_at);
+        let stats_observed_at_unix_ms = self.unix_millis_at(update.observed_at);
         let dirty = {
             let config = &self.config;
             let model_state = aggregate_model_state(
                 &mut self.per_model,
                 &mut self.aggregate_model_state_count,
-                event.model_id.clone(),
+                update.model_id.clone(),
             );
-            model_state.last_stats_event_at = Some(event.observed_at);
+            model_state.last_stats_event_at = Some(update.observed_at);
             model_state.stats_observed_at_unix_ms = stats_observed_at_unix_ms;
 
-            let mut dirty = mark_engine_stream_observed(model_state, event.source);
-            if let Some(sample) = samples.input {
+            let mut dirty = update.source == StatsUpdateSource::EngineStatsStream
+                && !std::mem::replace(&mut model_state.engine_stream_stats_observed, true);
+            if let Some((units, duration)) = input_sample {
                 dirty |= apply_input_throughput_sample(
                     config,
                     &self.runtime_state,
-                    &event.model_id,
+                    &update.model_id,
                     model_state,
                     InputThroughputSample {
-                        units: sample.units,
-                        duration: sample.duration,
+                        units,
+                        duration,
                         clamp_duration_to_floor: false,
                     },
                 );
             }
-            dirty |= apply_output_counter_sample(
-                model_state,
-                samples.output,
-                config.duration_floor,
-                config.smoothing_window_size,
-            );
-
+            if let Some((units, duration)) = output_sample
+                && let Some(output_tps) = tps_for_units(units, duration, config.duration_floor)
+            {
+                model_state.max_chat_output_tps = model_state.max_chat_output_tps.max(output_tps);
+                model_state.counter_output_tps_authoritative = true;
+                push_sample(
+                    &mut model_state.chat_output_tps_samples,
+                    &mut model_state.chat_output_tps_sum,
+                    output_tps,
+                    config.smoothing_window_size,
+                );
+                dirty = true;
+            }
             dirty
         };
         if dirty {
-            let stats = self.snapshot(&event.model_id);
-            updated_models.push((event.model_id, stats));
+            updated_models.push(self.snapshot_update(update.model_id));
         }
     }
 
     pub(super) fn finalize_request(
         &mut self,
         update: FinalizeRequestUpdate,
-    ) -> Vec<(String, CurrentModelStats)> {
-        let previous = self.replace_request_counter_lifecycle(
+    ) -> Option<ModelStatsUpdate> {
+        let previous = self.request_counters.insert(
             update.request_id.clone(),
-            RequestCounterLifecycle::Finalized {
-                observed_at: update.observed_at,
-            },
+            RequestCounterLifecycle::Finalized(update.observed_at),
         );
         let Some(RequestCounterLifecycle::Live(state)) = previous else {
-            return Vec::new();
+            return None;
         };
+        adjust_live_count(&mut self.live_request_count, -1);
         let stats_observed_at_unix_ms = self.unix_millis_at(update.observed_at);
         if let Some(model_state) = self.per_model.get_mut(&state.model_id) {
             model_state.stats_observed_at_unix_ms = stats_observed_at_unix_ms;
@@ -662,16 +521,12 @@ impl StatsAggregator {
             source = ?update.source,
             "finalized request stats"
         );
-        vec![(state.model_id.clone(), self.snapshot(&state.model_id))]
+        Some(self.snapshot_update(state.model_id))
     }
 
     pub(super) fn configured_model_allowed(&self, model_id: &str) -> bool {
-        self.config.configured_model_ids.is_empty()
-            || self
-                .config
-                .configured_model_ids
-                .iter()
-                .any(|configured| configured == model_id)
+        self.config.bootstrap_input_tps.is_empty()
+            || self.config.bootstrap_input_tps.contains_key(model_id)
     }
 
     pub(super) fn record_engine_embedding_sample(
@@ -715,11 +570,16 @@ impl StatsAggregator {
         tracing::warn!("OpenAI fallback stats enabled after engine stats stream was unsupported");
         if let Some(metrics) = self.runtime_state.metrics() {
             metrics.observe_engine_stats_source_transition(
-                "engine_stats_stream",
+                ENGINE_STATS_SOURCE,
                 "openai_fallback",
                 "unsupported",
             );
         }
+    }
+
+    fn snapshot_update(&self, model_id: String) -> ModelStatsUpdate {
+        let stats = self.snapshot(&model_id);
+        (model_id, stats)
     }
 }
 
@@ -729,84 +589,16 @@ fn aggregate_model_state<'a>(
     model_id: String,
 ) -> &'a mut ModelMetricsState {
     let model_state = per_model.entry(model_id).or_default();
-    if !model_state.aggregate_state_counted {
-        model_state.aggregate_state_counted = true;
+    if !std::mem::replace(&mut model_state.aggregate_state_counted, true) {
         *aggregate_model_state_count += 1;
     }
     model_state
 }
 
-fn request_counter_event_regressed(
-    event: &RequestCounterEvent,
-    state: &RequestCounterState,
-) -> bool {
-    event
-        .tokens_processed
-        .is_some_and(|next| state.input.is_regression(next))
-        || event
-            .tokens_generated
-            .is_some_and(|next| state.output.is_regression(next))
-}
-
-fn new_request_counter_state(
-    event: &RequestCounterEvent,
-    policy: CounterSamplingPolicy,
-) -> (RequestCounterState, RequestCounterSamples) {
-    let next_tokens_processed = event.tokens_processed.unwrap_or(0);
-    let next_tokens_generated = event.tokens_generated.unwrap_or(0);
-    let mut state = if event.source == StatsUpdateSource::EngineStatsStream {
-        RequestCounterState::from_zero_baseline(event.model_id.clone(), event.observed_at)
-    } else {
-        RequestCounterState::from_observed(
-            event.model_id.clone(),
-            next_tokens_processed,
-            next_tokens_generated,
-            event.observed_at,
-        )
-    };
-
-    let samples = if event.source == StatsUpdateSource::EngineStatsStream {
-        observe_request_counter_samples(event, &mut state, policy)
-    } else {
-        RequestCounterSamples::default()
-    };
-    (state, samples)
-}
-
-fn observe_request_counter_samples(
-    event: &RequestCounterEvent,
-    state: &mut RequestCounterState,
-    policy: CounterSamplingPolicy,
-) -> RequestCounterSamples {
-    let mut samples = RequestCounterSamples::default();
-    if let Some(next_tokens_processed) = event.tokens_processed {
-        samples.input = state.input.observe(
-            next_tokens_processed,
-            event.observed_at,
-            policy.min_input_tokens,
-            policy.duration_floor,
-        );
-    }
-    if let Some(next_tokens_generated) = event.tokens_generated {
-        samples.output = state.output.observe(
-            next_tokens_generated,
-            event.observed_at,
-            policy.min_output_tokens,
-            policy.duration_floor,
-        );
-    }
-    samples
-}
-
-fn mark_engine_stream_observed(
-    model_state: &mut ModelMetricsState,
-    source: StatsUpdateSource,
-) -> bool {
-    if source != StatsUpdateSource::EngineStatsStream || model_state.engine_stream_stats_observed {
-        return false;
-    }
-    model_state.engine_stream_stats_observed = true;
-    true
+fn adjust_live_count(count: &mut usize, delta: isize) {
+    *count = count
+        .checked_add_signed(delta)
+        .expect("live request count overflowed");
 }
 
 pub(super) fn apply_input_throughput_sample(
@@ -827,60 +619,34 @@ pub(super) fn apply_input_throughput_sample(
     let Some(input_tps) = tps_for_units(sample.units, duration, config.duration_floor) else {
         return false;
     };
-
     model_state.input_tps_distribution.update(input_tps);
+    let mean_input_tps = model_state.input_tps_distribution.mean;
     if !model_state.input_tps_distribution.has_sufficient_data()
-        || !valid_last_mean_input_tps(model_state.input_tps_distribution.mean)
+        || !valid_last_mean_input_tps(mean_input_tps)
     {
         return false;
     }
-
-    let last_mean_input_tps =
-        effective_last_mean_input_tps(config, model_state.input_tps_distribution.mean);
+    let last_mean_input_tps = config
+        .pin_bootstrap_input_tps
+        .then(|| config.bootstrap_input_tps.get(model_id))
+        .flatten()
+        .copied()
+        .unwrap_or(mean_input_tps);
     if model_state.last_mean_input_tps == last_mean_input_tps {
         return false;
     }
-
     model_state.last_mean_input_tps = last_mean_input_tps;
     runtime_state.update_model_throughput(model_id, last_mean_input_tps);
     true
 }
 
-fn apply_output_counter_sample(
-    model_state: &mut ModelMetricsState,
-    sample: Option<CounterSample>,
-    duration_floor: Duration,
-    smoothing_window_size: usize,
-) -> bool {
-    let Some(sample) = sample else {
-        return false;
-    };
-    let Some(output_tps) = tps_for_units(sample.units, sample.duration, duration_floor) else {
-        return false;
-    };
-
-    model_state.max_chat_output_tps = model_state.max_chat_output_tps.max(output_tps);
-    model_state.counter_output_tps_authoritative = true;
-    push_sample(
-        &mut model_state.chat_output_tps_samples,
-        &mut model_state.chat_output_tps_sum,
-        output_tps,
-        smoothing_window_size,
-    );
-    true
-}
-
-fn elapsed_since(now: TokioInstant, then: TokioInstant) -> Duration {
-    now.checked_duration_since(then).unwrap_or(Duration::ZERO)
-}
-
 fn push_dirty_model(models: &mut Vec<String>, model_id: String) {
-    if !models.iter().any(|existing| existing == &model_id) {
+    if !models.contains(&model_id) {
         models.push(model_id);
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(super) struct ModelStatsSnapshotInputs {
     pub(super) active_chat_output_tps: f64,
     pub(super) queue_size: u64,
@@ -940,33 +706,26 @@ impl ModelMetricsState {
     }
 
     pub(super) fn stats_labels(&self) -> (Vec<String>, Vec<String>) {
-        // These labels are sticky per model metrics state. They describe
-        // contract surfaces pylon has observed from this backend, not just the
-        // surfaces exercised by the most recent request.
-        let mut capabilities = Vec::new();
-        let mut sources = Vec::new();
-        if self.chunk_usage_stats_observed {
-            capabilities.push("request.output.chunk_usage".to_string());
-            sources.push("chunk_usage".to_string());
-        }
-        if self.engine_stream_stats_observed {
-            capabilities.push("model.throughput.engine_stream".to_string());
-            sources.push("engine_stats_stream".to_string());
-        }
-        if self.kv_cache_stats_observed {
-            capabilities.push("machine.kv_cache.http".to_string());
-            sources.push("kv_cache_stats".to_string());
-        }
-        (capabilities, sources)
+        // Labels are sticky capabilities observed over the model state's lifetime.
+        [
+            self.chunk_usage_stats_observed
+                .then_some(("request.output.chunk_usage", "chunk_usage")),
+            self.engine_stream_stats_observed
+                .then_some(("model.throughput.engine_stream", ENGINE_STATS_SOURCE)),
+            self.kv_cache_stats_observed
+                .then_some(("machine.kv_cache.http", "kv_cache_stats")),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|(capability, source)| (capability.to_owned(), source.to_owned()))
+        .unzip()
     }
 }
 
 pub(super) fn current_unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-        .unwrap_or_default()
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or_default())
 }
 
 pub(super) fn duration_millis_u64(duration: Duration) -> u64 {
@@ -979,17 +738,11 @@ pub(super) fn output_decode_duration(
     time_to_first_token: Option<Duration>,
     duration_floor: Duration,
 ) -> Option<Duration> {
-    if let Some(time_to_first_token) = time_to_first_token {
-        // Observation timestamps can arrive with the same coarse clock tick; never underflow decode time.
-        let token_duration = total_duration.saturating_sub(time_to_first_token);
-        if token_duration >= duration_floor {
-            return Some(token_duration);
-        }
-    }
-
-    time_to_first_output
-        // Observation timestamps can arrive with the same coarse clock tick; never underflow decode time.
-        .map(|time_to_first_output| total_duration.saturating_sub(time_to_first_output))
+    // Observation timestamps can arrive with the same coarse clock tick; never underflow decode time.
+    time_to_first_token
+        .map(|first_token| total_duration.saturating_sub(first_token))
+        .filter(|duration| *duration >= duration_floor)
+        .or_else(|| time_to_first_output.map(|first| total_duration.saturating_sub(first)))
 }
 
 pub(super) fn tps_for_units(
@@ -997,33 +750,7 @@ pub(super) fn tps_for_units(
     duration: Duration,
     duration_floor: Duration,
 ) -> Option<f64> {
-    if units == 0 || duration < duration_floor {
-        return None;
-    }
-    Some(units as f64 / duration.as_secs_f64())
-}
-
-pub(super) fn valid_last_mean_input_tps(last_mean_input_tps: f64) -> bool {
-    last_mean_input_tps > 0.0 && last_mean_input_tps.is_finite()
-}
-
-pub(super) fn fixed_last_mean_input_tps(config: &StatsCollectorConfig) -> Option<f64> {
-    config
-        .fixed_last_mean_input_tps
-        .filter(|value| valid_last_mean_input_tps(*value))
-}
-
-pub(super) fn effective_last_mean_input_tps(config: &StatsCollectorConfig, observed: f64) -> f64 {
-    fixed_last_mean_input_tps(config).unwrap_or(observed)
-}
-
-pub(super) fn apply_fixed_last_mean_input_tps(
-    config: &StatsCollectorConfig,
-    stats: &mut CurrentModelStats,
-) {
-    if let Some(last_mean_input_tps) = fixed_last_mean_input_tps(config) {
-        stats.last_mean_input_tps = last_mean_input_tps;
-    }
+    (units > 0 && duration >= duration_floor).then(|| units as f64 / duration.as_secs_f64())
 }
 
 pub(super) fn push_sample(
@@ -1038,16 +765,16 @@ pub(super) fn push_sample(
     samples.push_back(sample);
     *sum += sample;
     while samples.len() > window_size {
-        if let Some(removed) = samples.pop_front() {
-            *sum -= removed;
-        }
+        let removed = samples
+            .pop_front()
+            .expect("non-empty smoothing window lost its oldest sample");
+        *sum -= removed;
     }
 }
 
 pub(super) fn average_with_sum(samples: &VecDeque<f64>, sum: f64) -> f64 {
-    if samples.is_empty() {
-        0.0
-    } else {
-        sum / samples.len() as f64
+    match samples.len() {
+        0 => 0.0,
+        count => sum / count as f64,
     }
 }

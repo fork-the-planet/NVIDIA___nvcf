@@ -42,20 +42,20 @@ pub(super) struct ProxyRequestInputs {
 pub(super) fn parse_proxy_request_inputs(
     headers: &HeaderMap,
 ) -> Result<ProxyRequestInputs, StatusCode> {
-    let _request_id = get_required_header(headers, HEADER_REQUEST_ID)?;
-    let input_tokens =
-        parse_optional_u64_header(headers, HEADER_INPUT_TOKENS)?.ok_or(StatusCode::BAD_REQUEST)?;
-    let target = RoutingTargetKey {
-        routing_key: get_optional_header(headers, HEADER_ROUTING_KEY),
-        model_id: get_required_header(headers, HEADER_MODEL)?,
-    };
+    get_optional_header(headers, HEADER_REQUEST_ID).ok_or(StatusCode::BAD_REQUEST)?;
+    let input_tokens = parse_optional_numeric_header(headers, HEADER_INPUT_TOKENS)?
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let target = RoutingTargetKey::new(
+        get_optional_header(headers, HEADER_ROUTING_KEY),
+        get_optional_header(headers, HEADER_MODEL).ok_or(StatusCode::BAD_REQUEST)?,
+    );
     let routing_algorithm_override = parse_routing_algorithm_override(headers, &target)?;
     Ok(ProxyRequestInputs {
         target,
         input_tokens,
-        priority: parse_optional_u32_header(headers, HEADER_PRIORITY)?.unwrap_or(0),
-        max_wait_ms: parse_optional_u64_header(headers, HEADER_MAX_WAIT_MS)?,
-        request_slo_ms: parse_optional_u64_header(headers, HEADER_REQUEST_SLO_MS)?,
+        priority: parse_optional_numeric_header(headers, HEADER_PRIORITY)?.unwrap_or(0),
+        max_wait_ms: parse_optional_numeric_header(headers, HEADER_MAX_WAIT_MS)?,
+        request_slo_ms: parse_optional_numeric_header(headers, HEADER_REQUEST_SLO_MS)?,
         cache_affinity_key: get_optional_header(headers, HEADER_CACHE_AFFINITY_KEY),
         routing_algorithm_override,
     })
@@ -124,34 +124,6 @@ fn get_optional_header(headers: &HeaderMap, name: &'static str) -> Option<String
         .map(ToOwned::to_owned)
 }
 
-fn get_required_header(headers: &HeaderMap, name: &'static str) -> Result<String, StatusCode> {
-    let value = headers
-        .get(name)
-        .ok_or(StatusCode::BAD_REQUEST)?
-        .to_str()
-        .map_err(|_| StatusCode::BAD_REQUEST)?
-        .trim()
-        .to_string();
-    if value.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    Ok(value)
-}
-
-fn parse_optional_u64_header(
-    headers: &HeaderMap,
-    name: &'static str,
-) -> Result<Option<u64>, StatusCode> {
-    parse_optional_numeric_header(headers, name)
-}
-
-fn parse_optional_u32_header(
-    headers: &HeaderMap,
-    name: &'static str,
-) -> Result<Option<u32>, StatusCode> {
-    parse_optional_numeric_header(headers, name)
-}
-
 fn parse_optional_numeric_header<T>(
     headers: &HeaderMap,
     name: &'static str,
@@ -183,14 +155,26 @@ mod tests {
         LoadBalancerAlgorithm, LoadBalancerConfig, LoadBalancerModelConfig, LoadBalancerRouter,
     };
 
-    fn insert_required_proxy_headers(headers: &mut HeaderMap) {
+    fn proxy_headers() -> HeaderMap {
+        [
+            (HEADER_REQUEST_ID, "req-test"),
+            (HEADER_MODEL, "model-a"),
+            (HEADER_INPUT_TOKENS, "128"),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            )
+        })
+        .collect()
+    }
+
+    fn set_header(headers: &mut HeaderMap, name: &'static str, value: &'static str) {
         headers.insert(
-            HeaderName::from_static(HEADER_REQUEST_ID),
-            HeaderValue::from_static("req-test"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_INPUT_TOKENS),
-            HeaderValue::from_static("128"),
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
         );
     }
 
@@ -202,13 +186,10 @@ mod tests {
             HEADER_REQUEST_SLO_MS,
         ] {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                HeaderName::from_static(header),
-                HeaderValue::from_static("bad"),
-            );
+            set_header(&mut headers, header, "bad");
 
             assert_eq!(
-                parse_optional_u64_header(&headers, header),
+                parse_optional_numeric_header::<u64>(&headers, header),
                 Err(StatusCode::BAD_REQUEST)
             );
         }
@@ -217,13 +198,10 @@ mod tests {
     #[test]
     fn optional_u32_proxy_headers_reject_invalid_values() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_PRIORITY),
-            HeaderValue::from_static("bad"),
-        );
+        set_header(&mut headers, HEADER_PRIORITY, "bad");
 
         assert_eq!(
-            parse_optional_u32_header(&headers, HEADER_PRIORITY),
+            parse_optional_numeric_header::<u32>(&headers, HEADER_PRIORITY),
             Err(StatusCode::BAD_REQUEST)
         );
     }
@@ -231,65 +209,36 @@ mod tests {
     #[test]
     fn optional_numeric_proxy_headers_parse_valid_or_absent_values() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_INPUT_TOKENS),
-            HeaderValue::from_static("42"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_PRIORITY),
-            HeaderValue::from_static("7"),
-        );
+        set_header(&mut headers, HEADER_INPUT_TOKENS, "42");
+        set_header(&mut headers, HEADER_PRIORITY, "7");
 
         assert_eq!(
-            parse_optional_u64_header(&headers, HEADER_INPUT_TOKENS),
+            parse_optional_numeric_header::<u64>(&headers, HEADER_INPUT_TOKENS),
             Ok(Some(42))
         );
         assert_eq!(
-            parse_optional_u32_header(&headers, HEADER_PRIORITY),
+            parse_optional_numeric_header::<u32>(&headers, HEADER_PRIORITY),
             Ok(Some(7))
         );
         assert_eq!(
-            parse_optional_u64_header(&headers, HEADER_MAX_WAIT_MS),
+            parse_optional_numeric_header::<u64>(&headers, HEADER_MAX_WAIT_MS),
             Ok(None)
         );
     }
 
     #[test]
     fn proxy_request_inputs_parse_routing_and_control_headers() {
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
-        headers.insert(
-            HeaderName::from_static(HEADER_ROUTING_KEY),
-            HeaderValue::from_static("tenant-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_INPUT_TOKENS),
-            HeaderValue::from_static("128"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_PRIORITY),
-            HeaderValue::from_static("4"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_MAX_WAIT_MS),
-            HeaderValue::from_static("250"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_REQUEST_SLO_MS),
-            HeaderValue::from_static("900"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_CACHE_AFFINITY_KEY),
-            HeaderValue::from_static("cache-key-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_ROUTING_METHOD),
-            HeaderValue::from_static("round_robin"),
-        );
+        let mut headers = proxy_headers();
+        for (name, value) in [
+            (HEADER_ROUTING_KEY, "tenant-a"),
+            (HEADER_PRIORITY, "4"),
+            (HEADER_MAX_WAIT_MS, "250"),
+            (HEADER_REQUEST_SLO_MS, "900"),
+            (HEADER_CACHE_AFFINITY_KEY, "cache-key-a"),
+            (HEADER_ROUTING_METHOD, "round_robin"),
+        ] {
+            set_header(&mut headers, name, value);
+        }
 
         let inputs = parse_proxy_request_inputs(&headers).expect("headers should parse");
 
@@ -311,12 +260,7 @@ mod tests {
             models: HashMap::new(),
         })
         .expect("load balancer should initialize");
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
+        let headers = proxy_headers();
         let inputs = parse_proxy_request_inputs(&headers).expect("headers should parse");
 
         let config = lb_router
@@ -343,16 +287,8 @@ mod tests {
             models: HashMap::new(),
         })
         .expect("load balancer should initialize");
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_ROUTING_METHOD),
-            HeaderValue::from_static("round_robin"),
-        );
+        let mut headers = proxy_headers();
+        set_header(&mut headers, HEADER_ROUTING_METHOD, "round_robin");
         let inputs = parse_proxy_request_inputs(&headers).expect("headers should parse");
 
         let config = lb_router
@@ -370,16 +306,8 @@ mod tests {
 
     #[test]
     fn proxy_unknown_routing_method_returns_bad_request() {
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_ROUTING_METHOD),
-            HeaderValue::from_static("sticky"),
-        );
+        let mut headers = proxy_headers();
+        set_header(&mut headers, HEADER_ROUTING_METHOD, "sticky");
 
         assert_eq!(
             parse_proxy_request_inputs(&headers),
@@ -389,16 +317,8 @@ mod tests {
 
     #[test]
     fn proxy_blank_routing_method_returns_bad_request() {
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_ROUTING_METHOD),
-            HeaderValue::from_static("   "),
-        );
+        let mut headers = proxy_headers();
+        set_header(&mut headers, HEADER_ROUTING_METHOD, "   ");
 
         assert_eq!(
             parse_proxy_request_inputs(&headers),
@@ -410,16 +330,8 @@ mod tests {
     fn proxy_known_unconfigured_routing_method_returns_bad_request() {
         let lb_router = LoadBalancerRouter::from_config(&LoadBalancerConfig::default())
             .expect("load balancer should initialize");
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_ROUTING_METHOD),
-            HeaderValue::from_static("round-robin"),
-        );
+        let mut headers = proxy_headers();
+        set_header(&mut headers, HEADER_ROUTING_METHOD, "round-robin");
         let inputs = parse_proxy_request_inputs(&headers).expect("headers should parse");
         let error = lb_router
             .resolve_algorithm_override(
@@ -437,8 +349,8 @@ mod tests {
 
     #[test]
     fn proxy_request_inputs_reject_missing_model() {
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
+        let mut headers = proxy_headers();
+        headers.remove(HEADER_MODEL);
 
         assert_eq!(
             parse_proxy_request_inputs(&headers),
@@ -448,15 +360,8 @@ mod tests {
 
     #[test]
     fn proxy_request_inputs_reject_missing_request_id() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_INPUT_TOKENS),
-            HeaderValue::from_static("128"),
-        );
+        let mut headers = proxy_headers();
+        headers.remove(HEADER_REQUEST_ID);
 
         assert_eq!(
             parse_proxy_request_inputs(&headers),
@@ -466,15 +371,8 @@ mod tests {
 
     #[test]
     fn proxy_request_inputs_reject_missing_input_tokens() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(HEADER_REQUEST_ID),
-            HeaderValue::from_static("req-test"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
+        let mut headers = proxy_headers();
+        headers.remove(HEADER_INPUT_TOKENS);
 
         assert_eq!(
             parse_proxy_request_inputs(&headers),
@@ -484,16 +382,7 @@ mod tests {
 
     #[test]
     fn load_balancer_request_requirements_reject_missing_cache_affinity_key() {
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_INPUT_TOKENS),
-            HeaderValue::from_static("128"),
-        );
+        let headers = proxy_headers();
         let inputs = parse_proxy_request_inputs(&headers).expect("headers should parse");
         let mut config = LoadBalancerAlgorithmConfig::from(LoadBalancerAlgorithm::Pulsar);
         config.request_policy_mut().require_cache_affinity_key = true;
@@ -506,20 +395,8 @@ mod tests {
 
     #[test]
     fn load_balancer_request_requirements_accept_satisfied_controls() {
-        let mut headers = HeaderMap::new();
-        insert_required_proxy_headers(&mut headers);
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("model-a"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_INPUT_TOKENS),
-            HeaderValue::from_static("128"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_CACHE_AFFINITY_KEY),
-            HeaderValue::from_static("cache-key-a"),
-        );
+        let mut headers = proxy_headers();
+        set_header(&mut headers, HEADER_CACHE_AFFINITY_KEY, "cache-key-a");
         let inputs = parse_proxy_request_inputs(&headers).expect("headers should parse");
         let mut config = LoadBalancerAlgorithmConfig::from(LoadBalancerAlgorithm::Pulsar);
         config.request_policy_mut().require_cache_affinity_key = true;

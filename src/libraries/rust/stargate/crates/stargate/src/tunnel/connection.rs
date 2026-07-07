@@ -24,34 +24,28 @@ use tokio::sync::watch;
 use crate::routing_state::RegistrationGeneration;
 
 use super::body::OpenStreamingRequest;
-use super::custom::CustomConnectionHandle;
 use super::http3::Http3ConnectionHandle;
+use super::raw_quic::RawQuicConnectionHandle;
 use super::request::OpenTunnelRequest;
 use super::webtransport::WebTransportConnectionHandle;
 
 #[derive(Clone)]
 pub(super) enum TunnelConnection {
-    Custom(CustomConnectionHandle),
+    RawQuic(RawQuicConnectionHandle),
     Http3(Http3ConnectionHandle),
     WebTransport(WebTransportConnectionHandle),
 }
 
 pub(crate) struct RegistrationConnections {
-    state: watch::Sender<RegistrationConnectionState>,
+    state: watch::Sender<ConnectionState>,
 }
 
 #[derive(Debug)]
-enum RegistrationConnectionState {
+enum ConnectionState {
     Disconnected,
     Connected(TunnelConnectionSet),
     ReverseInstalling,
     ReverseReplacing(TunnelConnectionSet),
-    Retired,
-}
-
-enum ConnectionReadiness {
-    Pending,
-    Healthy,
     Retired,
 }
 
@@ -62,7 +56,7 @@ pub(super) struct ReverseConnectionInstall {
 impl TunnelConnection {
     pub(super) fn is_healthy(&self) -> bool {
         match self {
-            Self::Custom(handle) => handle.is_healthy(),
+            Self::RawQuic(handle) => handle.is_healthy(),
             Self::Http3(handle) => handle.is_healthy(),
             Self::WebTransport(handle) => handle.is_healthy(),
         }
@@ -70,7 +64,7 @@ impl TunnelConnection {
 
     fn stable_id(&self) -> usize {
         match self {
-            Self::Custom(handle) => handle.stable_id(),
+            Self::RawQuic(handle) => handle.stable_id(),
             Self::Http3(handle) => handle.stable_id(),
             Self::WebTransport(handle) => handle.stable_id(),
         }
@@ -81,7 +75,7 @@ impl TunnelConnection {
         request: OpenTunnelRequest<'_>,
     ) -> Result<OpenStreamingRequest> {
         match self {
-            Self::Custom(handle) => handle.open_streaming_request(request).await,
+            Self::RawQuic(handle) => handle.open_streaming_request(request).await,
             Self::Http3(handle) => handle.open_streaming_request(request).await,
             Self::WebTransport(handle) => handle.open_streaming_request(request).await,
         }
@@ -90,60 +84,44 @@ impl TunnelConnection {
 
 impl RegistrationConnections {
     pub(crate) fn new() -> Self {
-        let (state, _) = watch::channel(RegistrationConnectionState::Disconnected);
+        let (state, _) = watch::channel(ConnectionState::Disconnected);
         Self { state }
     }
 
     pub(super) fn retire(&self) -> bool {
-        self.state.send_if_modified(|state| {
-            if matches!(state, RegistrationConnectionState::Retired) {
-                false
-            } else {
-                *state = RegistrationConnectionState::Retired;
-                true
-            }
-        })
+        self.set_if_active(ConnectionState::Retired)
     }
 
     pub(super) fn is_active(&self) -> bool {
-        !matches!(&*self.state.borrow(), RegistrationConnectionState::Retired)
+        !matches!(&*self.state.borrow(), ConnectionState::Retired)
     }
 
     pub(super) fn connection_set(&self) -> Option<TunnelConnectionSet> {
-        match &*self.state.borrow() {
-            RegistrationConnectionState::Connected(connections) => Some(connections.clone()),
-            RegistrationConnectionState::ReverseReplacing(previous) => Some(previous.clone()),
-            RegistrationConnectionState::Disconnected
-            | RegistrationConnectionState::ReverseInstalling
-            | RegistrationConnectionState::Retired => None,
-        }
+        self.state.borrow().connections().cloned()
     }
 
     pub(super) fn has_healthy_connection(&self) -> bool {
-        self.connection_set()
-            .is_some_and(|connections| connections.is_healthy())
+        self.connection_set().is_some_and(|set| set.is_healthy())
     }
 
     pub(super) fn needs_replenishment(&self) -> bool {
-        match &*self.state.borrow() {
-            RegistrationConnectionState::Disconnected => true,
-            RegistrationConnectionState::Connected(connections) => {
-                connections.needs_replenishment()
-            }
-            RegistrationConnectionState::ReverseReplacing(previous) => {
-                previous.needs_replenishment()
-            }
-            RegistrationConnectionState::ReverseInstalling => true,
-            RegistrationConnectionState::Retired => false,
-        }
+        let state = self.state.borrow();
+        !matches!(&*state, ConnectionState::Retired)
+            && state
+                .connections()
+                .is_none_or(TunnelConnectionSet::needs_replenishment)
     }
 
     pub(super) fn install_direct(&self, connections: TunnelConnectionSet) -> bool {
+        self.set_if_active(ConnectionState::Connected(connections))
+    }
+
+    fn set_if_active(&self, next: ConnectionState) -> bool {
         self.state.send_if_modified(move |state| {
-            if matches!(state, RegistrationConnectionState::Retired) {
+            if matches!(state, ConnectionState::Retired) {
                 false
             } else {
-                *state = RegistrationConnectionState::Connected(connections);
+                *state = next;
                 true
             }
         })
@@ -151,21 +129,17 @@ impl RegistrationConnections {
 
     fn begin_reverse_install(&self) -> bool {
         self.state.send_if_modified(|state| {
-            let installing = match &*state {
-                RegistrationConnectionState::Disconnected => {
-                    RegistrationConnectionState::ReverseInstalling
+            let next = match state {
+                ConnectionState::Disconnected => ConnectionState::ReverseInstalling,
+                ConnectionState::Connected(connections) if !connections.is_healthy() => {
+                    ConnectionState::ReverseReplacing(connections.clone())
                 }
-                RegistrationConnectionState::Connected(connections)
-                    if !connections.is_healthy() =>
-                {
-                    RegistrationConnectionState::ReverseReplacing(connections.clone())
-                }
-                RegistrationConnectionState::Connected(_)
-                | RegistrationConnectionState::ReverseInstalling
-                | RegistrationConnectionState::ReverseReplacing(_)
-                | RegistrationConnectionState::Retired => return false,
+                ConnectionState::Connected(_)
+                | ConnectionState::ReverseInstalling
+                | ConnectionState::ReverseReplacing(_)
+                | ConnectionState::Retired => return false,
             };
-            *state = installing;
+            *state = next;
             true
         })
     }
@@ -173,39 +147,39 @@ impl RegistrationConnections {
     fn finish_reverse_install(&self, connection: TunnelConnection) -> bool {
         self.state.send_if_modified(move |state| {
             match &*state {
-                RegistrationConnectionState::ReverseInstalling => {}
-                RegistrationConnectionState::ReverseReplacing(previous)
-                    if !previous.is_healthy() => {}
-                RegistrationConnectionState::Disconnected
-                | RegistrationConnectionState::Connected(_)
-                | RegistrationConnectionState::ReverseReplacing(_)
-                | RegistrationConnectionState::Retired => return false,
+                ConnectionState::ReverseInstalling => {}
+                ConnectionState::ReverseReplacing(previous) if !previous.is_healthy() => {}
+                ConnectionState::Disconnected
+                | ConnectionState::Connected(_)
+                | ConnectionState::ReverseReplacing(_)
+                | ConnectionState::Retired => return false,
             }
-            *state =
-                RegistrationConnectionState::Connected(TunnelConnectionSet::single(connection));
+            *state = ConnectionState::Connected(TunnelConnectionSet::single(connection));
             true
         })
     }
 
     pub(super) fn remove_connection(&self, stable_id: usize) -> bool {
-        self.state.send_if_modified(|state| match state {
-            RegistrationConnectionState::Connected(connections)
-                if connections.contains_stable_id(stable_id) =>
-            {
-                *state = RegistrationConnectionState::Disconnected;
-                true
-            }
-            RegistrationConnectionState::ReverseReplacing(previous)
-                if previous.contains_stable_id(stable_id) =>
-            {
-                *state = RegistrationConnectionState::ReverseInstalling;
-                true
-            }
-            RegistrationConnectionState::Disconnected
-            | RegistrationConnectionState::Connected(_)
-            | RegistrationConnectionState::ReverseInstalling
-            | RegistrationConnectionState::ReverseReplacing(_)
-            | RegistrationConnectionState::Retired => false,
+        self.state.send_if_modified(|state| {
+            let next = match state {
+                ConnectionState::Connected(connections)
+                    if connections.contains_stable_id(stable_id) =>
+                {
+                    ConnectionState::Disconnected
+                }
+                ConnectionState::ReverseReplacing(previous)
+                    if previous.contains_stable_id(stable_id) =>
+                {
+                    ConnectionState::ReverseInstalling
+                }
+                ConnectionState::Disconnected
+                | ConnectionState::Connected(_)
+                | ConnectionState::ReverseInstalling
+                | ConnectionState::ReverseReplacing(_)
+                | ConnectionState::Retired => return false,
+            };
+            *state = next;
+            true
         })
     }
 
@@ -213,11 +187,13 @@ impl RegistrationConnections {
         let mut state = self.state.subscribe();
         tokio::time::timeout(timeout, async {
             loop {
-                let readiness = state.borrow_and_update().readiness();
-                match readiness {
-                    ConnectionReadiness::Healthy => return true,
-                    ConnectionReadiness::Retired => return false,
-                    ConnectionReadiness::Pending => {}
+                {
+                    let current = state.borrow_and_update();
+                    match &*current {
+                        ConnectionState::Retired => return false,
+                        current if current.is_healthy() => return true,
+                        _ => {}
+                    }
                 }
                 if state.changed().await.is_err() {
                     return false;
@@ -229,37 +205,33 @@ impl RegistrationConnections {
     }
 
     fn cancel_reverse_install(&self) {
-        self.state.send_if_modified(|state| match &*state {
-            RegistrationConnectionState::ReverseInstalling => {
-                *state = RegistrationConnectionState::Disconnected;
-                true
-            }
-            RegistrationConnectionState::ReverseReplacing(previous) => {
-                *state = RegistrationConnectionState::Connected(previous.clone());
-                true
-            }
-            RegistrationConnectionState::Disconnected
-            | RegistrationConnectionState::Connected(_)
-            | RegistrationConnectionState::Retired => false,
+        self.state.send_if_modified(|state| {
+            let next = match &*state {
+                ConnectionState::ReverseInstalling => ConnectionState::Disconnected,
+                ConnectionState::ReverseReplacing(previous) => {
+                    ConnectionState::Connected(previous.clone())
+                }
+                ConnectionState::Disconnected
+                | ConnectionState::Connected(_)
+                | ConnectionState::Retired => return false,
+            };
+            *state = next;
+            true
         });
     }
 }
 
-impl RegistrationConnectionState {
-    fn readiness(&self) -> ConnectionReadiness {
+impl ConnectionState {
+    fn connections(&self) -> Option<&TunnelConnectionSet> {
         match self {
-            RegistrationConnectionState::Connected(connections) if connections.is_healthy() => {
-                ConnectionReadiness::Healthy
-            }
-            RegistrationConnectionState::ReverseReplacing(previous) if previous.is_healthy() => {
-                ConnectionReadiness::Healthy
-            }
-            RegistrationConnectionState::Disconnected
-            | RegistrationConnectionState::Connected(_)
-            | RegistrationConnectionState::ReverseInstalling
-            | RegistrationConnectionState::ReverseReplacing(_) => ConnectionReadiness::Pending,
-            RegistrationConnectionState::Retired => ConnectionReadiness::Retired,
+            Self::Connected(connections) | Self::ReverseReplacing(connections) => Some(connections),
+            Self::Disconnected | Self::ReverseInstalling | Self::Retired => None,
         }
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.connections()
+            .is_some_and(TunnelConnectionSet::is_healthy)
     }
 }
 
@@ -332,12 +304,7 @@ impl TunnelConnectionSet {
     }
 
     pub(super) fn single(connection: TunnelConnection) -> Self {
-        Self {
-            inner: Arc::new(TunnelConnectionSetInner {
-                connections: vec![connection],
-                cursor: AtomicUsize::new(0),
-            }),
-        }
+        Self::new(vec![connection]).expect("single tunnel connection is nonempty")
     }
 
     #[cfg(test)]
@@ -358,11 +325,10 @@ impl TunnelConnectionSet {
     }
 
     pub(super) fn needs_replenishment(&self) -> bool {
-        !self
-            .inner
+        self.inner
             .connections
             .iter()
-            .all(TunnelConnection::is_healthy)
+            .any(|connection| !connection.is_healthy())
     }
 
     pub(super) fn choose_healthy(&self) -> Option<TunnelConnection> {
@@ -370,14 +336,10 @@ impl TunnelConnectionSet {
         // The cursor only spreads load across equivalent live connections, so
         // relaxed ordering is enough; the health check below owns correctness.
         let start = self.inner.cursor.fetch_add(1, Ordering::Relaxed) % len;
-        for offset in 0..len {
-            let index = (start + offset) % len;
-            let connection = &self.inner.connections[index];
-            if connection.is_healthy() {
-                return Some(connection.clone());
-            }
-        }
-        None
+        (0..len)
+            .map(|offset| &self.inner.connections[(start + offset) % len])
+            .find(|connection| connection.is_healthy())
+            .cloned()
     }
 
     pub(super) fn contains_stable_id(&self, stable_id: usize) -> bool {
@@ -396,6 +358,10 @@ mod tests {
     fn reverse_install_begin_and_cancel_publish_state_changes() {
         let connections = RegistrationConnections::new();
         let mut updates = connections.state.subscribe();
+        assert_eq!(
+            format!("{connections:?}"),
+            "RegistrationConnections { state: Disconnected }"
+        );
 
         assert!(connections.begin_reverse_install());
         assert!(

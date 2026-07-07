@@ -21,10 +21,10 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    ArrivalPatternConfig, BenchmarkConfig, BurstyTrafficConfig, HotsetTrafficConfig,
-    MixedSizeClassConfig, MixedSizeTrafficConfig, PrefixReuseTrafficConfig, ScenarioMetadata,
-    StairStepTrafficConfig, TokenDistributionConfig, TrafficPatternConfig, UniformTrafficConfig,
+    ArrivalPatternConfig, BenchmarkConfig, HotsetTrafficConfig, PrefixReuseTrafficConfig,
+    ScenarioMetadata, TokenDistributionConfig, TrafficPatternConfig,
 };
+use crate::runtime::slugify;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +75,7 @@ pub fn generate_manifest(
     let mut scheduled_offset_ms = 0u64;
     let mut requests = Vec::with_capacity(config.request_count);
     let mut prior_prefix_tokens = HashMap::new();
+    let request_id_prefix = format!("{}-{seed}", slugify(&config.name));
 
     for request_index in 0..config.request_count {
         if request_index > 0 {
@@ -91,13 +92,13 @@ pub fn generate_manifest(
             sample_request_shape(&config.traffic_pattern, &mut prior_prefix_tokens, &mut rng)?;
         requests.push(ManifestRequest {
             request_index,
-            request_id: format!("{}-{seed}-{request_index:06}", sanitize_name(&config.name)),
+            request_id: format!("{request_id_prefix}-{request_index:06}"),
             scheduled_offset_ms,
             routing_key: make_optional_key("rk", request_shape.routing_key_index),
             cache_affinity_key: make_optional_key("cak", request_shape.cache_affinity_key_index),
             input_tokens: request_shape.input_tokens,
             output_tokens: request_shape.output_tokens,
-            backend_behavior_class: request_shape.backend_behavior_class,
+            backend_behavior_class: request_shape.backend_behavior_class.to_string(),
         });
     }
 
@@ -122,7 +123,19 @@ struct RequestShape {
     cache_affinity_key_index: Option<usize>,
     input_tokens: u64,
     output_tokens: u64,
-    backend_behavior_class: String,
+    backend_behavior_class: &'static str,
+}
+
+macro_rules! sample_common_request {
+    ($routing:expr, $tokens:expr, $behavior:expr, $rng:expr) => {
+        Ok(RequestShape {
+            routing_key_index: sample_optional_index($routing.routing_keys, $rng),
+            cache_affinity_key_index: sample_optional_index($routing.cache_affinity_keys, $rng),
+            input_tokens: sample_tokens(&$tokens.input_tokens, $rng)?,
+            output_tokens: sample_tokens(&$tokens.output_tokens, $rng)?,
+            backend_behavior_class: $behavior,
+        })
+    };
 }
 
 fn sample_request_shape(
@@ -131,28 +144,34 @@ fn sample_request_shape(
     rng: &mut StdRng,
 ) -> anyhow::Result<RequestShape> {
     match pattern {
-        TrafficPatternConfig::Uniform(config) => sample_uniform(config, rng),
-        TrafficPatternConfig::ZipfHotset(config) => sample_hotset(config, rng),
-        TrafficPatternConfig::Bursty(config) => sample_bursty(config, rng),
-        TrafficPatternConfig::StairStep(config) => sample_stair_step(config, rng),
-        TrafficPatternConfig::MixedSize(config) => sample_mixed_size(config, rng),
+        TrafficPatternConfig::Uniform(config) => {
+            sample_common_request!(config, config, "uniform", rng)
+        }
+        TrafficPatternConfig::Bursty(config) => {
+            sample_common_request!(config, config, "bursty", rng)
+        }
+        TrafficPatternConfig::StairStep(config) => {
+            sample_common_request!(config, config, "stair_step", rng)
+        }
+        TrafficPatternConfig::ZipfHotset(config) => sample_hotset_request(config, rng),
+        TrafficPatternConfig::MixedSize(config) => {
+            let (class, behavior) = if rng.random::<f64>() < config.small_share {
+                (&config.small, "small")
+            } else {
+                (&config.large, "large")
+            };
+            sample_common_request!(config, class, behavior, rng)
+        }
         TrafficPatternConfig::PrefixReuse(config) => {
-            sample_prefix_reuse(config, prior_prefix_tokens, rng)
+            sample_prefix_reuse_request(config, prior_prefix_tokens, rng)
         }
     }
 }
 
-fn sample_uniform(config: &UniformTrafficConfig, rng: &mut StdRng) -> anyhow::Result<RequestShape> {
-    Ok(RequestShape {
-        routing_key_index: sample_optional_index(config.routing_keys, rng),
-        cache_affinity_key_index: sample_optional_index(config.cache_affinity_keys, rng),
-        input_tokens: sample_tokens(&config.input_tokens, rng)?,
-        output_tokens: sample_tokens(&config.output_tokens, rng)?,
-        backend_behavior_class: "uniform".to_string(),
-    })
-}
-
-fn sample_hotset(config: &HotsetTrafficConfig, rng: &mut StdRng) -> anyhow::Result<RequestShape> {
+fn sample_hotset_request(
+    config: &HotsetTrafficConfig,
+    rng: &mut StdRng,
+) -> anyhow::Result<RequestShape> {
     ensure!(
         (0.0..=1.0).contains(&config.hotset_fraction),
         "hotset_fraction must be in [0, 1]"
@@ -161,131 +180,37 @@ fn sample_hotset(config: &HotsetTrafficConfig, rng: &mut StdRng) -> anyhow::Resu
         (0.0..=1.0).contains(&config.hotset_share),
         "hotset_share must be in [0, 1]"
     );
-    let hotset_size = derive_hotset_size(config.cache_affinity_keys, config.hotset_fraction);
-    let use_hotset = choose_hotset_request(hotset_size, config.hotset_share, rng);
-    let cache_affinity_key_index =
-        sample_hotset_cache_affinity_key(config.cache_affinity_keys, hotset_size, use_hotset, rng);
-
+    let hotset_size = if config.cache_affinity_keys == 0 || config.hotset_fraction == 0.0 {
+        0
+    } else {
+        (((config.cache_affinity_keys as f64) * config.hotset_fraction).round() as usize)
+            .max(1)
+            .min(config.cache_affinity_keys)
+    };
+    let use_hotset = hotset_size > 0 && rng.random::<f64>() < config.hotset_share;
+    let cache_affinity_key_index = sample_optional_index(
+        if use_hotset {
+            hotset_size
+        } else {
+            config.cache_affinity_keys
+        },
+        rng,
+    );
+    let behavior = if use_hotset { "hot" } else { "cold" };
     Ok(RequestShape {
         routing_key_index: sample_optional_index(config.routing_keys, rng),
         cache_affinity_key_index,
         input_tokens: sample_tokens(&config.input_tokens, rng)?,
         output_tokens: sample_tokens(&config.output_tokens, rng)?,
-        backend_behavior_class: if use_hotset {
-            "hot".to_string()
-        } else {
-            "cold".to_string()
-        },
+        backend_behavior_class: behavior,
     })
 }
 
-fn derive_hotset_size(cache_affinity_keys: usize, hotset_fraction: f64) -> usize {
-    if cache_affinity_keys == 0 || hotset_fraction == 0.0 {
-        return 0;
-    }
-    (((cache_affinity_keys as f64) * hotset_fraction).round() as usize)
-        .max(1)
-        .min(cache_affinity_keys)
-}
-
-fn choose_hotset_request(hotset_size: usize, hotset_share: f64, rng: &mut StdRng) -> bool {
-    hotset_size > 0 && rng.random::<f64>() < hotset_share
-}
-
-fn sample_hotset_cache_affinity_key(
-    cache_affinity_keys: usize,
-    hotset_size: usize,
-    use_hotset: bool,
-    rng: &mut StdRng,
-) -> Option<usize> {
-    if cache_affinity_keys == 0 {
-        return None;
-    }
-    let range_end = if use_hotset {
-        hotset_size
-    } else {
-        cache_affinity_keys
-    };
-    Some(rng.random_range(0..range_end))
-}
-
-fn sample_bursty(config: &BurstyTrafficConfig, rng: &mut StdRng) -> anyhow::Result<RequestShape> {
-    Ok(RequestShape {
-        routing_key_index: sample_optional_index(config.routing_keys, rng),
-        cache_affinity_key_index: sample_optional_index(config.cache_affinity_keys, rng),
-        input_tokens: sample_tokens(&config.input_tokens, rng)?,
-        output_tokens: sample_tokens(&config.output_tokens, rng)?,
-        backend_behavior_class: "bursty".to_string(),
-    })
-}
-
-fn sample_stair_step(
-    config: &StairStepTrafficConfig,
-    rng: &mut StdRng,
-) -> anyhow::Result<RequestShape> {
-    Ok(RequestShape {
-        routing_key_index: sample_optional_index(config.routing_keys, rng),
-        cache_affinity_key_index: sample_optional_index(config.cache_affinity_keys, rng),
-        input_tokens: sample_tokens(&config.input_tokens, rng)?,
-        output_tokens: sample_tokens(&config.output_tokens, rng)?,
-        backend_behavior_class: "stair_step".to_string(),
-    })
-}
-
-fn sample_mixed_size(
-    config: &MixedSizeTrafficConfig,
-    rng: &mut StdRng,
-) -> anyhow::Result<RequestShape> {
-    let selection = MixedSizeSelection::choose(config.small_share, rng);
-    let class = selection.class(config);
-    Ok(RequestShape {
-        routing_key_index: sample_optional_index(config.routing_keys, rng),
-        cache_affinity_key_index: sample_optional_index(config.cache_affinity_keys, rng),
-        input_tokens: sample_class_tokens(class, true, rng)?,
-        output_tokens: sample_class_tokens(class, false, rng)?,
-        backend_behavior_class: selection.behavior_class().to_string(),
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MixedSizeSelection {
-    Small,
-    Large,
-}
-
-impl MixedSizeSelection {
-    fn choose(small_share: f64, rng: &mut StdRng) -> Self {
-        if rng.random::<f64>() < small_share {
-            Self::Small
-        } else {
-            Self::Large
-        }
-    }
-
-    fn class(self, config: &MixedSizeTrafficConfig) -> &MixedSizeClassConfig {
-        match self {
-            Self::Small => &config.small,
-            Self::Large => &config.large,
-        }
-    }
-
-    fn behavior_class(self) -> &'static str {
-        match self {
-            Self::Small => "small",
-            Self::Large => "large",
-        }
-    }
-}
-
-fn sample_prefix_reuse(
+fn sample_prefix_reuse_request(
     config: &PrefixReuseTrafficConfig,
     prior_prefix_tokens: &mut HashMap<usize, u64>,
     rng: &mut StdRng,
 ) -> anyhow::Result<RequestShape> {
-    ensure!(
-        config.cache_affinity_keys > 0,
-        "prefix_reuse cache_affinity_keys must be > 0"
-    );
     let cache_affinity_key_index = rng.random_range(0..config.cache_affinity_keys);
     let input_tokens = match prior_prefix_tokens.get(&cache_affinity_key_index).copied() {
         Some(previous) => previous
@@ -299,20 +224,8 @@ fn sample_prefix_reuse(
         cache_affinity_key_index: Some(cache_affinity_key_index),
         input_tokens,
         output_tokens: sample_tokens(&config.output_tokens, rng)?,
-        backend_behavior_class: "prefix_reuse".to_string(),
+        backend_behavior_class: "prefix_reuse",
     })
-}
-
-fn sample_class_tokens(
-    class: &MixedSizeClassConfig,
-    input: bool,
-    rng: &mut StdRng,
-) -> anyhow::Result<u64> {
-    if input {
-        sample_tokens(&class.input_tokens, rng)
-    } else {
-        sample_tokens(&class.output_tokens, rng)
-    }
 }
 
 fn next_arrival_ms(
@@ -370,7 +283,9 @@ fn sample_tokens(distribution: &TokenDistributionConfig, rng: &mut StdRng) -> an
         } => {
             ensure!(*mean > 0.0, "lognormal mean must be > 0");
             ensure!(*sigma > 0.0, "lognormal sigma must be > 0");
-            let z = sample_standard_normal(rng);
+            let u1 = unit_open_interval(rng);
+            let u2 = unit_open_interval(rng);
+            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
             let value = ((*mean).ln() + (*sigma * z)).exp();
             // Token counts are discrete request work units; unclamped lognormal tails can round to 0.
             let mut sampled = value.round().max(1.0) as u64;
@@ -386,21 +301,11 @@ fn sample_tokens(distribution: &TokenDistributionConfig, rng: &mut StdRng) -> an
 }
 
 fn sample_optional_index(cardinality: usize, rng: &mut StdRng) -> Option<usize> {
-    if cardinality == 0 {
-        None
-    } else {
-        Some(rng.random_range(0..cardinality))
-    }
+    (cardinality > 0).then(|| rng.random_range(0..cardinality))
 }
 
 fn make_optional_key(prefix: &str, index: Option<usize>) -> Option<String> {
     index.map(|index| format!("{prefix}-{index:04}"))
-}
-
-fn sample_standard_normal(rng: &mut StdRng) -> f64 {
-    let u1 = unit_open_interval(rng);
-    let u2 = unit_open_interval(rng);
-    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
 }
 
 fn unit_open_interval(rng: &mut StdRng) -> f64 {
@@ -410,20 +315,6 @@ fn unit_open_interval(rng: &mut StdRng) -> f64 {
             return value;
         }
     }
-}
-
-fn sanitize_name(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    sanitized.trim_matches('-').to_string()
 }
 
 pub fn write_manifest_json(path: &std::path::Path, manifest: &Manifest) -> anyhow::Result<()> {
@@ -450,7 +341,7 @@ mod tests {
             seed: Some(7),
             request_count: 10,
             max_concurrency: 2,
-            tunnel_protocol: stargate_protocol::TunnelTransportProtocol::Custom,
+            tunnel_protocol: stargate_protocol::TunnelTransportProtocol::RawQuic,
             stargates: StargateConfig { count: 1 },
             backends: BackendConfig {
                 count: 3,
@@ -498,6 +389,25 @@ mod tests {
         let json_a = serde_json::to_string(&manifest_a).expect("json should serialize");
         let json_b = serde_json::to_string(&manifest_b).expect("json should serialize");
         assert_eq!(json_a, json_b);
+        assert_eq!(
+            manifest_a
+                .requests
+                .iter()
+                .take(3)
+                .map(|request| (
+                    request.scheduled_offset_ms,
+                    request.routing_key.as_deref(),
+                    request.cache_affinity_key.as_deref(),
+                    request.input_tokens,
+                    request.output_tokens,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, Some("rk-0000"), Some("cak-0000"), 131, 22),
+                (61, Some("rk-0001"), Some("cak-0001"), 196, 23),
+                (197, Some("rk-0000"), Some("cak-0000"), 173, 33),
+            ]
+        );
     }
 
     #[test]
@@ -545,15 +455,7 @@ mod tests {
     fn zero_hotset_fraction_generates_only_cold_requests() {
         let mut config = base_config();
         config.request_count = 8;
-        config.traffic_pattern = TrafficPatternConfig::ZipfHotset(HotsetTrafficConfig {
-            routing_keys: 0,
-            cache_affinity_keys: 4,
-            hotset_fraction: 0.0,
-            hotset_share: 1.0,
-            input_tokens: TokenDistributionConfig::Constant { value: 128 },
-            output_tokens: TokenDistributionConfig::Constant { value: 32 },
-            arrival: ArrivalPatternConfig::Constant { interval_ms: 1 },
-        });
+        config.traffic_pattern = hotset_pattern(4, 0.0);
 
         let manifest = generate_manifest(&config, None).expect("manifest should generate");
 
@@ -569,15 +471,7 @@ mod tests {
     fn zero_hotset_keys_generate_only_cold_requests_without_cache_keys() {
         let mut config = base_config();
         config.request_count = 8;
-        config.traffic_pattern = TrafficPatternConfig::ZipfHotset(HotsetTrafficConfig {
-            routing_keys: 0,
-            cache_affinity_keys: 0,
-            hotset_fraction: 1.0,
-            hotset_share: 1.0,
-            input_tokens: TokenDistributionConfig::Constant { value: 128 },
-            output_tokens: TokenDistributionConfig::Constant { value: 32 },
-            arrival: ArrivalPatternConfig::Constant { interval_ms: 1 },
-        });
+        config.traffic_pattern = hotset_pattern(0, 1.0);
 
         let manifest = generate_manifest(&config, None).expect("manifest should generate");
 
@@ -599,15 +493,7 @@ mod tests {
     fn tiny_positive_hotset_fraction_keeps_one_hot_key() {
         let mut config = base_config();
         config.request_count = 8;
-        config.traffic_pattern = TrafficPatternConfig::ZipfHotset(HotsetTrafficConfig {
-            routing_keys: 0,
-            cache_affinity_keys: 8,
-            hotset_fraction: 0.01,
-            hotset_share: 1.0,
-            input_tokens: TokenDistributionConfig::Constant { value: 128 },
-            output_tokens: TokenDistributionConfig::Constant { value: 32 },
-            arrival: ArrivalPatternConfig::Constant { interval_ms: 1 },
-        });
+        config.traffic_pattern = hotset_pattern(8, 0.01);
 
         let manifest = generate_manifest(&config, None).expect("manifest should generate");
 
@@ -676,6 +562,18 @@ mod tests {
                 output_tokens: TokenDistributionConfig::Constant { value: 100 },
             },
             small_share,
+        })
+    }
+
+    fn hotset_pattern(cache_affinity_keys: usize, hotset_fraction: f64) -> TrafficPatternConfig {
+        TrafficPatternConfig::ZipfHotset(HotsetTrafficConfig {
+            routing_keys: 0,
+            cache_affinity_keys,
+            hotset_fraction,
+            hotset_share: 1.0,
+            input_tokens: TokenDistributionConfig::Constant { value: 128 },
+            output_tokens: TokenDistributionConfig::Constant { value: 32 },
+            arrival: ArrivalPatternConfig::Constant { interval_ms: 1 },
         })
     }
 }

@@ -17,16 +17,11 @@ use reqwest::header::HeaderMap;
 
 use crate::runtime_state::PylonRuntimeState;
 
-use super::embeddings::{EmbeddingsRequestObserver, embedding_items_from_request_body};
+use super::embeddings::embedding_items_from_request_body;
 use super::{RequestObservationEndpoint, RequestObserver, RequiredTunnelHeaders};
 
 pub(crate) struct TunnelRequestObserver {
-    kind: TunnelRequestObserverKind,
-}
-
-enum TunnelRequestObserverKind {
-    Generation(RequestObserver),
-    Embeddings(EmbeddingsRequestObserver),
+    observer: RequestObserver,
 }
 
 impl TunnelRequestObserver {
@@ -35,33 +30,23 @@ impl TunnelRequestObserver {
         required: RequiredTunnelHeaders,
         runtime_state: PylonRuntimeState,
     ) -> Self {
-        let kind =
-            match endpoint {
-                RequestObservationEndpoint::ChatCompletions
-                | RequestObservationEndpoint::Responses => TunnelRequestObserverKind::Generation(
-                    RequestObserver::from_required(endpoint, required, runtime_state),
-                ),
-                RequestObservationEndpoint::Embeddings => TunnelRequestObserverKind::Embeddings(
-                    EmbeddingsRequestObserver::accepted(required, runtime_state),
-                ),
-            };
-        Self { kind }
-    }
-
-    pub(crate) fn is_streaming(&self) -> bool {
-        matches!(self.kind, TunnelRequestObserverKind::Generation(_))
-    }
-
-    pub(crate) fn generation_mut(&mut self) -> Option<&mut RequestObserver> {
-        match &mut self.kind {
-            TunnelRequestObserverKind::Generation(observer) => Some(observer),
-            TunnelRequestObserverKind::Embeddings(_) => None,
+        Self {
+            observer: RequestObserver::from_required(endpoint, required, runtime_state),
         }
     }
 
+    pub(crate) fn is_streaming(&self) -> bool {
+        self.observer.endpoint != RequestObservationEndpoint::Embeddings
+    }
+
+    pub(crate) fn generation_mut(&mut self) -> Option<&mut RequestObserver> {
+        self.is_streaming().then_some(&mut self.observer)
+    }
+
     pub(crate) fn observe_request_body(&mut self, body_bytes: &[u8]) {
-        if let TunnelRequestObserverKind::Embeddings(observer) = &mut self.kind {
-            observer.update_embedding_items(embedding_items_from_request_body(body_bytes));
+        if !self.is_streaming() {
+            self.observer
+                .update_embedding_items(embedding_items_from_request_body(body_bytes));
         }
     }
 
@@ -70,35 +55,20 @@ impl TunnelRequestObserver {
         response_headers: &HeaderMap,
         status: u16,
     ) {
-        match &mut self.kind {
-            TunnelRequestObserverKind::Generation(observer) => {
-                observer.on_upstream_response_headers(response_headers, status);
-            }
-            TunnelRequestObserverKind::Embeddings(observer) => {
-                observer.on_upstream_response_headers(status);
-            }
-        }
+        self.observer
+            .on_upstream_response_headers(response_headers, status);
     }
 
     pub(crate) fn finish(&mut self) {
-        match &mut self.kind {
-            TunnelRequestObserverKind::Generation(observer) => observer.finish(),
-            TunnelRequestObserverKind::Embeddings(observer) => observer.finish(),
-        }
+        self.observer.finish();
     }
 
     pub(crate) fn fail(&mut self) {
-        match &mut self.kind {
-            TunnelRequestObserverKind::Generation(observer) => observer.fail(),
-            TunnelRequestObserverKind::Embeddings(observer) => observer.fail(),
-        }
+        self.observer.fail();
     }
 
     fn is_terminal(&self) -> bool {
-        match &self.kind {
-            TunnelRequestObserverKind::Generation(observer) => observer.is_terminal(),
-            TunnelRequestObserverKind::Embeddings(observer) => observer.is_terminal(),
-        }
+        self.observer.is_terminal()
     }
 }
 

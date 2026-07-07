@@ -38,25 +38,15 @@ impl PendingClusterReservation {
     pub(super) fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
-
-    fn cancel(&self) {
-        self.active.store(false, Ordering::Release);
-    }
 }
 
+// Cancellation is explicit because a successful attempt remains pending until its heartbeat.
 #[derive(Debug)]
-pub(crate) struct RoutingReservation {
-    // Cancellation is explicit because a successful attempt remains pending until its heartbeat.
-    pending: Arc<PendingClusterReservation>,
-}
+pub(crate) struct RoutingReservation(pub(super) Arc<PendingClusterReservation>);
 
 impl RoutingReservation {
-    pub(super) fn new(pending: Arc<PendingClusterReservation>) -> Self {
-        Self { pending }
-    }
-
     pub(crate) fn release(self) {
-        self.pending.cancel();
+        self.0.active.store(false, Ordering::Release);
     }
 }
 
@@ -83,11 +73,10 @@ pub(super) fn update_reserved_priority_queue_time(
         .or_insert(pre_reservation_estimate_ms);
     *estimate = estimate.saturating_add(delta_ms);
     for (candidate_priority, estimate_ms) in &mut stats.queue_time_estimate_ms_by_priority {
-        if *candidate_priority <= priority {
-            continue;
+        if *candidate_priority > priority {
+            // Queue-time estimates are advisory routing stats; saturate rather than wrap.
+            *estimate_ms = estimate_ms.saturating_add(delta_ms);
         }
-        // Queue-time estimates are advisory routing stats; saturate rather than wrap on extreme input.
-        *estimate_ms = estimate_ms.saturating_add(delta_ms);
     }
 }
 

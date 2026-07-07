@@ -10,7 +10,7 @@ cluster.
 ## Identities
 
 - `inference_server_id`: concrete pylon/backend registration id. It remains the
-  QUIC pool key, response header, and compatibility metric label.
+  QUIC pool key, response header, and metric label.
 - `cluster_id`: logical hardware/capacity domain. Empty means
   `cluster_id == inference_server_id`.
 - routing target: `(routing_key, model_id)`.
@@ -43,10 +43,9 @@ replacement target instead of publishing into detached state.
 
 Overlapping registrations in one `(routing_key, cluster_id)` scope share one
 registration-cluster generation. It retires at the true zero-registration
-boundary and owns that cluster lifetime's coordinated calibration. Routed
-cleanup matches exact registration and cluster-generation identity, so delayed
-cleanup cannot remove a same-ID replacement or mix a fresh cluster lifetime
-with retired routing state.
+boundary. Routed cleanup matches exact registration and cluster-generation
+identity, so delayed cleanup cannot remove a same-ID replacement or mix a
+fresh cluster lifetime with retired routing state.
 
 Proxy flow:
 
@@ -83,9 +82,20 @@ Cluster latest-wins fields:
 - `total_query_input_size`
 - `queue_time_estimate_ms_by_priority`
 
-Special case:
+- `last_mean_input_tps` is the sum of active backend reports.
 
-- `last_mean_input_tps = max(local_calibration_floor, sum(active runtime backend input TPS))`
+`RoutedClusterSnapshot.rtt` is the unweighted arithmetic mean of the latest
+forwarded `/health` RTT publication from every current active backend in the
+cluster. Each backend contributes exactly once. Inserting a backend, replacing
+its publication on heartbeat, or removing it recomputes the mean before load
+balancers read the snapshot. The calculation uses `Duration`'s nanosecond
+precision and truncates any fractional nanosecond toward zero without summing
+whole durations, so valid RTT inputs cannot overflow the aggregate.
+
+Every Pylon bootstraps its own input TPS before registration. Shared-hardware
+clusters use `--initial-input-tps` as a per-Pylon contribution; do not copy a
+cluster-wide total to every Pylon. Once startup completes, the Pylon registers
+the same authoritative runtime snapshot with every discovered Stargate.
 
 Latest-wins uses Stargate receive time and only active backend snapshots. If the
 source backend disappears, recompute from remaining active snapshots.
@@ -101,7 +111,9 @@ All algorithms choose from cluster snapshots.
 - `pulsar`: hashes by `cluster_id`, not `backend_id`.
 
 Backend selection inside a chosen cluster is independent of the algorithm and
-uses per-cluster round robin.
+uses per-cluster round robin. Load balancers consume the representative RTT
+from the shared cluster snapshot; they do not aggregate backend RTTs
+independently.
 
 ## Retries
 

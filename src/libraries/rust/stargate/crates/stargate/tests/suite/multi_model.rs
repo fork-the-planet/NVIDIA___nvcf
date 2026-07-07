@@ -16,12 +16,10 @@
 use std::time::Duration;
 
 use crate::common::{
-    init_crypto, make_stargate_runtime, start_dummy_inst, wait_for_routing, with_proxy_headers,
+    direct_registration_config, init_crypto, make_stargate_runtime, start_dummy_inst,
+    wait_for_routing, with_proxy_headers,
 };
-use pylon_lib::{
-    BringupConfig, InferenceServerRegistrationClient, InferenceServerRegistrationConfig,
-    OutputTokenParserFactory,
-};
+use pylon_lib::{InferenceServerRegistrationClient, PylonRuntimeState};
 use stargate_proto::pb::InferenceServerStatus;
 
 #[tokio::test]
@@ -35,29 +33,16 @@ async fn multi_model_single_instance() {
 
     let mut reg_client = InferenceServerRegistrationClient::default();
     reg_client
-        .start(InferenceServerRegistrationConfig {
-            seeds: vec![grpc_addr.to_string()],
-            inference_server_id: "mm-inst".to_string(),
-            cluster_id: String::new(),
-            inference_server_url: quic_url,
-            upstream_http_base_url: Some(format!("http://{inst_addr}")),
-            min_update_interval: Duration::from_millis(100),
-            reverse_tunnel: false,
-            bringup: BringupConfig::default(),
-            output_token_parser_factory: OutputTokenParserFactory::vllm(),
-            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-            metrics: None,
-            retry: pylon_lib::PylonRetryConfig::default(),
-            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-            runtime_state: pylon_lib::PylonRuntimeState::new(
+        .start(direct_registration_config(
+            vec![grpc_addr.to_string()],
+            "mm-inst",
+            quic_url,
+            format!("http://{inst_addr}"),
+            PylonRuntimeState::new(
                 InferenceServerStatus::Active,
                 &["model-alpha".to_string(), "model-beta".to_string()],
             ),
-            auth_token_provider: None,
-            tls_cert_pem: None,
-            quic_insecure: true,
-            tunnel_protocol: Default::default(),
-        })
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "model-alpha", Duration::from_secs(5)).await;
@@ -111,56 +96,24 @@ async fn multiple_instances_different_models() {
 
     let mut reg_client_x = InferenceServerRegistrationClient::default();
     reg_client_x
-        .start(InferenceServerRegistrationConfig {
-            seeds: vec![grpc_addr.to_string()],
-            inference_server_id: "inst-x".to_string(),
-            cluster_id: String::new(),
-            inference_server_url: quic_url_x,
-            upstream_http_base_url: Some(format!("http://{inst_addr_x}")),
-            min_update_interval: Duration::from_millis(100),
-            reverse_tunnel: false,
-            bringup: BringupConfig::default(),
-            output_token_parser_factory: OutputTokenParserFactory::vllm(),
-            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-            metrics: None,
-            retry: pylon_lib::PylonRetryConfig::default(),
-            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-            runtime_state: pylon_lib::PylonRuntimeState::new(
-                InferenceServerStatus::Active,
-                &["model-x".to_string()],
-            ),
-            auth_token_provider: None,
-            tls_cert_pem: None,
-            quic_insecure: true,
-            tunnel_protocol: Default::default(),
-        })
+        .start(direct_registration_config(
+            vec![grpc_addr.to_string()],
+            "inst-x",
+            quic_url_x,
+            format!("http://{inst_addr_x}"),
+            PylonRuntimeState::new(InferenceServerStatus::Active, &["model-x".to_string()]),
+        ))
         .expect("registration failed");
 
     let mut reg_client_y = InferenceServerRegistrationClient::default();
     reg_client_y
-        .start(InferenceServerRegistrationConfig {
-            seeds: vec![grpc_addr.to_string()],
-            inference_server_id: "inst-y".to_string(),
-            cluster_id: String::new(),
-            inference_server_url: quic_url_y,
-            upstream_http_base_url: Some(format!("http://{inst_addr_y}")),
-            min_update_interval: Duration::from_millis(100),
-            reverse_tunnel: false,
-            bringup: BringupConfig::default(),
-            output_token_parser_factory: OutputTokenParserFactory::vllm(),
-            request_quality_monitor: pylon_lib::RequestQualityMonitorConfig::default(),
-            metrics: None,
-            retry: pylon_lib::PylonRetryConfig::default(),
-            queue_mismatch_retry: pylon_lib::PylonQueueMismatchRetryConfig::default(),
-            runtime_state: pylon_lib::PylonRuntimeState::new(
-                InferenceServerStatus::Active,
-                &["model-y".to_string()],
-            ),
-            auth_token_provider: None,
-            tls_cert_pem: None,
-            quic_insecure: true,
-            tunnel_protocol: Default::default(),
-        })
+        .start(direct_registration_config(
+            vec![grpc_addr.to_string()],
+            "inst-y",
+            quic_url_y,
+            format!("http://{inst_addr_y}"),
+            PylonRuntimeState::new(InferenceServerStatus::Active, &["model-y".to_string()]),
+        ))
         .expect("registration failed");
 
     wait_for_routing(http_addr, "model-x", Duration::from_secs(5)).await;

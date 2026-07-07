@@ -25,7 +25,7 @@ use super::{
 };
 
 #[cfg(test)]
-use super::{SelectedCandidateForTest, SelectedClusterForTest};
+use super::tests::{SelectedCandidateForTest, SelectedClusterForTest};
 
 struct LoadBalancerAlgorithmConfigSet {
     configured: LoadBalancerDefinition,
@@ -53,14 +53,6 @@ pub struct LoadBalancerAlgorithmResolution {
 impl LoadBalancerAlgorithmResolution {
     pub fn config(&self) -> &LoadBalancerAlgorithmConfig {
         self.definition.config()
-    }
-
-    fn effective_algorithm(&self) -> LoadBalancerAlgorithm {
-        self.config().algorithm()
-    }
-
-    fn requested_algorithm(&self) -> Option<String> {
-        self.requested_algorithm.clone()
     }
 }
 
@@ -194,8 +186,8 @@ impl LoadBalancerRouter {
         }
 
         let lb = target_state.load_balancer(&resolution.definition);
-        let effective_algorithm = resolution.effective_algorithm();
-        let requested_algorithm = resolution.requested_algorithm();
+        let effective_algorithm = resolution.config().algorithm();
+        let requested_algorithm = resolution.requested_algorithm.clone();
 
         lb.choose_candidate(request, candidates)
             .map(|choice| LoadBalancerCandidateSelection {

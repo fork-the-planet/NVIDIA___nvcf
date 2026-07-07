@@ -106,12 +106,16 @@ counter-derived output window.
 If request stats go stale, volatile output TPS is cleared. Sticky input TPS
 stays until a later valid sample replaces it.
 
-Shared clusters sum backend-local live load, union labels, and keep the
-assigning Stargate's calibration floor. Effective input capacity is:
+Shared clusters sum backend-local live load and union labels. Effective input
+capacity is:
 
 ```text
-max(local_calibration_floor, sum(runtime_reports))
+sum(active_runtime_reports)
 ```
+
+Before registration, Pylon bootstraps each model's input-TPS distribution from
+exactly one source: local calibration or `--initial-input-tps`. The initialized
+distribution is immediately ready and later valid runtime samples update it.
 
 Labels:
 

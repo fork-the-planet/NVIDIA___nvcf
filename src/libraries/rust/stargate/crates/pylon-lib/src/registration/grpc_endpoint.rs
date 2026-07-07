@@ -51,18 +51,32 @@ impl StargateGrpcEndpoint {
         &self.authority_addr
     }
 
-    fn dial_endpoint(&self) -> String {
+    pub(super) fn dial_endpoint(&self) -> String {
         normalize_addr(&self.dial_addr)
     }
 
-    fn authority_endpoint(&self) -> String {
+    pub(super) fn authority_endpoint(&self) -> String {
         let dial_endpoint = self.dial_endpoint();
         let default_scheme = endpoint_scheme(&dial_endpoint).unwrap_or("http");
         normalize_addr_with_default_scheme(&self.authority_addr, default_scheme)
     }
 
-    fn uses_authority_override(&self) -> bool {
+    pub(super) fn uses_authority_override(&self) -> bool {
         self.dial_endpoint() != self.authority_endpoint()
+    }
+
+    pub(super) fn channel_endpoint(&self) -> anyhow::Result<Endpoint> {
+        let dial_endpoint = self.dial_endpoint();
+        let authority_endpoint = self.authority_endpoint();
+        let mut endpoint = Channel::from_shared(dial_endpoint.clone())
+            .context("invalid stargate gRPC dial endpoint")?;
+        if dial_endpoint != authority_endpoint {
+            let origin: http::Uri = authority_endpoint
+                .parse()
+                .context("invalid stargate gRPC authority endpoint")?;
+            endpoint = endpoint.origin(origin);
+        }
+        Ok(endpoint)
     }
 }
 
@@ -105,148 +119,81 @@ pub(super) fn stargate_grpc_debug_target(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct StargateGrpcConnectTarget {
-    pub(super) dial_endpoint: String,
-    pub(super) authority_endpoint: String,
-    pub(super) override_authority: bool,
-}
-
-impl StargateGrpcConnectTarget {
-    pub(super) fn direct(endpoint: String) -> Self {
-        Self {
-            dial_endpoint: endpoint.clone(),
-            authority_endpoint: endpoint,
-            override_authority: false,
-        }
-    }
-}
-
-pub(super) fn stargate_grpc_connect_target(
-    router_endpoint: &StargateGrpcEndpoint,
-) -> StargateGrpcConnectTarget {
-    StargateGrpcConnectTarget {
-        dial_endpoint: router_endpoint.dial_endpoint(),
-        authority_endpoint: router_endpoint.authority_endpoint(),
-        override_authority: router_endpoint.uses_authority_override(),
-    }
-}
-
-pub(super) fn stargate_grpc_channel_endpoint(
-    target: &StargateGrpcConnectTarget,
-) -> anyhow::Result<Endpoint> {
-    let mut endpoint = Channel::from_shared(target.dial_endpoint.clone())
-        .context("invalid stargate gRPC dial endpoint")?;
-    if target.override_authority {
-        let origin: http::Uri = target
-            .authority_endpoint
-            .parse()
-            .context("invalid stargate gRPC authority endpoint")?;
-        endpoint = endpoint.origin(origin);
-    }
-    Ok(endpoint)
-}
-
 pub(super) async fn connect_stargate_grpc_channel(
     router_endpoint: &StargateGrpcEndpoint,
     operation: &'static str,
 ) -> anyhow::Result<Channel> {
-    let target = stargate_grpc_connect_target(router_endpoint);
-    log_stargate_grpc_connect_attempt(&target, operation, "eager");
-    let channel = stargate_grpc_channel_endpoint(&target)?.connect().await?;
-    log_stargate_grpc_channel_connected(&target, operation);
+    log_stargate_grpc_connect_attempt(router_endpoint, operation, "eager");
+    let channel = router_endpoint.channel_endpoint()?.connect().await?;
+    log_stargate_grpc_channel_connected(router_endpoint, operation);
     Ok(channel)
 }
 
+macro_rules! log_stargate_grpc_target {
+    ($target:expr, $operation:expr, [$($extra:tt)*], $message:literal, $error_message:literal) => {{
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        let dial_endpoint = $target.dial_endpoint();
+        let authority_endpoint = $target.authority_endpoint();
+        let override_authority = dial_endpoint != authority_endpoint;
+        match (
+            stargate_grpc_debug_target(&dial_endpoint),
+            stargate_grpc_debug_target(&authority_endpoint),
+        ) {
+            (Ok(dial), Ok(authority)) => tracing::debug!(
+                transport = "grpc",
+                operation = $operation,
+                http_version = "h2",
+                endpoint = %dial.endpoint,
+                dial_endpoint = %dial.endpoint,
+                dial_scheme = %dial.scheme,
+                tls = dial.scheme == "https",
+                dial_host = %dial.host,
+                dial_port = dial.port,
+                authority_endpoint = %authority.endpoint,
+                authority_host = %authority.host,
+                authority_port = authority.port,
+                override_authority,
+                $($extra)*
+                $message
+            ),
+            (Err(error), _) | (_, Err(error)) => tracing::debug!(
+                transport = "grpc",
+                operation = $operation,
+                dial_endpoint = %dial_endpoint,
+                authority_endpoint = %authority_endpoint,
+                override_authority,
+                error = %error,
+                $($extra)*
+                $error_message
+            ),
+        }
+    }};
+}
+
 pub(super) fn log_stargate_grpc_connect_attempt(
-    target: &StargateGrpcConnectTarget,
+    target: &StargateGrpcEndpoint,
     operation: &'static str,
     connect_mode: &'static str,
 ) {
-    if !tracing::enabled!(tracing::Level::DEBUG) {
-        return;
-    }
-
-    match (
-        stargate_grpc_debug_target(&target.dial_endpoint),
-        stargate_grpc_debug_target(&target.authority_endpoint),
-    ) {
-        (Ok(dial), Ok(authority)) => {
-            tracing::debug!(
-                transport = "grpc",
-                operation,
-                connect_mode,
-                http_version = "h2",
-                endpoint = %dial.endpoint,
-                dial_endpoint = %dial.endpoint,
-                dial_scheme = %dial.scheme,
-                tls = dial.scheme == "https",
-                dial_host = %dial.host,
-                dial_port = dial.port,
-                authority_endpoint = %authority.endpoint,
-                authority_host = %authority.host,
-                authority_port = authority.port,
-                override_authority = target.override_authority,
-                "attempting Stargate gRPC connection"
-            );
-        }
-        (Err(error), _) | (_, Err(error)) => {
-            tracing::debug!(
-                transport = "grpc",
-                operation,
-                connect_mode,
-                dial_endpoint = %target.dial_endpoint,
-                authority_endpoint = %target.authority_endpoint,
-                override_authority = target.override_authority,
-                error = %error,
-                "could not parse Stargate gRPC endpoint for connection debug logging"
-            );
-        }
-    }
+    log_stargate_grpc_target!(
+        target,
+        operation,
+        [connect_mode,],
+        "attempting Stargate gRPC connection",
+        "could not parse Stargate gRPC endpoint for connection debug logging"
+    );
 }
 
-fn log_stargate_grpc_channel_connected(
-    target: &StargateGrpcConnectTarget,
-    operation: &'static str,
-) {
-    if !tracing::enabled!(tracing::Level::DEBUG) {
-        return;
-    }
-
-    match (
-        stargate_grpc_debug_target(&target.dial_endpoint),
-        stargate_grpc_debug_target(&target.authority_endpoint),
-    ) {
-        (Ok(dial), Ok(authority)) => {
-            tracing::debug!(
-                transport = "grpc",
-                operation,
-                http_version = "h2",
-                endpoint = %dial.endpoint,
-                dial_endpoint = %dial.endpoint,
-                dial_scheme = %dial.scheme,
-                tls = dial.scheme == "https",
-                dial_host = %dial.host,
-                dial_port = dial.port,
-                authority_endpoint = %authority.endpoint,
-                authority_host = %authority.host,
-                authority_port = authority.port,
-                override_authority = target.override_authority,
-                "Stargate gRPC channel connected"
-            );
-        }
-        (Err(error), _) | (_, Err(error)) => {
-            tracing::debug!(
-                transport = "grpc",
-                operation,
-                dial_endpoint = %target.dial_endpoint,
-                authority_endpoint = %target.authority_endpoint,
-                override_authority = target.override_authority,
-                error = %error,
-                "Stargate gRPC channel connected but endpoint metadata could not be parsed"
-            );
-        }
-    }
+fn log_stargate_grpc_channel_connected(target: &StargateGrpcEndpoint, operation: &'static str) {
+    log_stargate_grpc_target!(
+        target,
+        operation,
+        [],
+        "Stargate gRPC channel connected",
+        "Stargate gRPC channel connected but endpoint metadata could not be parsed"
+    );
 }
 
 fn normalize_addr_with_default_scheme(addr: &str, default_scheme: &str) -> String {

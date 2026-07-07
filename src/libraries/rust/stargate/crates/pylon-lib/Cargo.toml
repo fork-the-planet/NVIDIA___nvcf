@@ -61,8 +61,8 @@ stargate-runtime = { workspace = true }
 stargate-telemetry = { workspace = true }
 bytes = { workspace = true }
 url = { workspace = true }
-rustls-pemfile = { workspace = true }
 stargate-tls = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
+use axum::http::{HeaderMap, HeaderValue, Method};
 use quinn::{Connection, Endpoint};
 use tracing::info_span;
 use url::Url;
@@ -32,9 +32,9 @@ use crate::routing_state::RegistrationGeneration;
 
 use super::body::OpenStreamingRequest;
 use super::connection::{TunnelConnection, TunnelConnectionSet};
-use super::custom::CustomConnectionHandle;
 use super::endpoint::build_client_config;
 use super::http3::build_h3_client_connection;
+use super::raw_quic::RawQuicConnectionHandle;
 use super::request::OpenTunnelRequest;
 use super::webtransport::build_webtransport_client_connection;
 use super::{QuicTunnelConfig, StreamingResponse};
@@ -75,23 +75,22 @@ impl QuicHttpProxy {
 
     pub(crate) async fn connect_direct_registration(
         &self,
-        registration: &Arc<RegistrationGeneration>,
+        registration: &RegistrationGeneration,
     ) -> Result<()> {
         ensure!(
             !registration.reverse_tunnel(),
             "cannot connect directly for a reverse-tunnel registration"
         );
+        let tunnel_connections = registration.tunnel_connections();
         ensure!(
-            registration.tunnel_connections().is_active(),
+            tunnel_connections.is_active(),
             "registration generation ended before direct tunnel connected"
         );
         let connections = self
             .connect_direct_set(registration.inference_server_url())
             .await?;
         ensure!(
-            registration
-                .tunnel_connections()
-                .install_direct(connections),
+            tunnel_connections.install_direct(connections),
             "registration generation ended before direct tunnel connected"
         );
         Ok(())
@@ -117,55 +116,43 @@ impl QuicHttpProxy {
         let connect = endpoint
             .connect(addr, "stargate")
             .context("initiate quic connect failed")?;
-        let connection = match tokio::time::timeout(self.config.connect_timeout, connect).await {
-            Ok(result) => result.context("quic connect failed")?,
-            Err(_) => bail!("quic connect timed out"),
-        };
-        match tokio::time::timeout(
+        let connection = tokio::time::timeout(self.config.connect_timeout, connect)
+            .await
+            .map_err(|_| anyhow!("quic connect timed out"))?
+            .context("quic connect failed")?;
+        tokio::time::timeout(
             self.config.connect_timeout,
             self.build_direct_tunnel_connection(connection),
         )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => bail!("direct tunnel setup timed out"),
-        }
+        .map_err(|_| anyhow!("direct tunnel setup timed out"))?
     }
 
-    pub(crate) fn has_healthy_connection(
-        &self,
-        registration: &Arc<RegistrationGeneration>,
-    ) -> bool {
+    pub(crate) fn has_healthy_connection(&self, registration: &RegistrationGeneration) -> bool {
         registration.tunnel_connections().has_healthy_connection()
     }
 
     pub(crate) fn connection_set_needs_replenishment(
         &self,
-        registration: &Arc<RegistrationGeneration>,
+        registration: &RegistrationGeneration,
     ) -> bool {
         registration.tunnel_connections().needs_replenishment()
     }
 
     pub(crate) async fn health_check_rtt(
         &self,
-        registration: &Arc<RegistrationGeneration>,
+        registration: &RegistrationGeneration,
     ) -> Result<Duration> {
         let inference_server_id = registration.inference_server_id();
         let start = std::time::Instant::now();
         let mut headers = HeaderMap::new();
         headers.insert(
-            HeaderName::from_static(HEADER_REQUEST_ID),
+            HEADER_REQUEST_ID,
             HeaderValue::from_str(&format!("stargate-health-{inference_server_id}"))
                 .context("invalid health check request id")?,
         );
-        headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("stargate-health"),
-        );
-        headers.insert(
-            HeaderName::from_static(HEADER_INPUT_TOKENS),
-            HeaderValue::from_static("0"),
-        );
+        headers.insert(HEADER_MODEL, HeaderValue::from_static("stargate-health"));
+        headers.insert(HEADER_INPUT_TOKENS, HeaderValue::from_static("0"));
         let response = self
             .proxy_request_streaming(registration, Method::GET, "/health", headers, Body::empty())
             .await?;
@@ -184,8 +171,8 @@ impl QuicHttpProxy {
         connection: Connection,
     ) -> Result<TunnelConnection> {
         match self.config.tunnel_protocol {
-            TunnelTransportProtocol::Custom => Ok(TunnelConnection::Custom(
-                CustomConnectionHandle::new(connection),
+            TunnelTransportProtocol::RawQuic => Ok(TunnelConnection::RawQuic(
+                RawQuicConnectionHandle::new(connection),
             )),
             TunnelTransportProtocol::Http3 => Ok(TunnelConnection::Http3(
                 build_h3_client_connection(connection).await?,
@@ -198,7 +185,7 @@ impl QuicHttpProxy {
 
     pub(crate) async fn proxy_request_streaming(
         &self,
-        registration: &Arc<RegistrationGeneration>,
+        registration: &RegistrationGeneration,
         method: Method,
         path_and_query: &str,
         headers: HeaderMap,
@@ -212,7 +199,7 @@ impl QuicHttpProxy {
 
     pub(crate) async fn open_streaming_request(
         &self,
-        registration: &Arc<RegistrationGeneration>,
+        registration: &RegistrationGeneration,
         method: Method,
         path_and_query: &str,
         headers: HeaderMap,
@@ -221,36 +208,32 @@ impl QuicHttpProxy {
         let request =
             OpenTunnelRequest::new(method, path_and_query, headers, self.config.request_timeout);
 
-        let inference_server_id = registration.inference_server_id();
+        let server_id = registration.inference_server_id();
         let connection_set = registration
             .tunnel_connections()
             .connection_set()
             .ok_or_else(|| {
-                anyhow!(
-                    "no connection for exact inference server registration '{inference_server_id}'"
-                )
+                anyhow!("no connection for exact inference server registration '{server_id}'")
             })?;
-        let connection = connection_set.choose_healthy().ok_or_else(|| {
-            anyhow!("connection to inference server '{inference_server_id}' is closed")
-        })?;
+        let connection = connection_set
+            .choose_healthy()
+            .ok_or_else(|| anyhow!("connection to inference server '{server_id}' is closed"))?;
 
-        match tokio::time::timeout(
+        tokio::time::timeout(
             self.config.request_timeout,
             connection.open_streaming_request(request),
         )
         .await
-        {
-            Ok(inner) => inner,
-            Err(_) => bail!("quic request timed out"),
-        }
+        .map_err(|_| anyhow!("quic request timed out"))?
     }
 }
 
 pub(super) fn parse_quic_addr(target_url: &str) -> Result<SocketAddr> {
     let parsed_url = Url::parse(target_url).context("invalid quic target url")?;
-    if parsed_url.scheme() != "quic" {
-        bail!("target url is not quic scheme");
-    }
+    ensure!(
+        parsed_url.scheme() == "quic",
+        "target url is not quic scheme"
+    );
     let port = parsed_url
         .port_or_known_default()
         .ok_or_else(|| anyhow!("missing port in quic url"))?;

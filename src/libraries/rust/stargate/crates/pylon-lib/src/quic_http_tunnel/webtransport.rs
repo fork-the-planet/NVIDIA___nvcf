@@ -14,22 +14,14 @@
 // limitations under the License.
 
 use anyhow::{Context, Result, bail};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use stargate_protocol::tunnel_contract::{
-    HEADER_STARGATE_RETRY_REASON, HEADER_STARGATE_RETRYABLE, WEBTRANSPORT_TUNNEL_PATH,
-};
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
-
-use crate::queue_admission::QueueAdmissionDecision;
-use crate::stats::PylonMetrics;
+use reqwest::header::HeaderMap;
+use stargate_protocol::tunnel_contract::WEBTRANSPORT_TUNNEL_PATH;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use super::core::{
-    PylonRetryConfig, RETRY_REASON_LOCAL_CONNECT_FAILURE, ResponseBodyEventSink,
-    TunnelRequestParts, TunnelRequestTransport, TunnelServerApp, UpstreamRequestError,
-    WEBTRANSPORT_STREAM_HEADER_TIMEOUT, build_response_headers, forward_tunnel_request,
-    next_body_len, problem_details_body, queue_mismatch_body, queue_mismatch_response_headers,
-    record_local_connect_failure, request_body_buffer,
+    ResponseBodyEventSink, TunnelRequestParts, TunnelRequestTransport, TunnelServerApp,
+    WEBTRANSPORT_STREAM_HEADER_TIMEOUT, forward_tunnel_request, next_body_len, request_body_buffer,
+    serve_bidi_streams,
 };
 use super::http3::h3_error;
 
@@ -108,24 +100,16 @@ async fn handle_webtransport_established_connection(
         .map_err(h3_error)
         .context("send WebTransport CONNECT response")?;
 
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => break,
-            stream = connection.accept_bi() => {
-                let Ok((quinn_send, quinn_recv)) = stream else {
-                    break;
-                };
-                let app = app.clone();
-                task_tracker.spawn(async move {
-                    if let Err(error) =
-                        handle_webtransport_stream(quinn_send, quinn_recv, session_id, app).await
-                    {
-                        tracing::warn!(error = %error, "WebTransport tunnel stream failed");
-                    }
-                });
-            }
-        }
-    }
+    serve_bidi_streams(
+        (),
+        app,
+        connection,
+        shutdown,
+        task_tracker,
+        move |send, recv, app| handle_webtransport_stream(send, recv, session_id, app),
+        |error| tracing::warn!(%error, "WebTransport tunnel stream failed"),
+    )
+    .await;
     // Keep the CONNECT stream alive for the duration of the WebTransport loop.
     drop(connect_stream);
     Ok(())
@@ -154,45 +138,17 @@ impl TunnelRequestTransport for WebTransportTunnelTransport<'_> {
             .await
     }
 
-    async fn send_success(
+    async fn send_response_head(
         &mut self,
         status: reqwest::StatusCode,
-        response_headers: &HeaderMap,
-        retry: &PylonRetryConfig,
-        metrics: Option<&PylonMetrics>,
-        inference_server_id: &str,
+        headers: HeaderMap,
     ) -> Result<()> {
-        send_webtransport_success_headers(
+        stargate_protocol::write_webtransport_http_response_head(
             self.send_stream,
-            status,
-            response_headers,
-            retry,
-            metrics,
-            inference_server_id,
+            &webtransport_response_head(status, headers),
         )
         .await
-    }
-
-    async fn send_error(&mut self, status: reqwest::StatusCode, message: String) -> Result<()> {
-        send_webtransport_error_response(self.send_stream, status, message).await
-    }
-
-    async fn send_queue_mismatch(
-        &mut self,
-        app: &TunnelServerApp,
-        decision: &QueueAdmissionDecision,
-    ) -> Result<()> {
-        send_webtransport_queue_mismatch_response(self.send_stream, app, decision).await
-    }
-
-    async fn send_local_connect_failure(
-        &mut self,
-        app: &TunnelServerApp,
-        error: &UpstreamRequestError,
-        retryable: bool,
-    ) -> Result<()> {
-        send_webtransport_local_connect_failure_response(self.send_stream, app, error, retryable)
-            .await
+        .context("failed to send WebTransport response head")
     }
 
     async fn finish_response(&mut self) -> Result<()> {
@@ -293,149 +249,11 @@ async fn read_webtransport_request_body(
     Ok(body_bytes)
 }
 
-async fn send_webtransport_success_headers(
-    send_stream: &mut quinn::SendStream,
+fn webtransport_response_head(
     status: reqwest::StatusCode,
-    response_headers: &HeaderMap,
-    retry: &PylonRetryConfig,
-    metrics: Option<&PylonMetrics>,
-    inference_server_id: &str,
-) -> Result<()> {
-    let head = webtransport_success_head(
-        status,
-        response_headers,
-        retry,
-        metrics,
-        inference_server_id,
-    )?;
-    stargate_protocol::write_webtransport_http_response_head(send_stream, &head)
-        .await
-        .context("failed to send WebTransport response head")
-}
-
-fn webtransport_success_head(
-    status: reqwest::StatusCode,
-    response_headers: &HeaderMap,
-    retry: &PylonRetryConfig,
-    metrics: Option<&PylonMetrics>,
-    inference_server_id: &str,
-) -> Result<stargate_protocol::WebTransportHttpResponseHead> {
-    let headers = build_response_headers(
-        status,
-        response_headers,
-        retry,
-        metrics,
-        inference_server_id,
-        false,
-    )?;
-    Ok(stargate_protocol::WebTransportHttpResponseHead { status, headers })
-}
-
-async fn send_webtransport_error_response(
-    send_stream: &mut quinn::SendStream,
-    status: reqwest::StatusCode,
-    message: String,
-) -> Result<()> {
-    let head = webtransport_error_head(status);
-    stargate_protocol::write_webtransport_http_response_head(send_stream, &head)
-        .await
-        .context("failed to send WebTransport error response head")?;
-    let body = problem_details_body(status, message);
-    stargate_protocol::write_webtransport_http_body(send_stream, bytes::Bytes::from(body))
-        .await
-        .context("failed to send WebTransport error response body")?;
-    stargate_protocol::finish_webtransport_http_stream(send_stream)
-        .context("failed to finish WebTransport error response stream")?;
-    Ok(())
-}
-
-fn webtransport_error_head(
-    status: reqwest::StatusCode,
+    headers: HeaderMap,
 ) -> stargate_protocol::WebTransportHttpResponseHead {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/problem+json"),
-    );
     stargate_protocol::WebTransportHttpResponseHead { status, headers }
-}
-
-async fn send_webtransport_queue_mismatch_response(
-    send_stream: &mut quinn::SendStream,
-    app: &TunnelServerApp,
-    decision: &QueueAdmissionDecision,
-) -> Result<()> {
-    let head = webtransport_queue_mismatch_head(app, decision)?;
-    stargate_protocol::write_webtransport_http_response_head(send_stream, &head)
-        .await
-        .context("failed to send WebTransport queue mismatch response head")?;
-    stargate_protocol::write_webtransport_http_body(
-        send_stream,
-        bytes::Bytes::from(queue_mismatch_body(decision)),
-    )
-    .await
-    .context("failed to send WebTransport queue mismatch response body")?;
-    stargate_protocol::finish_webtransport_http_stream(send_stream)
-        .context("failed to finish WebTransport queue mismatch response")?;
-    Ok(())
-}
-
-fn webtransport_queue_mismatch_head(
-    app: &TunnelServerApp,
-    decision: &QueueAdmissionDecision,
-) -> Result<stargate_protocol::WebTransportHttpResponseHead> {
-    let headers = queue_mismatch_response_headers(app, decision, false)?;
-    Ok(stargate_protocol::WebTransportHttpResponseHead {
-        status: reqwest::StatusCode::TOO_MANY_REQUESTS,
-        headers,
-    })
-}
-
-async fn send_webtransport_local_connect_failure_response(
-    send_stream: &mut quinn::SendStream,
-    app: &TunnelServerApp,
-    error: &UpstreamRequestError,
-    retryable: bool,
-) -> Result<()> {
-    let (status, head) = webtransport_local_connect_failure_head(app, error, retryable);
-    stargate_protocol::write_webtransport_http_response_head(send_stream, &head)
-        .await
-        .context("failed to send WebTransport local connect failure response head")?;
-    let body = problem_details_body(status, "local upstream connection failed");
-    stargate_protocol::write_webtransport_http_body(send_stream, bytes::Bytes::from(body))
-        .await
-        .context("failed to send WebTransport local connect failure response body")?;
-    stargate_protocol::finish_webtransport_http_stream(send_stream)
-        .context("failed to finish WebTransport local connect failure response stream")?;
-    Ok(())
-}
-
-fn webtransport_local_connect_failure_head(
-    app: &TunnelServerApp,
-    error: &UpstreamRequestError,
-    retryable: bool,
-) -> (
-    reqwest::StatusCode,
-    stargate_protocol::WebTransportHttpResponseHead,
-) {
-    let status = record_local_connect_failure(app, error, retryable);
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/problem+json"),
-    );
-    headers.insert(
-        HeaderName::from_static(HEADER_STARGATE_RETRYABLE),
-        HeaderValue::from_static(if retryable { "true" } else { "false" }),
-    );
-    headers.insert(
-        HeaderName::from_static(HEADER_STARGATE_RETRY_REASON),
-        HeaderValue::from_static(RETRY_REASON_LOCAL_CONNECT_FAILURE),
-    );
-    (
-        status,
-        stargate_protocol::WebTransportHttpResponseHead { status, headers },
-    )
 }
 
 #[cfg(test)]
@@ -443,8 +261,17 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::output_token_parser::OutputTokenParserFactory;
-    use crate::queue_admission::PylonQueueMismatchRetryConfig;
+    use reqwest::header::HeaderValue;
+    use stargate_protocol::tunnel_contract::{
+        HEADER_STARGATE_RETRY_REASON, HEADER_STARGATE_RETRYABLE,
+    };
+
+    use super::super::core::{
+        PylonRetryConfig, RETRY_REASON_LOCAL_CONNECT_FAILURE, UpstreamRequestError,
+        build_response_headers, local_connect_failure_headers, problem_response_headers,
+        queue_mismatch_response_headers, record_local_connect_failure,
+    };
+    use crate::queue_admission::{PylonQueueMismatchRetryConfig, QueueAdmissionDecision};
     use crate::request_quality_monitor::RequestQualityMonitorConfig;
     use crate::runtime_state::PylonRuntimeState;
 
@@ -457,7 +284,6 @@ mod tests {
             max_sse_buffer_bytes: 1024,
             first_output_timeout: Duration::from_secs(1),
             output_chunk_timeout: Duration::from_secs(1),
-            output_token_parser_factory: OutputTokenParserFactory,
             runtime_state: PylonRuntimeState::default(),
             request_quality_monitor: RequestQualityMonitorConfig::default(),
             retry: PylonRetryConfig::default(),
@@ -495,14 +321,10 @@ mod tests {
         );
         upstream_headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("2"));
 
-        let head = webtransport_success_head(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            &upstream_headers,
-            &retry,
-            None,
-            "inst-a",
-        )
-        .expect("WebTransport success head should build");
+        let status = reqwest::StatusCode::TOO_MANY_REQUESTS;
+        let headers = build_response_headers(status, &upstream_headers, &retry, None, "inst-a")
+            .expect("WebTransport success headers should build");
+        let head = webtransport_response_head(status, headers);
 
         assert_eq!(head.status, reqwest::StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
@@ -521,7 +343,8 @@ mod tests {
 
     #[test]
     fn webtransport_error_head_uses_problem_json_status() {
-        let head = webtransport_error_head(reqwest::StatusCode::BAD_REQUEST);
+        let status = reqwest::StatusCode::BAD_REQUEST;
+        let head = webtransport_response_head(status, problem_response_headers());
 
         assert_eq!(head.status, reqwest::StatusCode::BAD_REQUEST);
         assert_eq!(
@@ -540,8 +363,10 @@ mod tests {
             retry_after_ms: Some(7),
         };
 
-        let head = webtransport_queue_mismatch_head(&app, &decision)
-            .expect("queue mismatch head should build");
+        let status = reqwest::StatusCode::TOO_MANY_REQUESTS;
+        let headers = queue_mismatch_response_headers(&app, &decision)
+            .expect("queue mismatch headers should build");
+        let head = webtransport_response_head(status, headers);
 
         assert_eq!(head.status, reqwest::StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
@@ -563,7 +388,8 @@ mod tests {
         let app = test_app();
         let error = UpstreamRequestError::Build(anyhow::anyhow!("cannot build"));
 
-        let (status, head) = webtransport_local_connect_failure_head(&app, &error, true);
+        let status = record_local_connect_failure(&app, &error, true);
+        let head = webtransport_response_head(status, local_connect_failure_headers(true));
 
         assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(head.status, reqwest::StatusCode::SERVICE_UNAVAILABLE);

@@ -7,6 +7,19 @@ Stargate is a control plane and HTTP router for inference servers.
 - Clients send OpenAI-compatible HTTP requests to Stargate.
 - Stargate forwards each request over an established QUIC tunnel to a selected pylon.
 
+Two backend connectivity configurations are first-class:
+
+- **Edge/direct:** Stargate and pylons share a network. Pylon listens on a
+  reachable QUIC address and Stargate connects directly. No reverse listener
+  or `stargate-k8s-router` is required.
+- **Cloud/reverse:** pylons cannot accept connections from Stargate. Each pylon
+  connects to a Stargate reverse listener, optionally through
+  `stargate-k8s-router` or a load balancer.
+
+Set the same `--backend-connectivity=direct|reverse` topology on Stargate and
+pylon. The [local quickstart](docs/getting-started/local-quickstart.md) uses the
+Edge/direct path.
+
 Use [docs/README.md](docs/README.md) as the docs entrypoint.
 Use [local quickstart](docs/getting-started/local-quickstart.md) to run the local stack.
 
@@ -15,6 +28,13 @@ For the local Kubernetes stack:
 ```bash
 make cluster-kind
 make tilt-up-kind
+```
+
+To render or apply the standalone Edge example instead:
+
+```bash
+kubectl kustomize kustomize/overlays/edge
+kubectl apply -k kustomize/overlays/edge
 ```
 
 Stopping the Make-managed Tilt process cleans up its Kubernetes resources,
@@ -46,7 +66,8 @@ load-balancer topology for production backend traffic.
 
 - `crates/stargate`: server binary
 - `crates/pylon` and `crates/pylon-lib`: sidecar CLI and library
-- `crates/stargate-k8s-router`: optional backend-facing router
+- `crates/stargate-k8s-router`: optional backend-facing gRPC, Raw QUIC, and
+  WebTransport router
 - `crates/proto`: protobuf API
 - `crates/protocol`: tunnel framing
 - `crates/mock-dynamo`: local OpenAI-style backend

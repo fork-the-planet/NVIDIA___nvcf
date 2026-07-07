@@ -19,10 +19,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use stargate_proto::pb::{InferenceServerModelRegistration, InferenceServerStatus, ModelStats};
 
-use crate::bringup::ModelBringupState;
 use crate::queue_admission::{
     LiveRequestState, PylonQueueMismatchRetryConfig, QueueAdmissionDecision, QueueModelSnapshot,
-    QueueTrackedRequestGuard, RequestObservationTransition,
+    QueueTrackedRequestGuard,
 };
 use crate::request_observer::{RequestObservation, RequiredTunnelHeaders};
 use crate::stats::PylonMetrics;
@@ -59,7 +58,7 @@ pub struct CurrentModelStats {
     pub stats_sources: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PylonRuntimeState {
     advertised: Arc<Mutex<AdvertisedRuntimeState>>,
     live_requests: LiveRequestState,
@@ -73,25 +72,30 @@ pub struct RequestObservationEvent {
     pub(crate) changed_model_ids: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct AdvertisedRuntimeState {
     base_status: InferenceServerStatus,
     models: HashMap<String, AdvertisedModelState>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct AdvertisedModelState {
     stats: CurrentModelStats,
-    bringup: ModelBringupState,
+    bringup_ready: bool,
 }
 
 impl PylonRuntimeState {
     pub fn new(initial_status: InferenceServerStatus, model_ids: &[String]) -> Self {
+        let models = model_ids
+            .iter()
+            .cloned()
+            .map(|model_id| (model_id, AdvertisedModelState::default()))
+            .collect();
         Self {
-            advertised: Arc::new(Mutex::new(AdvertisedRuntimeState::new(
-                initial_status,
-                model_ids,
-            ))),
+            advertised: Arc::new(Mutex::new(AdvertisedRuntimeState {
+                base_status: initial_status,
+                models,
+            })),
             live_requests: LiveRequestState::default(),
             metrics: None,
             observation_tx: None,
@@ -105,10 +109,10 @@ impl PylonRuntimeState {
         metrics: Option<Arc<PylonMetrics>>,
     ) -> (Self, flume::Receiver<RequestObservationEvent>) {
         let (observation_tx, observation_rx) = flume::bounded(observation_capacity);
-        let mut runtime_state = Self::new(initial_status, model_ids);
-        runtime_state.metrics = metrics;
-        runtime_state.observation_tx = Some(observation_tx);
-        (runtime_state, observation_rx)
+        let mut state = Self::new(initial_status, model_ids);
+        state.metrics = metrics;
+        state.observation_tx = Some(observation_tx);
+        (state, observation_rx)
     }
 
     pub fn set_status(&self, status: InferenceServerStatus) {
@@ -123,7 +127,7 @@ impl PylonRuntimeState {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        model_ids.sort();
+        model_ids.sort_unstable();
         model_ids
     }
 
@@ -132,14 +136,7 @@ impl PylonRuntimeState {
         self.live_requests
             .update_model_throughput(&model_id, stats.last_mean_input_tps);
         let mut advertised = self.advertised.lock();
-        advertised
-            .models
-            .entry(model_id)
-            .or_insert_with(|| AdvertisedModelState {
-                stats: CurrentModelStats::default(),
-                bringup: ModelBringupState::ConnectingUnavailable,
-            })
-            .stats = stats;
+        advertised.models.entry(model_id).or_default().stats = stats;
     }
 
     pub fn model_stats(&self, model_id: &str) -> Option<CurrentModelStats> {
@@ -150,46 +147,77 @@ impl PylonRuntimeState {
             .map(|model| model.stats.clone())
     }
 
-    pub(crate) fn set_model_bringup(
-        &self,
-        model_id: impl Into<String>,
-        bringup: ModelBringupState,
-    ) {
+    /// Marks every configured model ready for registration after the caller's
+    /// finite local startup protocol has completed.
+    pub fn mark_initial_bringup_complete(&self) {
+        let mut advertised = self.advertised.lock();
+        for model in advertised.models.values_mut() {
+            model.bringup_ready = true;
+        }
+    }
+
+    pub(crate) fn set_model_bringup_ready(&self, model_id: impl Into<String>, ready: bool) {
         let mut advertised = self.advertised.lock();
         advertised
             .models
             .entry(model_id.into())
-            .or_insert_with(|| AdvertisedModelState {
-                stats: CurrentModelStats::default(),
-                bringup: ModelBringupState::ConnectingUnavailable,
-            })
-            .bringup = bringup;
+            .or_default()
+            .bringup_ready = ready;
     }
 
     #[cfg(test)]
-    pub(crate) fn model_bringup(&self, model_id: &str) -> Option<ModelBringupState> {
+    pub(crate) fn model_bringup_ready(&self, model_id: &str) -> Option<bool> {
         self.advertised
             .lock()
             .models
             .get(model_id)
-            .map(|model| model.bringup)
+            .map(|model| model.bringup_ready)
     }
 
     pub(crate) fn advertised_models(&self) -> HashMap<String, InferenceServerModelRegistration> {
-        self.advertised.lock().advertised_models()
+        let advertised = self.advertised.lock();
+        advertised
+            .models
+            .iter()
+            .map(|(model_id, model)| {
+                let stats = &model.stats;
+                let registration = InferenceServerModelRegistration {
+                    stats: Some(ModelStats {
+                        last_mean_input_tps: stats.last_mean_input_tps,
+                        output_tps: stats.output_tps,
+                        max_output_tps: stats.max_output_tps,
+                        queue_size: stats.queue_size,
+                        queued_input_size: stats.queued_input_size,
+                        kv_cache_capacity_tokens: stats.kv_cache_capacity_tokens,
+                        kv_cache_used_tokens: stats.kv_cache_used_tokens,
+                        kv_cache_free_tokens: stats.kv_cache_free_tokens,
+                        num_running_queries: stats.num_running_queries,
+                        max_engine_concurrency: stats.max_engine_concurrency.unwrap_or_default(),
+                        total_query_input_size: stats.total_query_input_size,
+                        queue_time_estimate_ms_by_priority: stats
+                            .queue_time_estimate_ms_by_priority
+                            .clone()
+                            .unwrap_or_default(),
+                        input_processing_queries: stats.input_processing_queries,
+                        output_generation_queries: stats.output_generation_queries,
+                        stats_observed_at_unix_ms: stats.stats_observed_at_unix_ms,
+                        stats_capabilities: stats.stats_capabilities.clone(),
+                        stats_sources: stats.stats_sources.clone(),
+                    }),
+                    status: gated_model_status(advertised.base_status, model.bringup_ready).into(),
+                };
+                (model_id.clone(), registration)
+            })
+            .collect()
     }
 
     pub fn observe_request(&self, observation: RequestObservation) {
         let event = self.transition_request_observation(observation);
-        let request_id = event.observation.request_id.clone();
-        if let Some(tx) = &self.observation_tx
-            && let Err(error) = tx.try_send(event)
-        {
-            tracing::warn!(
-                request_id,
-                error = %error,
-                "dropping request observation"
-            );
+        if let Some(tx) = &self.observation_tx {
+            let request_id = event.observation.request_id.clone();
+            if let Err(error) = tx.try_send(event) {
+                tracing::warn!(request_id, error = %error, "dropping request observation");
+            }
         }
     }
 
@@ -206,17 +234,16 @@ impl PylonRuntimeState {
         &self,
         observation: RequestObservation,
     ) -> RequestObservationEvent {
-        let RequestObservationTransition {
-            changed_model_ids,
-            prior,
-            current,
-        } = self.live_requests.transition_observation(&observation);
-        if let Some(metrics) = &self.metrics {
-            metrics.observe_request_transition(&observation, prior.as_ref(), current.as_ref());
-        }
+        let transition =
+            self.live_requests
+                .transition_observation_with(&observation, |transition| {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.observe_request_transition(&observation, transition);
+                    }
+                });
         RequestObservationEvent {
             observation,
-            changed_model_ids,
+            changed_model_ids: transition.changed_model_ids,
         }
     }
 
@@ -259,12 +286,6 @@ impl PylonRuntimeState {
     }
 }
 
-impl Default for PylonRuntimeState {
-    fn default() -> Self {
-        Self::new(InferenceServerStatus::Unknown, &[])
-    }
-}
-
 impl RequestObservationEvent {
     pub fn observation(&self) -> &RequestObservation {
         &self.observation
@@ -275,76 +296,14 @@ impl RequestObservationEvent {
     }
 }
 
-impl AdvertisedRuntimeState {
-    fn new(base_status: InferenceServerStatus, model_ids: &[String]) -> Self {
-        let models = model_ids
-            .iter()
-            .cloned()
-            .map(|model_id| {
-                (
-                    model_id,
-                    AdvertisedModelState {
-                        stats: CurrentModelStats::default(),
-                        bringup: ModelBringupState::ConnectingUnavailable,
-                    },
-                )
-            })
-            .collect();
-        Self {
-            base_status,
-            models,
-        }
-    }
-
-    fn advertised_models(&self) -> HashMap<String, InferenceServerModelRegistration> {
-        self.models
-            .iter()
-            .map(|(model_id, model)| {
-                let stats = &model.stats;
-                let status = gated_model_status(self.base_status, model.bringup);
-                let registration = InferenceServerModelRegistration {
-                    stats: Some(ModelStats {
-                        last_mean_input_tps: stats.last_mean_input_tps,
-                        output_tps: stats.output_tps,
-                        max_output_tps: stats.max_output_tps,
-                        queue_size: stats.queue_size,
-                        queued_input_size: stats.queued_input_size,
-                        kv_cache_capacity_tokens: stats.kv_cache_capacity_tokens,
-                        kv_cache_used_tokens: stats.kv_cache_used_tokens,
-                        kv_cache_free_tokens: stats.kv_cache_free_tokens,
-                        num_running_queries: stats.num_running_queries,
-                        max_engine_concurrency: stats.max_engine_concurrency.unwrap_or_default(),
-                        total_query_input_size: stats.total_query_input_size,
-                        queue_time_estimate_ms_by_priority: stats
-                            .queue_time_estimate_ms_by_priority
-                            .clone()
-                            .unwrap_or_default(),
-                        input_processing_queries: stats.input_processing_queries,
-                        output_generation_queries: stats.output_generation_queries,
-                        stats_observed_at_unix_ms: stats.stats_observed_at_unix_ms,
-                        stats_capabilities: stats.stats_capabilities.clone(),
-                        stats_sources: stats.stats_sources.clone(),
-                    }),
-                    status: status.into(),
-                };
-                (model_id.clone(), registration)
-            })
-            .collect()
-    }
-}
-
 pub(crate) fn gated_model_status(
     base_status: InferenceServerStatus,
-    bringup_state: ModelBringupState,
+    bringup_ready: bool,
 ) -> InferenceServerStatus {
-    if base_status != InferenceServerStatus::Active {
-        return base_status;
-    }
-    match bringup_state {
-        ModelBringupState::AdvertisingActive => InferenceServerStatus::Active,
-        ModelBringupState::ConnectingUnavailable | ModelBringupState::Recovering => {
-            InferenceServerStatus::Inactive
-        }
+    if base_status == InferenceServerStatus::Active && !bringup_ready {
+        InferenceServerStatus::Inactive
+    } else {
+        base_status
     }
 }
 
@@ -360,15 +319,16 @@ mod tests {
         RequestObservation, RequestObservationEndpoint, RequestObservationState,
     };
 
-    #[test]
-    fn publishing_observation_updates_live_state_and_emits_one_event() {
-        let (runtime_state, observation_rx) =
-            PylonRuntimeState::observed(InferenceServerStatus::Active, &[], 4, None);
-        let mut observation = RequestObservation {
+    fn observation(
+        request_id: &str,
+        model_id: &str,
+        routing_key: Option<&str>,
+    ) -> RequestObservation {
+        RequestObservation {
             endpoint: RequestObservationEndpoint::ChatCompletions,
-            request_id: "req-runtime-owner".to_string(),
-            routing_key: None,
-            model_id: "model-runtime-owner".to_string(),
+            request_id: request_id.into(),
+            routing_key: routing_key.map(Into::into),
+            model_id: model_id.into(),
             priority: 0,
             input_tokens: 42,
             embedding_items: 0,
@@ -383,7 +343,14 @@ mod tests {
             time_to_first_output: None,
             time_to_first_token: None,
             total_duration: Duration::ZERO,
-        };
+        }
+    }
+
+    #[test]
+    fn publishing_observation_updates_live_state_and_emits_one_event() {
+        let (runtime_state, observation_rx) =
+            PylonRuntimeState::observed(InferenceServerStatus::Active, &[], 4, None);
+        let mut observation = observation("req-runtime-owner", "model-runtime-owner", None);
 
         runtime_state.observe_request(observation.clone());
 
@@ -414,26 +381,7 @@ mod tests {
             4,
             Some(metrics.clone()),
         );
-        let mut observation = RequestObservation {
-            endpoint: RequestObservationEndpoint::ChatCompletions,
-            request_id: "req-local-rejection".to_string(),
-            routing_key: Some("rk-a".to_string()),
-            model_id: "model-a".to_string(),
-            priority: 0,
-            input_tokens: 42,
-            embedding_items: 0,
-            embedding_items_observed: false,
-            upstream_status: None,
-            output_messages: 0,
-            output_tokens: 0,
-            output_tokens_explicit: false,
-            output_tokens_from_chunk_usage: false,
-            state: RequestObservationState::UpstreamConnecting,
-            time_to_response_headers: None,
-            time_to_first_output: None,
-            time_to_first_token: None,
-            total_duration: Duration::ZERO,
-        };
+        let mut observation = observation("req-local-rejection", "model-a", Some("rk-a"));
 
         runtime_state.observe_request(observation.clone());
         runtime_state.finish_queue_request(&observation.request_id);
@@ -462,26 +410,7 @@ mod tests {
             1,
             Some(metrics.clone()),
         );
-        let mut observation = RequestObservation {
-            endpoint: RequestObservationEndpoint::ChatCompletions,
-            request_id: "req-full-stats-channel".to_string(),
-            routing_key: Some("rk-a".to_string()),
-            model_id: "model-a".to_string(),
-            priority: 0,
-            input_tokens: 42,
-            embedding_items: 0,
-            embedding_items_observed: false,
-            upstream_status: None,
-            output_messages: 0,
-            output_tokens: 0,
-            output_tokens_explicit: false,
-            output_tokens_from_chunk_usage: false,
-            state: RequestObservationState::UpstreamConnecting,
-            time_to_response_headers: None,
-            time_to_first_output: None,
-            time_to_first_token: None,
-            total_duration: Duration::ZERO,
-        };
+        let mut observation = observation("req-full-stats-channel", "model-a", Some("rk-a"));
 
         runtime_state.observe_request(observation.clone());
         observation.state = RequestObservationState::Failed;

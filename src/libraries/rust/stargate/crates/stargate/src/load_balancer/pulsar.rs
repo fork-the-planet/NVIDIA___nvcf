@@ -15,7 +15,6 @@
 
 mod ranking;
 
-use std::fmt;
 use std::sync::Arc;
 
 use super::{
@@ -49,11 +48,7 @@ impl PulsarLoadBalancer {
     }
 }
 
-impl fmt::Display for PulsarLoadBalancer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pulsar")
-    }
-}
+impl_display!(PulsarLoadBalancer, "pulsar");
 
 impl LoadBalancer for PulsarLoadBalancer {
     fn choose_candidate(
@@ -61,7 +56,11 @@ impl LoadBalancer for PulsarLoadBalancer {
         request: &LoadBalancerRequest<'_>,
         candidates: &[RoutedClusterSnapshot],
     ) -> Option<LoadBalancerCandidateChoice> {
-        let (lookup, cached_choice) = self.ranking_lookup(request, candidates)?;
+        let (lookup, cached_choice) =
+            self.rankings
+                .lookup_choice(request, candidates, |ranking| {
+                    self.choose_from_ranked_indices(request, candidates, ranking)
+                })?;
         match lookup {
             PulsarRankingLookup::Hit => cached_choice,
             PulsarRankingLookup::MissCacheable => {
@@ -70,15 +69,11 @@ impl LoadBalancer for PulsarLoadBalancer {
                     return None;
                 }
                 let choice = self.choose_from_ranked_indices(request, candidates, &ranking);
-                if let Some(cached_choice) = self.rankings.insert_or_choose_existing(
-                    request,
-                    candidates,
-                    ranking,
-                    |cached| self.choose_from_ranked_indices(request, candidates, cached),
-                ) {
-                    return Some(cached_choice);
-                }
-                choice
+                self.rankings
+                    .insert_or_choose_existing(request, candidates, ranking, |cached| {
+                        self.choose_from_ranked_indices(request, candidates, cached)
+                    })
+                    .or(choice)
             }
             PulsarRankingLookup::MissBypass => self.choose_by_score_scan(request, candidates),
         }
@@ -86,101 +81,9 @@ impl LoadBalancer for PulsarLoadBalancer {
 }
 
 impl PulsarLoadBalancer {
-    /*
-    PULSAR selection model
-
-    Treat consistent hashing as a ranking generator, not a direct destination selector.
-    For one request we score every candidate, sort by descending score, then choose the
-    first candidate that is currently feasible.
-
-    Request-specific ranking
-    ------------------------
-    The cache-affinity key is the stable request identity for KV reuse. A different
-    affinity key gets a different deterministic ranking.
-
-        request key K1                     request key K2
-        ---------------                    ---------------
-        score(A) = 0.91  rank 1            score(A) = 0.77  rank 2
-        score(B) = 0.63  rank 2            score(B) = 0.82  rank 1
-        score(C) = 0.18  rank 3            score(C) = 0.11  rank 3
-
-    Progressive unlocking
-    ---------------------
-    We do not send all overflow to "the next node on a ring". We walk each request's own
-    rendezvous ranking until we find the first feasible backend.
-
-        K1 ranking: A -> B -> C
-        K2 ranking: B -> A -> C
-        K3 ranking: A -> C -> B
-
-        if A saturates:
-          K1 unlocks to B
-          K2 stays on B
-          K3 unlocks to C
-
-    That scattering behavior is the whole point. Shared-primary keys do not all collapse
-    onto one shared successor.
-
-    ASCII picture
-    -------------
-
-        before saturation
-
-          K1 ---> A
-          K2 ---> A
-          K3 ---> A
-
-        ring-successor overflow would do this
-
-          K1 ---> B
-          K2 ---> B
-          K3 ---> B
-
-        PULSAR does this instead
-
-          K1 ---> B
-          K2 ---> D
-          K3 ---> C
-
-    Feasibility invariants
-    ----------------------
-    Feasibility must depend only on pre-hash information:
-
-      - request headers (`x-cache-affinity-key`, `x-input-tokens`)
-      - backend snapshots (`last_mean_input_tps`, KV metrics)
-      - router-local admission state in future extensions
-
-    It must not depend on the scores themselves. The ranking answers "in what order should
-    I try backends for this key?" Feasibility answers "is this backend safe right now?"
-
-    Current implementation
-    ----------------------
-    This implementation is the first useful slice, not the full paper:
-
-      - ranking: weighted rendezvous hashing
-      - key material: routing target + cache-affinity key + cluster_id + optional seed
-      - weight: `last_mean_input_tps`
-      - feasibility: retry exclusions, plus an optional reported-free-KV gate
-        against request input tokens
-
-    So the control flow is:
-
-        rank all candidates for this request
-             |
-             v
-        candidate[0] feasible? -- yes --> choose it
-             |
-             no
-             v
-        candidate[1] feasible? -- yes --> choose it
-             |
-             no
-             v
-        ...
-             |
-             v
-           none feasible --> proxy service-unavailable response
-    */
+    // Weighted rendezvous produces a stable capacity-weighted ranking per
+    // affinity key. Retry and live KV state only gate candidates while walking
+    // that ranking, so overflow remains deterministic and dispersed by key.
     fn choose_from_ranked_indices(
         &self,
         request: &LoadBalancerRequest<'_>,
@@ -208,16 +111,6 @@ impl PulsarLoadBalancer {
         None
     }
 
-    fn ranking_lookup(
-        &self,
-        request: &LoadBalancerRequest<'_>,
-        candidates: &[RoutedClusterSnapshot],
-    ) -> Option<(PulsarRankingLookup, Option<LoadBalancerCandidateChoice>)> {
-        self.rankings.lookup_choice(request, candidates, |ranking| {
-            self.choose_from_ranked_indices(request, candidates, ranking)
-        })
-    }
-
     pub(super) fn compute_ranking(
         &self,
         request: &LoadBalancerRequest<'_>,
@@ -238,7 +131,7 @@ impl PulsarLoadBalancer {
             let Some(score) = scorer.score(candidate) else {
                 continue;
             };
-            let is_best_overall = best_overall.as_ref().is_none_or(|best: &ScoredCandidate| {
+            let outranks = |best: &ScoredCandidate| {
                 compare_ranked_candidate(
                     score,
                     candidate,
@@ -246,8 +139,8 @@ impl PulsarLoadBalancer {
                     &candidates[best.candidate_index],
                 )
                 .is_lt()
-            });
-            if is_best_overall {
+            };
+            if best_overall.as_ref().is_none_or(&outranks) {
                 best_overall = Some(ScoredCandidate {
                     score,
                     candidate_index,
@@ -257,16 +150,7 @@ impl PulsarLoadBalancer {
             if !self.feasibility(request, candidate).is_eligible() {
                 continue;
             }
-            let is_best_feasible = best_feasible.as_ref().is_none_or(|best: &ScoredCandidate| {
-                compare_ranked_candidate(
-                    score,
-                    candidate,
-                    best.score,
-                    &candidates[best.candidate_index],
-                )
-                .is_lt()
-            });
-            if is_best_feasible {
+            if best_feasible.as_ref().is_none_or(outranks) {
                 best_feasible = Some(ScoredCandidate {
                     score,
                     candidate_index,
@@ -276,61 +160,43 @@ impl PulsarLoadBalancer {
 
         let best = best_feasible?;
         let chosen = &candidates[best.candidate_index];
-        // The common all-feasible case has rank depth 1 and does not need the
-        // second score pass used to preserve rank-depth semantics after fallback.
-        let rank_depth = if best_overall
+        let (rank_depth, selected_after_kv_free_tokens_skip) = if best_overall
             .as_ref()
             .is_some_and(|overall| overall.candidate_index == best.candidate_index)
         {
-            1
+            (1, false)
         } else {
-            self.rank_depth_for_score(request, candidates, chosen, best.score)
+            self.fallback_metadata(request, candidates, chosen, best.score)
         };
         Some(LoadBalancerCandidateChoice {
             candidate_index: best.candidate_index,
             rank_depth,
-            selected_after_kv_free_tokens_skip: rank_depth > 1
-                && self.higher_rank_kv_free_tokens_skip(request, candidates, chosen, best.score),
+            selected_after_kv_free_tokens_skip,
         })
     }
 
-    fn higher_rank_kv_free_tokens_skip(
+    fn fallback_metadata(
         &self,
         request: &LoadBalancerRequest<'_>,
         candidates: &[RoutedClusterSnapshot],
         chosen: &RoutedClusterSnapshot,
         chosen_score: f64,
-    ) -> bool {
-        let mut scorer = PulsarScorer::new(self.config.seed(), request);
-        candidates.iter().any(|candidate| {
-            let Some(score) = scorer.score(candidate) else {
-                return false;
-            };
-            compare_ranked_candidate(score, candidate, chosen_score, chosen).is_lt()
-                && self
-                    .feasibility(request, candidate)
-                    .skipped_for_kv_free_tokens()
-        })
-    }
-
-    fn rank_depth_for_score(
-        &self,
-        request: &LoadBalancerRequest<'_>,
-        candidates: &[RoutedClusterSnapshot],
-        chosen: &RoutedClusterSnapshot,
-        chosen_score: f64,
-    ) -> usize {
+    ) -> (usize, bool) {
         let mut scorer = PulsarScorer::new(self.config.seed(), request);
         let mut rank_depth = 1;
+        let mut skipped_for_kv_free_tokens = false;
         for candidate in candidates {
             let Some(score) = scorer.score(candidate) else {
                 continue;
             };
             if compare_ranked_candidate(score, candidate, chosen_score, chosen).is_lt() {
                 rank_depth += 1;
+                skipped_for_kv_free_tokens |= self
+                    .feasibility(request, candidate)
+                    .skipped_for_kv_free_tokens();
             }
         }
-        rank_depth
+        (rank_depth, skipped_for_kv_free_tokens)
     }
 
     #[cfg(test)]

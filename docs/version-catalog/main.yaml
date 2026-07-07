@@ -173,6 +173,406 @@ version_overrides:
   - name: pylon
     version: 0.3.0
     source: stargate:0.3.0 paired release
+manifest:
+  entries:
+    - artifact_id: helm-nvcf-api-keys
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the API key management service.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/api-keys-colocated
+    - artifact_id: helm-nvcf-api
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the NVCF API service.
+    - artifact_id: helm-nvcf-cassandra
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys Cassandra and its initialization jobs.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/cassandra
+      upstream_url: https://github.com/bitnami/charts/tree/main/bitnami/cassandra
+    - artifact_id: helm-nvcf-cert-manager
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the NVCF cert-manager configuration.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/cert-manager
+      upstream_url: https://github.com/cert-manager/cert-manager
+    - artifact_id: helm-nvcf-ess-api
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the Encrypted Secrets Service API.
+    - artifact_id: helm-nvcf-grpc-proxy
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the gRPC proxy service.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/grpc-proxy
+    - artifact_id: helm-nvcf-invocation-service
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the HTTP invocation service.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/http-invocation
+    - artifact_id: helm-nvcf-nats-auth-callout-service
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the NATS authorization callout service.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/nats-auth-callout
+    - artifact_id: helm-nvcf-nats
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys NATS messaging for the control plane.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/nats
+      upstream_url: https://github.com/nats-io/k8s
+    - artifact_id: helm-nvcf-notary-service
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the notary service for signing and validation.
+    - artifact_id: helm-nvcf-nvct-api
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the NVCF tenant API service.
+    - artifact_id: helm-nvcf-openbao-server
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys OpenBao secret management.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/openbao
+      upstream_url: https://github.com/openbao/openbao-helm
+    - artifact_id: helm-nvcf-sis
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the Spot Instance Service.
+    - artifact_id: helm-reval
+      plane: control
+      kind: chart
+      requirement: required
+      description: Deploys the function revalidation service.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/helm-reval
+    - artifact_id: helm-admin-token-issuer-proxy
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys the admin token issuer proxy used by the reference architecture.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/admin-token-issuer-proxy
+    - artifact_id: helm-nvcf-llm-api-gateway
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys the OpenAI-compatible LLM API gateway.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/llm-api-gateway
+    - artifact_id: helm-nvcf-llm-request-router
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys the LLM request router.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/llm-request-router
+    - artifact_id: helm-nvcf-rate-limiter
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys request rate limiting for supported invocation paths.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/ratelimiter
+    - artifact_id: helm-nvcf-state-metrics
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys NVCF state metrics for observability.
+    - artifact_id: helm-nvcf-vanity-gateway
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys the optional vanity hostname gateway.
+    - artifact_id: nvcf-example-dashboards
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys example Grafana dashboards for NVCF telemetry.
+    - artifact_id: nvcf-gateway-routes
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys Gateway API routes for the reference architecture.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/gateway-routes
+    - artifact_id: nvcf-observability-reference-stack
+      plane: control
+      kind: chart
+      requirement: optional
+      description: Deploys a reference observability backend for evaluation.
+    - artifact_id: alpine-k8s
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Provides Kubernetes command-line utilities for deployment jobs.
+    - artifact_id: cert-manager-cainjector
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Injects certificate authority data into Kubernetes resources.
+      upstream_url: https://github.com/cert-manager/cert-manager
+    - artifact_id: cert-manager-controller
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Reconciles certificates and issuers for the control plane.
+      upstream_url: https://github.com/cert-manager/cert-manager
+    - artifact_id: cert-manager-startupapicheck
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Verifies that the cert-manager API is ready.
+      upstream_url: https://github.com/cert-manager/cert-manager
+    - artifact_id: cert-manager-webhook
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Validates and converts cert-manager API resources.
+      upstream_url: https://github.com/cert-manager/cert-manager
+    - artifact_id: ess-api
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Provides encrypted application secrets to NVCF workloads.
+    - artifact_id: nats-box
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Provides NATS administration and diagnostic utilities.
+      upstream_url: https://github.com/nats-io/nats-box
+    - artifact_id: nats-server
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Provides messaging for function deployment and invocation.
+      upstream_url: https://github.com/nats-io/nats-server
+    - artifact_id: nats-server-config-reloader
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Reloads NATS server configuration when mounted settings change.
+      upstream_url: https://github.com/nats-io/k8s
+    - artifact_id: notary-service
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Signs and validates functions and cluster nodes.
+    - artifact_id: nvcf-api-keys-service
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Creates and manages NVCF API keys.
+    - artifact_id: nvcf-grpc-proxy
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Proxies bidirectional gRPC traffic between the control and compute planes.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/invocation-plane-services/grpc-proxy
+    - artifact_id: nvcf-invocation-service
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Routes stateless HTTP function invocation requests.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/invocation-plane-services/http-invocation
+    - artifact_id: nvcf-nats-auth-callout-service
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Authorizes NATS clients for NVCF services and workloads.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/control-plane-services/nats-auth-callout
+    - artifact_id: nvcf-openbao
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Stores and manages control-plane secrets.
+      upstream_url: https://github.com/openbao/openbao
+    - artifact_id: nvcf-openbao-migrations
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Applies the OpenBao configuration required by NVCF.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/migrations/openbao
+    - artifact_id: nvcf-service-oss
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Provides the primary NVCF control-plane API.
+    - artifact_id: nvct-service-oss
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Provides tenant-scoped NVCF control-plane operations.
+    - artifact_id: oss-vault-k8s
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Integrates Kubernetes workloads with OpenBao secrets.
+    - artifact_id: reval-server
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Revalidates function state in the background.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/control-plane-services/helm-reval
+    - artifact_id: spot
+      plane: control
+      kind: service-image
+      requirement: required
+      description: Manages deployments, clusters, and function instances.
+    - artifact_id: admin-token-issuer-proxy
+      plane: control
+      kind: service-image
+      requirement: optional
+      description: Proxies admin token requests for the reference architecture.
+    - artifact_id: llm-api-gateway
+      plane: control
+      kind: service-image
+      requirement: optional
+      description: Exposes OpenAI-compatible APIs for LLM functions.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/invocation-plane-services/llm-api-gateway
+    - artifact_id: llm-request-router
+      plane: control
+      kind: service-image
+      requirement: optional
+      description: Routes LLM requests to eligible worker instances.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/libraries/rust/stargate
+    - artifact_id: bitnami-cassandra
+      plane: control
+      kind: ea-cve
+      requirement: required
+      description: Stores NVCF account, function, cluster, and service state during Early Access.
+      upstream_url: https://github.com/bitnami/containers/tree/main/bitnami/cassandra
+    - artifact_id: nvcf-cassandra-migrations
+      plane: control
+      kind: ea-cve
+      requirement: required
+      description: Applies the Cassandra schemas required by Early Access NVCF services.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/migrations/cassandra
+    - artifact_id: helm-nvca-operator
+      plane: compute
+      kind: chart
+      requirement: required
+      description: Deploys the NVCA operator and compute-plane integration.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/nvca-operator
+    - artifact_id: nvcf-container-cache-chart
+      plane: compute
+      kind: chart
+      requirement: optional
+      description: Deploys container image caching on GPU cluster nodes.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/container-cache
+    - name: gpu-operator
+      version: supported
+      distribution: https://helm.ngc.nvidia.com/nvidia
+      plane: compute
+      kind: chart
+      requirement: required
+      description: Manages NVIDIA GPU software on Kubernetes nodes.
+      upstream_url: https://github.com/NVIDIA/gpu-operator
+    - name: ebs-csi-driver
+      version: supported
+      distribution: https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+      plane: compute
+      kind: chart
+      requirement: optional
+      description: Provides Amazon EBS persistent volumes for EKS clusters.
+      upstream_url: https://github.com/kubernetes-sigs/aws-ebs-csi-driver
+    - name: csi-driver-smb
+      version: supported
+      distribution: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-smb/master/charts
+      plane: compute
+      kind: chart
+      requirement: optional
+      description: Provides SMB persistent volumes for supported deployments.
+      upstream_url: https://github.com/kubernetes-csi/csi-driver-smb
+    - artifact_id: nvca
+      plane: compute
+      kind: service-image
+      requirement: required
+      description: Registers GPU clusters and orchestrates deployments in-cluster.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/nvca
+    - artifact_id: nvca-operator
+      plane: compute
+      kind: service-image
+      requirement: required
+      description: Reconciles NVCA resources and compute-plane configuration.
+    - artifact_id: nvcf_worker_utils
+      plane: compute
+      kind: service-image
+      requirement: required
+      description: Proxies NATS traffic between function containers and the control plane.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/worker-utils
+    - artifact_id: nvcf_worker_init
+      plane: compute
+      kind: service-image
+      requirement: required
+      description: Prepares function resources before the user container starts.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/worker-init
+    - artifact_id: ess-agent
+      plane: compute
+      kind: service-image
+      requirement: required
+      description: Injects encrypted application secrets into function workloads.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/ess-agent
+    - artifact_id: nvcf-image-credential-helper
+      plane: compute
+      kind: service-image
+      requirement: required
+      description: Resolves container image credentials for function workloads.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/image-credential-helper
+    - name: gpu-operator-validator
+      version: supported
+      distribution: https://catalog.ngc.nvidia.com/orgs/nvidia/teams/cloud-native/containers/gpu-operator-validator
+      plane: compute
+      kind: service-image
+      requirement: required
+      description: Validates GPU Operator components on GPU nodes.
+      upstream_url: https://github.com/NVIDIA/gpu-operator
+    - name: k8s-device-plugin
+      version: supported
+      distribution: https://catalog.ngc.nvidia.com/orgs/nvidia/teams/k8s/containers/device-plugin
+      plane: compute
+      kind: service-image
+      requirement: required
+      description: Advertises NVIDIA GPU resources to Kubernetes.
+      upstream_url: https://github.com/NVIDIA/k8s-device-plugin
+    - artifact_id: pylon
+      plane: compute
+      kind: service-image
+      requirement: optional
+      description: Connects LLM worker pods to the LLM request router.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/libraries/rust/stargate
+    - artifact_id: nvcf-container-cache-image
+      plane: compute
+      kind: service-image
+      requirement: optional
+      description: Caches container image layers on GPU cluster nodes.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/container-cache
+    - artifact_id: nvcf-proxy-tls-certs
+      plane: compute
+      kind: service-image
+      requirement: optional
+      description: Configures TLS trust for the optional container cache proxy.
+    - artifact_id: nvcf-self-managed-stack
+      plane: shared
+      kind: resource
+      description: Provides the Helmfile bundle for control-plane deployment.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/deploy/stacks/self-managed
+    - artifact_id: nvcf-compute-plane-stack
+      plane: shared
+      kind: resource
+      description: Provides the Helmfile bundle for compute-plane deployment.
+    - artifact_id: nvcf-cli
+      plane: shared
+      kind: resource
+      description: Manages functions, deployments, and clusters from the command line.
+      github_url: https://github.com/NVIDIA/nvcf/tree/main/src/clis/nvcf-cli
 stack:
   name: nvcf-self-managed-stack
   version: 0.6.0-rc.98

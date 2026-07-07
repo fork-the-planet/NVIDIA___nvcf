@@ -23,7 +23,7 @@ Use these docs for externally consumed contracts and operator workflows.
 ## Runbooks
 
 - [Troubleshooting](troubleshooting.md): symptom-to-layer map for proxy,
-  routing, tunnel, calibration, and stats failures.
+  routing, tunnel, Pylon bootstrap, and stats failures.
 
 ## Related Context
 

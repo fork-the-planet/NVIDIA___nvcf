@@ -22,10 +22,10 @@ use stargate_tls::ServerTlsIdentity;
 
 mod body;
 mod connection;
-mod custom;
 mod direct;
 mod endpoint;
 mod http3;
+mod raw_quic;
 mod registration_tunnel;
 mod request;
 mod reverse;

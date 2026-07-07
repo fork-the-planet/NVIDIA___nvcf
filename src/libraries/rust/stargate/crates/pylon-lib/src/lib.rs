@@ -28,8 +28,10 @@ mod runtime_state;
 mod sse_message_stream;
 mod stats;
 
-pub use bringup::BringupConfig;
-pub use output_token_parser::OutputTokenParserFactory;
+pub use bringup::{
+    BringupConfig, BringupError, BringupHandle, CalibrationConfig, run_startup_calibration,
+    start_bringup,
+};
 pub use queue_admission::PylonQueueMismatchRetryConfig;
 pub use quic_http_tunnel::{
     DEFAULT_MAX_SSE_BUFFER_BYTES, PylonRetryConfig, QuicHttpTunnelConfig, QuicHttpTunnelHandle,

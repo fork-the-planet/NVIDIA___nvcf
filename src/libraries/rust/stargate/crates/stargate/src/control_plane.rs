@@ -18,12 +18,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{Stream, StreamExt, stream};
-use tokio::sync::{mpsc, watch};
+use futures::Stream;
+use tokio::sync::watch;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
 
-use stargate_forwarding::{ForwardingResolver, PeerResolution, PeerTarget};
+use stargate_forwarding::{
+    ForwardingResolver, PeerResolution, PeerTarget, forward_stream_messages,
+};
 
 use crate::auth::WorkerAuthenticator;
 use crate::discovery::Discovery;
@@ -34,8 +36,7 @@ use stargate_proto::pb::stargate_control_plane_client::StargateControlPlaneClien
 use stargate_proto::pb::stargate_control_plane_server::StargateControlPlane;
 use stargate_proto::pb::stargate_model_discovery_server::StargateModelDiscovery;
 use stargate_proto::pb::{
-    CalibrationState, InferenceServerAck, InferenceServerRegistration, ListModelsRequest,
-    ListModelsResponse, SubmitClusterCalibrationRequest, SubmitClusterCalibrationResponse,
+    InferenceServerAck, InferenceServerRegistration, ListModelsRequest, ListModelsResponse,
     WatchStargatesRequest, WatchStargatesResponse,
 };
 
@@ -131,17 +132,13 @@ impl StargateService {
         }
     }
 
-    fn peer_grpc_target<T>(&self, request: &Request<T>) -> PeerGrpcTarget {
-        let Some(fwd) = self.forwarding.as_ref() else {
-            return PeerGrpcTarget::Local;
-        };
-        let Some(authority) = request.extensions().get::<http::uri::Authority>() else {
-            return PeerGrpcTarget::Local;
-        };
+    fn peer_grpc_target<T>(&self, request: &Request<T>) -> Option<PeerTarget> {
+        let fwd = self.forwarding.as_ref()?;
+        let authority = request.extensions().get::<http::uri::Authority>()?;
         let host = authority.host();
         match fwd.resolve_peer(host, self.advertise_addr.port()) {
-            PeerResolution::Peer(target) => PeerGrpcTarget::Peer(target),
-            PeerResolution::Local | PeerResolution::NotPeer => PeerGrpcTarget::Local,
+            PeerResolution::Peer(target) => Some(target),
+            PeerResolution::Local | PeerResolution::NotPeer => None,
         }
     }
 
@@ -166,86 +163,42 @@ impl StargateService {
     }
 }
 
-fn registration_message_stream<S>(
-    inbound: S,
-) -> (
-    impl Stream<Item = InferenceServerRegistration>,
-    RegistrationStreamErrorRx,
-)
-where
-    S: Stream<Item = Result<InferenceServerRegistration, Status>> + Send + 'static,
-{
-    let (stream_error_tx, stream_error_rx) = mpsc::channel(1);
-    let messages = inbound.filter_map(move |result| {
-        let stream_error_tx = stream_error_tx.clone();
-        async move {
-            match result {
-                Ok(message) => Some(message),
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        "forwarded registration stream read error, forwarding stream error"
-                    );
-                    let _ = stream_error_tx.send(error).await;
-                    None
-                }
-            }
-        }
-    });
-    (messages, stream_error_rx)
+fn bearer_token(metadata: &tonic::metadata::MetadataMap) -> Option<&str> {
+    metadata
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
 }
 
-async fn pending_registration_stream_error(
-    stream_error_rx: &mut RegistrationStreamErrorRx,
-) -> Option<Status> {
-    match stream_error_rx.try_recv() {
-        Ok(error) => Some(error),
-        Err(mpsc::error::TryRecvError::Empty) => stream_error_rx.recv().await,
-        Err(mpsc::error::TryRecvError::Disconnected) => None,
-    }
-}
-
-enum PeerGrpcTarget {
-    Local,
-    Peer(PeerTarget),
-}
-
-type WatchStargatesStream =
-    Pin<Box<dyn Stream<Item = Result<WatchStargatesResponse, Status>> + Send + 'static>>;
-type RegisterInferenceServerStream =
-    Pin<Box<dyn Stream<Item = Result<InferenceServerAck, Status>> + Send + 'static>>;
-type RegistrationStreamErrorRx = mpsc::Receiver<Status>;
+type ResponseStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 
 #[tonic::async_trait]
 impl StargateControlPlane for StargateService {
-    type WatchStargatesStream = WatchStargatesStream;
-    type RegisterInferenceServerStream = RegisterInferenceServerStream;
+    type WatchStargatesStream = ResponseStream<WatchStargatesResponse>;
+    type RegisterInferenceServerStream = ResponseStream<InferenceServerAck>;
 
     async fn watch_stargates(
         &self,
         request: Request<WatchStargatesRequest>,
     ) -> Result<Response<Self::WatchStargatesStream>, Status> {
-        match self.peer_grpc_target(&request) {
-            PeerGrpcTarget::Peer(peer) => {
-                info!(
-                    peer = %peer.dial_addr,
-                    server_name = %peer.server_name,
-                    "forwarding watch_stargates to peer"
-                );
-                let mut peer_client = Self::connect_peer(&peer.dial_addr).await?;
-                let resp = peer_client
-                    .watch_stargates(WatchStargatesRequest {})
-                    .await?;
-                let mut inner = resp.into_inner();
-                let stream = async_stream::stream! {
-                    let _client = peer_client;
-                    while let Some(msg) = inner.message().await.transpose() {
-                        yield msg;
-                    }
-                };
-                return Ok(Response::new(Box::pin(stream)));
-            }
-            PeerGrpcTarget::Local => {}
+        if let Some(peer) = self.peer_grpc_target(&request) {
+            info!(
+                peer = %peer.dial_addr,
+                server_name = %peer.server_name,
+                "forwarding watch_stargates to peer"
+            );
+            let mut peer_client = Self::connect_peer(&peer.dial_addr).await?;
+            let resp = peer_client
+                .watch_stargates(WatchStargatesRequest {})
+                .await?;
+            let mut inner = resp.into_inner();
+            let stream = async_stream::stream! {
+                let _client = peer_client;
+                while let Some(msg) = inner.message().await.transpose() {
+                    yield msg;
+                }
+            };
+            return Ok(Response::new(Box::pin(stream)));
         }
 
         info!(
@@ -264,65 +217,61 @@ impl StargateControlPlane for StargateService {
         &self,
         request: Request<tonic::Streaming<InferenceServerRegistration>>,
     ) -> Result<Response<Self::RegisterInferenceServerStream>, Status> {
-        match self.peer_grpc_target(&request) {
-            PeerGrpcTarget::Peer(peer) => {
-                info!(
-                    peer = %peer.dial_addr,
-                    server_name = %peer.server_name,
-                    "forwarding register_inference_server to peer"
-                );
-                let mut peer_client = Self::connect_peer(&peer.dial_addr).await?;
-                let metadata = request.metadata().clone();
-                let (inbound, mut stream_error_rx) =
-                    registration_message_stream(request.into_inner());
-                let mut forwarded = Request::new(inbound);
-                *forwarded.metadata_mut() = metadata;
-                let resp = peer_client.register_inference_server(forwarded).await?;
-                let mut inner = resp.into_inner();
-                let stream = async_stream::stream! {
-                    let _client = peer_client;
-                    let mut stream_error_rx_open = true;
-                    loop {
-                        tokio::select! {
-                            error = stream_error_rx.recv(), if stream_error_rx_open => {
-                                match error {
-                                    Some(error) => {
-                                        yield Err(error);
-                                        break;
-                                    }
-                                    None => stream_error_rx_open = false,
+        if let Some(peer) = self.peer_grpc_target(&request) {
+            info!(
+                peer = %peer.dial_addr,
+                server_name = %peer.server_name,
+                "forwarding register_inference_server to peer"
+            );
+            let mut peer_client = Self::connect_peer(&peer.dial_addr).await?;
+            let metadata = request.metadata().clone();
+            let (inbound, mut stream_error_rx) =
+                forward_stream_messages(request.into_inner(), |error| {
+                    warn!(
+                        error = %error,
+                        "forwarded registration stream read error, forwarding stream error"
+                    );
+                });
+            let mut forwarded = Request::new(inbound);
+            *forwarded.metadata_mut() = metadata;
+            let resp = peer_client.register_inference_server(forwarded).await?;
+            let mut inner = resp.into_inner();
+            let stream = async_stream::stream! {
+                let _client = peer_client;
+                let mut stream_error_rx_open = true;
+                loop {
+                    tokio::select! {
+                        error = stream_error_rx.recv(), if stream_error_rx_open => {
+                            match error {
+                                Some(error) => {
+                                    yield Err(error);
+                                    break;
                                 }
+                                None => stream_error_rx_open = false,
                             }
-                            message = inner.message() => {
-                                match message {
-                                    Ok(Some(message)) => yield Ok(message),
-                                    Ok(None) => {
-                                        if let Some(error) =
-                                            pending_registration_stream_error(&mut stream_error_rx).await
-                                        {
-                                            yield Err(error);
-                                        }
-                                        break;
-                                    }
-                                    Err(error) => {
+                        }
+                        message = inner.message() => {
+                            match message {
+                                Ok(Some(message)) => yield Ok(message),
+                                Ok(None) => {
+                                    if let Some(error) = stream_error_rx.recv().await {
                                         yield Err(error);
-                                        break;
                                     }
+                                    break;
+                                }
+                                Err(error) => {
+                                    yield Err(error);
+                                    break;
                                 }
                             }
                         }
                     }
-                };
-                return Ok(Response::new(Box::pin(stream)));
-            }
-            PeerGrpcTarget::Local => {}
+                }
+            };
+            return Ok(Response::new(Box::pin(stream)));
         }
 
-        let token = request
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
+        let token = bearer_token(request.metadata());
         let auth_result = self.authenticator.authenticate(token).await.map_err(|e| {
             warn!(error = %e, "gRPC registration authentication failed");
             Status::unauthenticated("authentication failed")
@@ -357,57 +306,7 @@ impl StargateControlPlane for StargateService {
             info!("register inference servers stream closed");
         });
 
-        let out = stream::unfold(rx, |rx| async move {
-            match rx.recv_async().await {
-                Ok(item) => Some((item, rx)),
-                Err(_) => None,
-            }
-        });
-
-        Ok(Response::new(Box::pin(out)))
-    }
-
-    async fn submit_cluster_calibration(
-        &self,
-        request: Request<SubmitClusterCalibrationRequest>,
-    ) -> Result<Response<SubmitClusterCalibrationResponse>, Status> {
-        match self.peer_grpc_target(&request) {
-            PeerGrpcTarget::Peer(peer) => {
-                info!(
-                    peer = %peer.dial_addr,
-                    server_name = %peer.server_name,
-                    "forwarding submit_cluster_calibration to peer"
-                );
-                let mut peer_client = Self::connect_peer(&peer.dial_addr).await?;
-                let metadata = request.metadata().clone();
-                let mut forwarded = Request::new(request.into_inner());
-                *forwarded.metadata_mut() = metadata;
-                return peer_client.submit_cluster_calibration(forwarded).await;
-            }
-            PeerGrpcTarget::Local => {}
-        }
-
-        let token = request
-            .metadata()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        let auth_result = self
-            .authenticator
-            .authenticate(token)
-            .await
-            .map_err(|error| {
-                warn!(error = %error, "gRPC calibration submission authentication failed");
-                Status::unauthenticated("authentication failed")
-            })?;
-
-        self.state
-            .submit_cluster_calibration(auth_result.routing_key, request.get_ref())
-            .await?;
-
-        Ok(Response::new(SubmitClusterCalibrationResponse {
-            state: CalibrationState::Complete as i32,
-        }))
+        Ok(Response::new(Box::pin(rx.into_stream())))
     }
 }
 
@@ -417,182 +316,96 @@ impl StargateModelDiscovery for StargateService {
         &self,
         request: Request<ListModelsRequest>,
     ) -> Result<Response<ListModelsResponse>, Status> {
-        let requested = normalize_list_models_request(request.into_inner())
-            .map_err(Status::invalid_argument)?;
-        let model_id_filter_count = requested.model_ids.len();
-        let model_ids = self
-            .state
-            .list_active_models(requested.routing_key.as_deref(), &requested.model_ids)
-            .await;
-
-        debug!(
-            routing_key = ?requested.routing_key,
-            model_id_filter_count,
-            return_all_models = model_id_filter_count == 0,
-            returned_model_count = model_ids.len(),
-            "list_models completed"
-        );
-
-        Ok(Response::new(ListModelsResponse { model_ids }))
+        list_models_for_state(&self.state, request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(Status::invalid_argument)
     }
 }
 
-#[derive(Debug)]
-struct NormalizedListModelsRequest {
-    routing_key: Option<String>,
-    model_ids: Vec<String>,
+pub(crate) async fn list_models_for_state(
+    state: &StargateState,
+    request: ListModelsRequest,
+) -> Result<ListModelsResponse, &'static str> {
+    let requested = normalize_list_models_request(request)?;
+    let model_id_filter_count = requested.model_ids.len();
+    let model_ids = state
+        .list_active_models(requested.routing_key.as_deref(), &requested.model_ids)
+        .await;
+
+    debug!(
+        routing_key = ?requested.routing_key,
+        model_id_filter_count,
+        return_all_models = model_id_filter_count == 0,
+        returned_model_count = model_ids.len(),
+        "list_models completed"
+    );
+
+    Ok(ListModelsResponse { model_ids })
 }
 
 fn normalize_list_models_request(
-    request: ListModelsRequest,
-) -> Result<NormalizedListModelsRequest, &'static str> {
-    let ListModelsRequest {
-        routing_key,
-        model_ids,
-    } = request;
-    let routing_key = routing_key
+    mut request: ListModelsRequest,
+) -> Result<ListModelsRequest, &'static str> {
+    request.routing_key = request
+        .routing_key
         .as_deref()
         .map(str::trim)
         .filter(|routing_key| !routing_key.is_empty())
         .map(ToOwned::to_owned);
 
-    let mut normalized_model_ids = Vec::with_capacity(model_ids.len());
-    for model_id in model_ids {
-        let model_id = model_id.trim();
+    for model_id in &mut request.model_ids {
+        *model_id = model_id.trim().to_owned();
         if model_id.is_empty() {
             return Err("model_ids must not contain empty values");
         }
-        normalized_model_ids.push(model_id.to_string());
     }
 
-    Ok(NormalizedListModelsRequest {
-        routing_key,
-        model_ids: normalized_model_ids,
-    })
+    Ok(request)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn normalize_list_models_request_trims_model_filters() {
-        let request = normalize_list_models_request(ListModelsRequest {
-            routing_key: None,
-            model_ids: vec![" model-a ".to_string(), "model-b".to_string()],
-        })
-        .expect("valid filters should normalize");
 
-        assert_eq!(request.model_ids, vec!["model-a", "model-b"]);
-        assert_eq!(request.routing_key, None);
+    fn list_models_request(routing_key: Option<&str>, model_ids: &[&str]) -> ListModelsRequest {
+        ListModelsRequest {
+            routing_key: routing_key.map(str::to_owned),
+            model_ids: model_ids.iter().map(|id| (*id).to_owned()).collect(),
+        }
     }
 
     #[test]
-    fn normalize_list_models_request_trims_routing_key() {
-        let request = normalize_list_models_request(ListModelsRequest {
-            routing_key: Some(" rk-a ".to_string()),
-            model_ids: Vec::new(),
-        })
-        .expect("valid routing key should normalize");
+    fn normalize_list_models_request_preserves_boundary_policies() {
+        let cases = [
+            (
+                list_models_request(None, &[" model-a ", "model-b"]),
+                list_models_request(None, &["model-a", "model-b"]),
+            ),
+            (
+                list_models_request(Some(" rk-a "), &[]),
+                list_models_request(Some("rk-a"), &[]),
+            ),
+            (
+                list_models_request(Some(" "), &[]),
+                list_models_request(None, &[]),
+            ),
+            (ListModelsRequest::default(), ListModelsRequest::default()),
+        ];
 
-        assert_eq!(request.routing_key.as_deref(), Some("rk-a"));
-    }
-
-    #[test]
-    fn normalize_list_models_request_treats_blank_routing_key_as_none() {
-        let request = normalize_list_models_request(ListModelsRequest {
-            routing_key: Some(" ".to_string()),
-            model_ids: Vec::new(),
-        })
-        .expect("blank routing key should normalize to unscoped");
-
-        assert_eq!(request.routing_key, None);
-    }
-
-    #[test]
-    fn normalize_list_models_request_allows_empty_filter() {
-        let request = normalize_list_models_request(ListModelsRequest {
-            routing_key: None,
-            model_ids: Vec::new(),
-        })
-        .expect("empty model filter should request all models");
-
-        assert!(request.model_ids.is_empty());
+        for (request, expected) in cases {
+            assert_eq!(
+                normalize_list_models_request(request).expect("case should normalize"),
+                expected
+            );
+        }
     }
 
     #[test]
     fn normalize_list_models_request_rejects_blank_model_filter() {
-        let error = normalize_list_models_request(ListModelsRequest {
-            routing_key: None,
-            model_ids: vec![" ".to_string()],
-        })
-        .expect_err("blank model filter should be rejected");
+        let error = normalize_list_models_request(list_models_request(None, &[" "]))
+            .expect_err("blank model filter should be rejected");
 
         assert_eq!(error, "model_ids must not contain empty values");
-    }
-
-    #[tokio::test]
-    async fn registration_message_stream_reports_inbound_stream_errors() {
-        let (messages, mut errors) = registration_message_stream(futures::stream::iter([Err(
-            Status::cancelled("client cancelled registration stream"),
-        )]));
-        futures::pin_mut!(messages);
-
-        assert!(
-            messages.next().await.is_none(),
-            "stream errors must not be converted into registration messages"
-        );
-        let error = errors
-            .recv()
-            .await
-            .expect("inbound stream error should be retained for response termination");
-        assert_eq!(error.code(), tonic::Code::Cancelled);
-        assert_eq!(error.message(), "client cancelled registration stream");
-    }
-
-    #[tokio::test]
-    async fn pending_registration_stream_error_returns_buffered_error() {
-        let (tx, mut rx) = mpsc::channel(1);
-        tx.send(Status::cancelled("buffered registration stream error"))
-            .await
-            .expect("receiver should be alive");
-
-        let error = pending_registration_stream_error(&mut rx)
-            .await
-            .expect("buffered stream error should be returned");
-
-        assert_eq!(error.code(), tonic::Code::Cancelled);
-        assert_eq!(error.message(), "buffered registration stream error");
-    }
-
-    #[tokio::test]
-    async fn pending_registration_stream_error_waits_for_delayed_error() {
-        let (tx, mut rx) = mpsc::channel(1);
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            tx.send(Status::internal("delayed registration stream error"))
-                .await
-                .expect("receiver should be alive");
-        });
-
-        let error = tokio::time::timeout(
-            Duration::from_secs(1),
-            pending_registration_stream_error(&mut rx),
-        )
-        .await
-        .expect("pending stream error should arrive")
-        .expect("delayed stream error should be returned");
-
-        assert_eq!(error.code(), tonic::Code::Internal);
-        assert_eq!(error.message(), "delayed registration stream error");
-    }
-
-    #[tokio::test]
-    async fn pending_registration_stream_error_returns_none_after_disconnect() {
-        let (tx, mut rx) = mpsc::channel(1);
-        drop(tx);
-
-        let error = pending_registration_stream_error(&mut rx).await;
-
-        assert!(error.is_none());
     }
 }

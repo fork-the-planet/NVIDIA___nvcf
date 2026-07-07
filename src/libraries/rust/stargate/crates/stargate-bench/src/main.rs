@@ -28,6 +28,7 @@ mod statistics;
 mod transport;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -49,8 +50,6 @@ use crate::score::RunSummary;
 use crate::transport::{TransportBenchConfig, run_transport_benchmark_command};
 
 const BENCHES_DIR: &str = "benches";
-const SCENARIO_CONFIG_EXTENSIONS: [&str; 2] = ["yaml", "yml"];
-
 #[derive(Parser, Debug)]
 #[command(name = "stargate-bench")]
 struct Cli {
@@ -70,27 +69,9 @@ enum Command {
         seed: Option<u64>,
     },
     /// Materialize a deterministic benchmark manifest and input artifacts
-    Materialize {
-        #[command(flatten)]
-        source: BenchmarkSourceArgs,
-        #[arg(long, value_name = "SEED")]
-        seed: Option<u64>,
-        #[arg(long = "algorithm", value_name = "NAME")]
-        algorithms: Vec<String>,
-        #[arg(long, value_name = "PATH")]
-        output_dir: Option<PathBuf>,
-    },
+    Materialize(BenchmarkInputArgs),
     /// Prepare per-algorithm local run directories with docker-compose and LB configs
-    PrepareRun {
-        #[command(flatten)]
-        source: BenchmarkSourceArgs,
-        #[arg(long, value_name = "SEED")]
-        seed: Option<u64>,
-        #[arg(long = "algorithm", value_name = "NAME")]
-        algorithms: Vec<String>,
-        #[arg(long, value_name = "PATH")]
-        output_dir: Option<PathBuf>,
-    },
+    PrepareRun(BenchmarkInputArgs),
     /// Replay a manifest against a running stargate endpoint and record per-request results
     Drive {
         #[arg(long, value_name = "PATH")]
@@ -108,59 +89,9 @@ enum Command {
         output_dir: PathBuf,
     },
     /// Run benchmark suites against Kubernetes using configured benchmark images
-    Run {
-        #[command(flatten)]
-        source: BenchmarkSourceArgs,
-        #[arg(long, value_name = "SEED")]
-        seed: Option<u64>,
-        #[arg(long = "algorithm", value_name = "NAME")]
-        algorithms: Vec<String>,
-        #[arg(long, value_name = "PATH")]
-        output_dir: Option<PathBuf>,
-        #[arg(long)]
-        keep_resources_on_failure: bool,
-        #[arg(long, value_enum, default_value_t = ReliabilityMode::Smoke, value_name = "MODE")]
-        reliability_mode: ReliabilityMode,
-    },
-    /// Compare custom, HTTP/3, and WebTransport tunnel transports on loopback
-    TransportBench {
-        #[arg(long, default_value_t = 20_000, value_name = "N")]
-        requests: usize,
-        #[arg(long, default_value_t = 256, value_name = "N")]
-        concurrency: usize,
-        #[arg(long, default_value_t = 1, value_name = "N")]
-        quic_connections: usize,
-        #[arg(long, default_value_t = 1_000, value_name = "N")]
-        warmup_requests: usize,
-        #[arg(long, default_value_t = 1024, value_name = "BYTES")]
-        request_body_bytes: usize,
-        #[arg(long, default_value_t = 1024, value_name = "BYTES")]
-        response_body_bytes: usize,
-        #[arg(long, default_value_t = 16 * 1024, value_name = "BYTES")]
-        request_chunk_bytes: usize,
-        #[arg(long, default_value_t = 16 * 1024, value_name = "BYTES")]
-        response_chunk_bytes: usize,
-        #[arg(long)]
-        disable_quic_send_fairness: bool,
-        #[arg(long)]
-        disable_http3_grease: bool,
-        #[arg(long, default_value_t = 1, value_name = "N")]
-        trials: usize,
-        #[arg(long, default_value_t = 0, value_name = "N")]
-        warmup_trials: usize,
-        #[arg(long, default_value_t = 0, value_name = "MS")]
-        cooldown_ms: u64,
-        #[arg(long)]
-        randomize_order: bool,
-        #[arg(long, default_value_t = 0.02, value_name = "CV")]
-        noise_threshold_cv: f64,
-        #[arg(long, default_value_t = 1.0, value_name = "PERCENT")]
-        min_effect_size_percent: f64,
-        #[arg(long, value_enum, default_value_t = ReliabilityMode::Smoke, value_name = "MODE")]
-        reliability_mode: ReliabilityMode,
-        #[arg(long, value_name = "PATH")]
-        output_dir: Option<PathBuf>,
-    },
+    Run(RunArgs),
+    /// Compare Raw QUIC, HTTP/3, and WebTransport tunnel transports on loopback
+    TransportBench(TransportBenchArgs),
     /// Measure in-process groq-multiregion/pulsar load-balancer choose-path overhead
     LbMicrobench {
         #[arg(long, default_value_t = 100_000, value_name = "N")]
@@ -177,28 +108,13 @@ enum Command {
         scenarios: Vec<LbMicrobenchScenario>,
     },
     /// Compare lowercasing header filters against allocation-free static matchers
-    HeaderFilterMicrobench {
-        #[arg(long, default_value_t = 1_000_000, value_name = "N")]
-        iterations: usize,
-        #[arg(long, default_value_t = 100_000, value_name = "N")]
-        warmup_iterations: usize,
-        #[arg(long, default_value_t = 128, value_name = "N")]
-        header_count: usize,
-    },
+    HeaderFilterMicrobench(HeaderFilterMicrobenchConfig),
     /// Compare Pylon-style request body buffering copy strategies
-    BodyBufferMicrobench {
-        #[arg(long, default_value_t = 20_000, value_name = "N")]
-        iterations: usize,
-        #[arg(long, default_value_t = 2_000, value_name = "N")]
-        warmup_iterations: usize,
-        #[arg(long, default_value_t = 65_536, value_name = "BYTES")]
-        body_bytes: usize,
-        #[arg(long, default_value_t = 1_024, value_name = "BYTES")]
-        chunk_bytes: usize,
-    },
+    BodyBufferMicrobench(BodyBufferMicrobenchConfig),
 }
 
 #[derive(Args, Debug, Clone)]
+#[cfg_attr(test, derive(serde::Serialize))]
 struct BenchmarkSourceArgs {
     /// Path to a benchmark YAML/JSON config
     #[arg(long, conflicts_with = "scenario", value_name = "PATH")]
@@ -208,82 +124,73 @@ struct BenchmarkSourceArgs {
     scenario: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Args, Debug)]
+#[cfg_attr(test, derive(serde::Serialize))]
+struct BenchmarkInputArgs {
+    #[command(flatten)]
+    source: BenchmarkSourceArgs,
+    #[arg(long, value_name = "SEED")]
+    seed: Option<u64>,
+    #[arg(long = "algorithm", value_name = "NAME")]
+    algorithms: Vec<String>,
+    #[arg(long, value_name = "PATH")]
+    output_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+#[cfg_attr(test, derive(serde::Serialize))]
+struct RunArgs {
+    #[command(flatten)]
+    input: BenchmarkInputArgs,
+    #[arg(long)]
+    keep_resources_on_failure: bool,
+    #[arg(long, value_enum, default_value_t = ReliabilityMode::Smoke, value_name = "MODE")]
+    reliability_mode: ReliabilityMode,
+}
+
+#[derive(Args, Debug)]
+#[cfg_attr(test, derive(serde::Serialize))]
+struct TransportBenchArgs {
+    #[command(flatten)]
+    config: TransportBenchConfig,
+    #[arg(long, value_enum, default_value_t = ReliabilityMode::Smoke, value_name = "MODE")]
+    reliability_mode: ReliabilityMode,
+    #[arg(long, value_name = "PATH")]
+    output_dir: Option<PathBuf>,
+}
+
 struct Scenario {
     name: String,
     path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ScenarioList {
-    rows: Vec<ScenarioListRow>,
-}
-
-impl ScenarioList {
-    fn load(scenarios: Vec<Scenario>) -> anyhow::Result<Self> {
-        let rows = scenarios
-            .into_iter()
-            .map(ScenarioListRow::load)
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok(Self { rows })
+fn render_scenario_list(scenarios: Vec<Scenario>) -> anyhow::Result<String> {
+    if scenarios.is_empty() {
+        return Ok("no benchmark scenarios found under benches/\n".to_string());
     }
-
-    fn render(&self) -> String {
-        if self.rows.is_empty() {
-            return "no benchmark scenarios found under benches/\n".to_string();
-        }
-        let mut lines = Vec::with_capacity(self.rows.len() + 1);
-        lines.push(format!(
-            "{:<28} {:>8} {:>9} {:>8}  {:<24}  Algorithms",
-            "Scenario", "Requests", "Backends", "Stargates", "Tags"
-        ));
-        lines.extend(self.rows.iter().map(ScenarioListRow::render));
-        format!("{}\n", lines.join("\n"))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ScenarioListRow {
-    name: String,
-    request_count: usize,
-    backend_count: usize,
-    stargate_count: usize,
-    tags: Vec<String>,
-    algorithms: Vec<String>,
-}
-
-impl ScenarioListRow {
-    fn load(scenario: Scenario) -> anyhow::Result<Self> {
+    let mut rendered = format!(
+        "{:<28} {:>8} {:>9} {:>8}  {:<24}  Algorithms\n",
+        "Scenario", "Requests", "Backends", "Stargates", "Tags"
+    );
+    for scenario in scenarios {
         let config = BenchmarkConfig::load(&scenario.path)?;
-        Ok(Self::from_config(scenario.name, &config))
-    }
-
-    fn from_config(name: String, config: &BenchmarkConfig) -> Self {
-        Self {
-            name,
-            request_count: config.request_count,
-            backend_count: config.backends.count,
-            stargate_count: config.stargates.count,
-            tags: config.metadata.tags.clone(),
-            algorithms: config
+        writeln!(
+            rendered,
+            "{:<28} {:>8} {:>9} {:>8}  {:<24}  {}",
+            scenario.name,
+            config.request_count,
+            config.backends.count,
+            config.stargates.count,
+            config.metadata.tags.join(","),
+            config
                 .algorithms
                 .iter()
-                .map(|algorithm| algorithm.name.clone())
-                .collect(),
-        }
+                .map(|algorithm| algorithm.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        )?;
     }
-
-    fn render(&self) -> String {
-        format!(
-            "{:<28} {:>8} {:>9} {:>8}  {:<24}  {}",
-            self.name,
-            self.request_count,
-            self.backend_count,
-            self.stargate_count,
-            self.tags.join(","),
-            self.algorithms.join(",")
-        )
-    }
+    Ok(rendered)
 }
 
 #[derive(serde::Deserialize)]
@@ -293,27 +200,24 @@ struct RunInfo {
     pylon_queue_admission: Option<PylonQueueAdmissionConfig>,
 }
 
-#[derive(Debug, Clone)]
-struct BenchmarkInput {
-    config: BenchmarkConfig,
-    manifest: crate::manifest::Manifest,
+fn load_benchmark_input(
+    source: BenchmarkSourceArgs,
+    seed: Option<u64>,
+    algorithms: &[String],
+) -> anyhow::Result<(BenchmarkConfig, crate::manifest::Manifest)> {
+    let mut config = BenchmarkConfig::load(&resolve_config_path(source)?)?;
+    filter_algorithms(&mut config, algorithms)?;
+    let manifest = generate_manifest(&config, seed)?;
+    Ok((config, manifest))
 }
 
-impl BenchmarkInput {
-    fn load(
-        source: BenchmarkSourceArgs,
-        seed: Option<u64>,
-        algorithms: &[String],
-    ) -> anyhow::Result<Self> {
-        let config_path = resolve_config_path(source)?;
-        let mut config = BenchmarkConfig::load(&config_path)?;
-        filter_algorithms(&mut config, algorithms)?;
-        let manifest = generate_manifest(&config, seed)?;
-        Ok(Self { config, manifest })
-    }
-
-    fn output_dir_or_default(&self, output_dir: Option<PathBuf>) -> PathBuf {
-        output_dir.unwrap_or_else(|| default_output_dir(&self.config))
+impl BenchmarkInputArgs {
+    fn load(self) -> anyhow::Result<(BenchmarkConfig, crate::manifest::Manifest, PathBuf)> {
+        let (config, manifest) = load_benchmark_input(self.source, self.seed, &self.algorithms)?;
+        let output_dir = self
+            .output_dir
+            .unwrap_or_else(|| Path::new(".bench-out").join(&config.name));
+        Ok((config, manifest, output_dir))
     }
 }
 
@@ -324,20 +228,22 @@ fn main() -> anyhow::Result<()> {
 impl Command {
     fn execute(self) -> anyhow::Result<()> {
         match self {
-            Command::ListScenarios => list_scenarios(),
-            Command::InspectManifest { source, seed } => inspect_manifest(source, seed),
-            Command::Materialize {
-                source,
-                seed,
-                algorithms,
-                output_dir,
-            } => materialize(source, seed, algorithms, output_dir),
-            Command::PrepareRun {
-                source,
-                seed,
-                algorithms,
-                output_dir,
-            } => prepare_run(source, seed, algorithms, output_dir),
+            Command::ListScenarios => {
+                print!(
+                    "{}",
+                    render_scenario_list(discover_scenarios_in(&benches_dir())?)?
+                );
+                Ok(())
+            }
+            Command::InspectManifest { source, seed } => {
+                let (_, manifest) = load_benchmark_input(source, seed, &[])?;
+                let rendered = serde_json::to_string_pretty(&manifest)
+                    .context("failed to render manifest as JSON")?;
+                println!("{rendered}");
+                Ok(())
+            }
+            Command::Materialize(args) => materialize(args),
+            Command::PrepareRun(args) => prepare_run(args),
             Command::Drive {
                 manifest,
                 endpoint,
@@ -345,62 +251,19 @@ impl Command {
                 concurrency_limit,
             } => drive(&manifest, &endpoint, &output, concurrency_limit),
             Command::Report { output_dir } => regenerate_report(&output_dir),
-            Command::Run {
-                source,
-                seed,
-                algorithms,
-                output_dir,
-                keep_resources_on_failure,
-                reliability_mode,
-            } => run(
-                source,
-                seed,
-                algorithms,
-                output_dir,
-                keep_resources_on_failure,
-                reliability_mode,
-            ),
-            Command::TransportBench {
-                requests,
-                concurrency,
-                quic_connections,
-                warmup_requests,
-                request_body_bytes,
-                response_body_bytes,
-                request_chunk_bytes,
-                response_chunk_bytes,
-                disable_quic_send_fairness,
-                disable_http3_grease,
-                trials,
-                warmup_trials,
-                cooldown_ms,
-                randomize_order,
-                noise_threshold_cv,
-                min_effect_size_percent,
-                reliability_mode,
-                output_dir,
-            } => run_transport_benchmark_command(
-                TransportBenchConfig {
-                    request_count: requests,
-                    concurrency,
-                    quic_connections,
-                    warmup_requests,
-                    request_body_bytes,
-                    response_body_bytes,
-                    request_chunk_bytes,
-                    response_chunk_bytes,
-                    quic_send_fairness: !disable_quic_send_fairness,
-                    http3_send_grease: !disable_http3_grease,
-                    trials,
-                    warmup_trials,
-                    cooldown_ms,
-                    randomize_order,
-                    noise_threshold_cv,
-                    min_effect_size_percent,
-                },
-                reliability_mode,
-                output_dir,
-            ),
+            Command::Run(args) => {
+                let (config, manifest, output_dir) = args.input.load()?;
+                crate::k8s_run::run_k8s_benchmark(
+                    config,
+                    manifest,
+                    output_dir,
+                    args.keep_resources_on_failure,
+                    args.reliability_mode,
+                )
+            }
+            Command::TransportBench(args) => {
+                run_transport_benchmark_command(args.config, args.reliability_mode, args.output_dir)
+            }
             Command::LbMicrobench {
                 iterations,
                 warmup_iterations,
@@ -408,48 +271,30 @@ impl Command {
                 candidates,
                 cache_key_count,
                 scenarios,
-            } => lb_microbench(LbMicrobenchConfig {
-                iterations,
-                warmup_iterations,
-                concurrency,
-                candidates,
-                cache_key_count,
-                scenarios,
-            }),
-            Command::HeaderFilterMicrobench {
-                iterations,
-                warmup_iterations,
-                header_count,
-            } => header_filter_microbench(HeaderFilterMicrobenchConfig {
-                iterations,
-                warmup_iterations,
-                header_count,
-            }),
-            Command::BodyBufferMicrobench {
-                iterations,
-                warmup_iterations,
-                body_bytes,
-                chunk_bytes,
-            } => body_buffer_microbench(BodyBufferMicrobenchConfig {
-                iterations,
-                warmup_iterations,
-                body_bytes,
-                chunk_bytes,
-            }),
+            } => {
+                let rows = run_lb_microbench(&LbMicrobenchConfig {
+                    iterations,
+                    warmup_iterations,
+                    concurrency,
+                    candidates,
+                    cache_key_count,
+                    scenarios,
+                })?;
+                write_lb_microbench_csv(std::io::stdout(), &rows)
+                    .context("failed to write lb microbench CSV")
+            }
+            Command::HeaderFilterMicrobench(config) => {
+                let outcome = run_header_filter_microbench(config)?;
+                print!("{}", render_header_filter_microbench_report(&outcome));
+                Ok(())
+            }
+            Command::BodyBufferMicrobench(config) => {
+                let outcome = run_body_buffer_microbench(config)?;
+                print!("{}", render_body_buffer_microbench_report(&outcome));
+                Ok(())
+            }
         }
     }
-}
-
-fn body_buffer_microbench(config: BodyBufferMicrobenchConfig) -> anyhow::Result<()> {
-    let outcome = run_body_buffer_microbench(config)?;
-    print!("{}", render_body_buffer_microbench_report(&outcome));
-    Ok(())
-}
-
-fn header_filter_microbench(config: HeaderFilterMicrobenchConfig) -> anyhow::Result<()> {
-    let outcome = run_header_filter_microbench(config)?;
-    print!("{}", render_header_filter_microbench_report(&outcome));
-    Ok(())
 }
 
 fn resolve_config_path(source: BenchmarkSourceArgs) -> anyhow::Result<PathBuf> {
@@ -467,7 +312,10 @@ fn scenario_config_path(scenario: &str) -> anyhow::Result<PathBuf> {
 
 fn scenario_config_path_in(benches_dir: &Path, scenario: &str) -> anyhow::Result<PathBuf> {
     let name = normalize_scenario_name(scenario)?;
-    for path in scenario_candidate_paths(benches_dir, name) {
+    for path in [
+        benches_dir.join(format!("{name}.yaml")),
+        benches_dir.join(format!("{name}.yml")),
+    ] {
         if path.exists() {
             return Ok(path);
         }
@@ -492,17 +340,6 @@ fn normalize_scenario_name(scenario: &str) -> anyhow::Result<&str> {
     Ok(name)
 }
 
-fn scenario_candidate_paths(benches_dir: &Path, name: &str) -> [PathBuf; 2] {
-    [
-        benches_dir.join(format!("{name}.yaml")),
-        benches_dir.join(format!("{name}.yml")),
-    ]
-}
-
-fn discover_scenarios() -> anyhow::Result<Vec<Scenario>> {
-    discover_scenarios_in(&benches_dir())
-}
-
 fn discover_scenarios_in(benches_dir: &Path) -> anyhow::Result<Vec<Scenario>> {
     let mut scenarios = BTreeMap::new();
     let entries = match std::fs::read_dir(benches_dir) {
@@ -513,7 +350,8 @@ fn discover_scenarios_in(benches_dir: &Path) -> anyhow::Result<Vec<Scenario>> {
     for entry in entries {
         let entry = entry.context("failed to read benches directory entry")?;
         let path = entry.path();
-        let Some(extension) = scenario_config_extension(&path) else {
+        let Some(extension @ ("yaml" | "yml")) = path.extension().and_then(|ext| ext.to_str())
+        else {
             continue;
         };
         let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -529,26 +367,23 @@ fn discover_scenarios_in(benches_dir: &Path) -> anyhow::Result<Vec<Scenario>> {
         .collect())
 }
 
-fn scenario_config_extension(path: &Path) -> Option<&str> {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .filter(|extension| SCENARIO_CONFIG_EXTENSIONS.contains(extension))
-}
-
 fn filter_algorithms(config: &mut BenchmarkConfig, requested: &[String]) -> anyhow::Result<()> {
     if requested.is_empty() {
         return Ok(());
     }
 
-    let requested = requested.iter().cloned().collect::<BTreeSet<_>>();
+    let requested = requested
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let available = config
         .algorithms
         .iter()
-        .map(|algorithm| algorithm.name.clone())
+        .map(|algorithm| algorithm.name.as_str())
         .collect::<BTreeSet<_>>();
     let unknown = requested
         .difference(&available)
-        .cloned()
+        .copied()
         .collect::<Vec<_>>();
     if !unknown.is_empty() {
         anyhow::bail!(
@@ -560,12 +395,8 @@ fn filter_algorithms(config: &mut BenchmarkConfig, requested: &[String]) -> anyh
 
     config
         .algorithms
-        .retain(|algorithm| requested.contains(&algorithm.name));
+        .retain(|algorithm| requested.contains(algorithm.name.as_str()));
     Ok(())
-}
-
-fn default_output_dir(config: &BenchmarkConfig) -> PathBuf {
-    Path::new(".bench-out").join(&config.name)
 }
 
 fn benches_dir() -> PathBuf {
@@ -576,33 +407,11 @@ fn benches_dir() -> PathBuf {
         .join(BENCHES_DIR)
 }
 
-fn list_scenarios() -> anyhow::Result<()> {
-    let list = ScenarioList::load(discover_scenarios()?)?;
-    print!("{}", list.render());
-    Ok(())
-}
-
-fn inspect_manifest(source: BenchmarkSourceArgs, seed: Option<u64>) -> anyhow::Result<()> {
-    let input = BenchmarkInput::load(source, seed, &[])?;
-    let rendered = serde_json::to_string_pretty(&input.manifest)
-        .context("failed to render manifest as JSON")?;
-    println!("{rendered}");
-    Ok(())
-}
-
-fn materialize(
-    source: BenchmarkSourceArgs,
-    seed: Option<u64>,
-    algorithms: Vec<String>,
-    output_dir: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    let input = BenchmarkInput::load(source, seed, &algorithms)?;
-    let output_dir = input.output_dir_or_default(output_dir);
+fn materialize(args: BenchmarkInputArgs) -> anyhow::Result<()> {
+    let (config, manifest, output_dir) = args.load()?;
     std::fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
-    let BenchmarkInput { config, manifest } = input;
-    let effective_seed = manifest.seed;
     let manifest_path = output_dir.join("manifest.json");
     let config_copy_path = output_dir.join("benchmark-config.json");
     let summary_path = output_dir.join("summary.json");
@@ -615,9 +424,9 @@ fn materialize(
 
     let summary = serde_json::json!({
         "benchmark_name": config.name,
-        "metadata": config.metadata.clone(),
+        "metadata": config.metadata,
         "model": config.model,
-        "seed": effective_seed,
+        "seed": manifest.seed,
         "request_count": manifest.request_count,
         "stargate_count": manifest.stargate_count,
         "backend_count": manifest.backend_count,
@@ -628,32 +437,26 @@ fn materialize(
     std::fs::write(&summary_path, summary_bytes)
         .with_context(|| format!("failed to write {}", summary_path.display()))?;
 
+    let rendered_output_dir = output_dir
+        .canonicalize()
+        .unwrap_or_else(|_| output_dir.to_path_buf());
     println!(
         "materialized benchmark input at {}",
-        output_dir
-            .canonicalize()
-            .unwrap_or_else(|_| output_dir.to_path_buf())
-            .display()
+        rendered_output_dir.display()
     );
     Ok(())
 }
 
-fn prepare_run(
-    source: BenchmarkSourceArgs,
-    seed: Option<u64>,
-    algorithms: Vec<String>,
-    output_dir: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    let input = BenchmarkInput::load(source, seed, &algorithms)?;
-    let output_dir = input.output_dir_or_default(output_dir);
-    let prepared = prepare_suite(&input.config, &input.manifest, &output_dir)?;
+fn prepare_run(args: BenchmarkInputArgs) -> anyhow::Result<()> {
+    let (config, manifest, output_dir) = args.load()?;
+    let prepared = prepare_suite(&config, &manifest, &output_dir)?;
+    let rendered_output_dir = output_dir
+        .canonicalize()
+        .unwrap_or_else(|_| output_dir.to_path_buf());
     println!(
         "prepared {} algorithm runs at {}",
         prepared.algorithm_runs.len(),
-        output_dir
-            .canonicalize()
-            .unwrap_or_else(|_| output_dir.to_path_buf())
-            .display()
+        rendered_output_dir.display()
     );
     for run in prepared.algorithm_runs {
         println!(
@@ -692,18 +495,13 @@ fn drive(
     Ok(())
 }
 
-fn lb_microbench(config: LbMicrobenchConfig) -> anyhow::Result<()> {
-    let rows = run_lb_microbench(&config)?;
-    write_lb_microbench_csv(std::io::stdout(), &rows).context("failed to write lb microbench CSV")
-}
-
 fn regenerate_report(output_dir: &Path) -> anyhow::Result<()> {
     let manifest = load_manifest(&output_dir.join("manifest.json"))?;
     let context = ReportContext::from_manifest(&manifest);
     let mut entries = Vec::new();
-    let dirs = std::fs::read_dir(output_dir)
-        .with_context(|| format!("failed to read output dir {}", output_dir.display()))?;
-    for entry in dirs {
+    for entry in std::fs::read_dir(output_dir)
+        .with_context(|| format!("failed to read output dir {}", output_dir.display()))?
+    {
         let entry = entry.context("failed to read output dir entry")?;
         let path = entry.path();
         if !path.is_dir()
@@ -755,25 +553,6 @@ fn read_run_info(run_dir: &Path) -> anyhow::Result<RunInfo> {
     })
 }
 
-fn run(
-    source: BenchmarkSourceArgs,
-    seed: Option<u64>,
-    algorithms: Vec<String>,
-    output_dir: Option<PathBuf>,
-    keep_resources_on_failure: bool,
-    reliability_mode: ReliabilityMode,
-) -> anyhow::Result<()> {
-    let input = BenchmarkInput::load(source, seed, &algorithms)?;
-    let output_dir = input.output_dir_or_default(output_dir);
-    crate::k8s_run::run_k8s_benchmark(
-        input.config,
-        input.manifest,
-        output_dir,
-        keep_resources_on_failure,
-        reliability_mode,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,8 +561,68 @@ mod tests {
         has_post_replay_scraped_benchmark_metrics, has_scraped_benchmark_metrics,
         routing_probe_cache_affinity_key, scraped_request_totals,
     };
-    use crate::manifest::{Manifest, ManifestRequest};
+    use crate::manifest::Manifest;
     use crate::score::summarize_with_capacity;
+    use clap::error::ErrorKind;
+    const TRANSPORT_DISABLED: &str =
+        "stargate-bench transport-bench --disable-quic-send-fairness --disable-http3-grease";
+    const MATERIALIZE_ARGS: &str = "stargate-bench materialize --scenario uniform-4-backends --seed 7 --algorithm power-of-two --output-dir out";
+    const PREPARE_ARGS: &str = "stargate-bench prepare-run --config config.yaml";
+    const RUN_ARGS: &str = "stargate-bench run --scenario uniform-4-backends --keep-resources-on-failure --reliability-mode controlled";
+    const STARGATE_REQUEST_METRIC: &str = concat!(
+        "# HELP stargate_requests_total total\n# TYPE stargate_requests_total counter\n",
+        "stargate_requests_total{model=\"dummy-model\",routing_key=\"\",status=\"ok\"} 3\n"
+    );
+    const PYLON_REQUEST_METRIC: &str = concat!(
+        "# HELP pylon_requests_total total\n# TYPE pylon_requests_total counter\n",
+        "pylon_requests_total{model=\"dummy-model\",routing_key=\"\",status=\"complete\"} 3\n"
+    );
+    macro_rules! command_json {
+        ($command:expr, $variant:ident) => {{
+            let Command::$variant(args) = Cli::try_parse_from($command.split_ascii_whitespace())
+                .expect("command should parse")
+                .command
+            else {
+                panic!("unexpected command variant");
+            };
+            serde_json::to_string(&args).expect("command args should serialize")
+        }};
+    }
+
+    #[test]
+    fn cli_preserves_transport_defaults_and_disable_flags() {
+        assert_eq!(
+            command_json!(TRANSPORT_DISABLED, TransportBench),
+            r#"{"config":{"request_count":20000,"concurrency":256,"quic_connections":1,"warmup_requests":1000,"request_body_bytes":1024,"response_body_bytes":1024,"request_chunk_bytes":16384,"response_chunk_bytes":16384,"quic_send_fairness":false,"http3_send_grease":false,"trials":1,"warmup_trials":0,"cooldown_ms":0,"randomize_order":false,"noise_threshold_cv":0.02,"min_effect_size_percent":1.0},"reliability_mode":"smoke","output_dir":null}"#
+        );
+        let defaults = command_json!("stargate-bench transport-bench", TransportBench);
+        assert!(
+            defaults.contains(r#""quic_send_fairness":true"#)
+                && defaults.contains(r#""http3_send_grease":true"#)
+        );
+    }
+
+    #[test]
+    fn cli_preserves_shared_materialize_prepare_and_run_payloads() {
+        let conflict = Cli::try_parse_from(
+            "stargate-bench materialize --config config.yaml --scenario uniform-4-backends"
+                .split_ascii_whitespace(),
+        )
+        .expect_err("config and scenario should conflict");
+        assert_eq!(conflict.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(
+            command_json!(MATERIALIZE_ARGS, Materialize),
+            r#"{"source":{"config":null,"scenario":"uniform-4-backends"},"seed":7,"algorithms":["power-of-two"],"output_dir":"out"}"#
+        );
+        assert_eq!(
+            command_json!(PREPARE_ARGS, PrepareRun),
+            r#"{"source":{"config":"config.yaml","scenario":null},"seed":null,"algorithms":[],"output_dir":null}"#
+        );
+        assert_eq!(
+            command_json!(RUN_ARGS, Run),
+            r#"{"input":{"source":{"config":null,"scenario":"uniform-4-backends"},"seed":null,"algorithms":[],"output_dir":null},"keep_resources_on_failure":true,"reliability_mode":"controlled"}"#
+        );
+    }
 
     #[test]
     fn parses_active_backend_count_metric() {
@@ -797,25 +636,14 @@ stargate_active_inference_servers{model="dummy-model",routing_key=""} 8
 
     #[test]
     fn recognizes_collector_scraped_benchmark_metrics() {
-        let metrics = r#"# HELP stargate_requests_total total
-# TYPE stargate_requests_total counter
-stargate_requests_total{model="dummy-model",routing_key="",status="ok"} 3
-# HELP pylon_requests_total total
-# TYPE pylon_requests_total counter
-pylon_requests_total{model="dummy-model",routing_key="",status="complete"} 3
-"#;
-
-        assert!(has_scraped_benchmark_metrics(metrics));
+        assert!(has_scraped_benchmark_metrics(&format!(
+            "{STARGATE_REQUEST_METRIC}{PYLON_REQUEST_METRIC}"
+        )));
     }
 
     #[test]
     fn rejects_collector_metrics_without_pylon_request_metrics() {
-        let metrics = r#"# HELP stargate_requests_total total
-# TYPE stargate_requests_total counter
-stargate_requests_total{model="dummy-model",routing_key="",status="ok"} 3
-"#;
-
-        assert!(!has_scraped_benchmark_metrics(metrics));
+        assert!(!has_scraped_benchmark_metrics(STARGATE_REQUEST_METRIC));
     }
 
     #[test]
@@ -824,25 +652,18 @@ stargate_requests_total{model="dummy-model",routing_key="",status="ok"} 3
 stargate_requests_total_total{model="dummy-model",status="ok"} 1
 pylon_requests_total_total{model="dummy-model",status="complete"} 1
 "#;
-        let stale_metrics = baseline_metrics;
         let updated_metrics = r#"
 stargate_requests_total_total{model="dummy-model",status="ok"} 4
 pylon_requests_total_total{model="dummy-model",status="complete"} 3
 "#;
         let baseline = scraped_request_totals(baseline_metrics).expect("baseline should parse");
 
-        assert!(!has_post_replay_scraped_benchmark_metrics(
-            stale_metrics,
-            baseline,
-            3,
-            2,
-        ));
-        assert!(has_post_replay_scraped_benchmark_metrics(
-            updated_metrics,
-            baseline,
-            3,
-            2,
-        ));
+        for (metrics, expected) in [(baseline_metrics, false), (updated_metrics, true)] {
+            assert_eq!(
+                has_post_replay_scraped_benchmark_metrics(metrics, baseline, 3, 2),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -854,25 +675,28 @@ pylon_requests_total_total{model="dummy-model",status="complete"} 3
 
     #[test]
     fn routing_probe_uses_synthetic_cache_key() {
-        let request = ManifestRequest {
-            request_index: 7,
-            request_id: "req-7".to_string(),
-            scheduled_offset_ms: 0,
-            routing_key: None,
-            cache_affinity_key: Some("real-cache-key".to_string()),
-            input_tokens: 128,
-            output_tokens: 16,
-            backend_behavior_class: "default".to_string(),
-        };
+        let request = generate_manifest(&load_scenario("sticky-hot-prefix"), Some(7))
+            .expect("cache scenario manifest should generate")
+            .requests
+            .into_iter()
+            .next()
+            .expect("cache scenario should contain a request");
+        let cache_key = request
+            .cache_affinity_key
+            .as_deref()
+            .expect("cache scenario request should include a cache key");
 
         let probe_key = routing_probe_cache_affinity_key(&request)
             .expect("probe should include a cache key when the benchmark request has one");
-        assert_ne!(probe_key, "real-cache-key");
+        assert_ne!(probe_key, cache_key);
         assert!(probe_key.contains("benchmark-ready-probe"));
     }
 
     #[test]
     fn real_command_execution_runs_low_cost_microbench_commands() {
+        Command::ListScenarios
+            .execute()
+            .expect("scenario listing should run");
         Command::LbMicrobench {
             iterations: 1,
             warmup_iterations: 0,
@@ -884,20 +708,20 @@ pylon_requests_total_total{model="dummy-model",status="complete"} 3
         .execute()
         .expect("real command should run lb microbench");
 
-        Command::HeaderFilterMicrobench {
+        Command::HeaderFilterMicrobench(HeaderFilterMicrobenchConfig {
             iterations: 1,
             warmup_iterations: 0,
             header_count: 1,
-        }
+        })
         .execute()
         .expect("real command should run header filter microbench");
 
-        Command::BodyBufferMicrobench {
+        Command::BodyBufferMicrobench(BodyBufferMicrobenchConfig {
             iterations: 1,
             warmup_iterations: 0,
             body_bytes: 1,
             chunk_bytes: 1,
-        }
+        })
         .execute()
         .expect("real command should run body buffer microbench");
     }
@@ -909,20 +733,16 @@ pylon_requests_total_total{model="dummy-model",status="complete"} 3
         std::fs::create_dir(&run_dir).expect("run dir should create");
         std::fs::write(
             run_dir.join("run-info.json"),
-            r#"{
-                "algorithm_name": "groq-multiregion",
-                "stargate_http_endpoint": "http://127.0.0.1:8000",
-                "run_dir": "/tmp/stargate-bench/run-groq-multiregion",
-                "backends_namespace": "stargate-bench-backends"
-            }"#,
+            r#"{"algorithm_name":"groq-multiregion","extra_metadata":"ignored"}"#,
         )
         .expect("run-info should write");
 
-        let algorithm_name = read_run_info(&run_dir)
-            .expect("run-info extra fields should be ignored")
-            .algorithm_name;
-
-        assert_eq!(algorithm_name, "groq-multiregion");
+        assert_eq!(
+            read_run_info(&run_dir)
+                .expect("run-info extra fields should be ignored")
+                .algorithm_name,
+            "groq-multiregion"
+        );
     }
 
     #[test]
@@ -966,128 +786,117 @@ pylon_requests_total_total{model="dummy-model",status="complete"} 3
         assert!(!report.contains("run-missing-summary"));
     }
 
-    fn write_scenario_config(
-        path: &Path,
-        name: &str,
-        request_count: usize,
-        backend_count: usize,
-        stargate_count: usize,
-        tags: &[&str],
-        algorithms: &[&str],
-    ) {
-        let tags_yaml = tags
-            .iter()
-            .map(|tag| format!("    - {tag}\n"))
-            .collect::<String>();
-        let algorithms_yaml = algorithms
-            .iter()
-            .map(|algorithm| {
-                format!("  - name: {algorithm}\n    config:\n      default: {algorithm}\n")
-            })
-            .collect::<String>();
-        let config = format!(
-            r#"name: {name}
-metadata:
-  tags:
-{tags_yaml}model: dummy-model
-request_count: {request_count}
-max_concurrency: 1
-stargates:
-  count: {stargate_count}
-backends:
-  count: {backend_count}
-  profile:
-    service_time_ms:
-      ttft_mean: 150
-      ttft_jitter_ms: 10
-      decode_tokens_per_s: 50
-      decode_jitter_ms: 0
-    registration:
-      last_mean_input_tps: 100.0
-traffic_pattern:
-  kind: uniform
-  routing_keys: 1
-  cache_affinity_keys: 1
-  input_tokens:
-    distribution: constant
-    value: 100
-  output_tokens:
-    distribution: constant
-    value: 20
-  arrival:
-    distribution: constant
-    interval_ms: 10
-algorithms:
-{algorithms_yaml}"#
-        );
-        std::fs::write(path, config).expect("scenario config should write");
+    fn write_scenario_config(path: &Path) {
+        let mut config = load_scenario("sticky-hot-prefix");
+        config.name = "alpha".to_string();
+        config.request_count = 7;
+        config.backends.count = 3;
+        config.stargates.count = 2;
+        config.metadata.tags = ["smoke", "cache"].map(str::to_string).to_vec();
+        config
+            .algorithms
+            .retain(|candidate| ["round-robin", "pulsar"].contains(&candidate.name.as_str()));
+        config.validate().expect("scenario fixture should validate");
+        std::fs::write(
+            path,
+            serde_yaml_ng::to_string(&config).expect("scenario config should serialize"),
+        )
+        .expect("scenario config should write");
     }
 
     fn manifest_for_report_test() -> Manifest {
-        Manifest {
-            manifest_version: 1,
-            benchmark_name: "report-regeneration-test".to_string(),
-            metadata: crate::config::ScenarioMetadata::default(),
-            model: "dummy-model".to_string(),
-            seed: 7,
-            request_count: 0,
-            max_concurrency: 1,
-            stargate_count: 1,
-            backend_count: 1,
-            cluster_count: 1,
-            pylons_per_cluster: 1,
-            requests: Vec::new(),
+        let mut manifest = generate_manifest(&load_scenario("uniform-4-backends"), Some(7))
+            .expect("report manifest should generate");
+        manifest.benchmark_name = "report-regeneration-test".to_string();
+        manifest.metadata = Default::default();
+        manifest.request_count = 0;
+        manifest.requests.clear();
+        manifest
+    }
+
+    fn load_scenario(name: &str) -> BenchmarkConfig {
+        BenchmarkConfig::load(&scenario_config_path(name).expect("scenario should resolve"))
+            .unwrap_or_else(|error| panic!("{name} should load: {error:#}"))
+    }
+
+    fn source(config: Option<&str>, scenario: Option<&str>) -> BenchmarkSourceArgs {
+        BenchmarkSourceArgs {
+            config: config.map(PathBuf::from),
+            scenario: scenario.map(str::to_string),
         }
+    }
+
+    fn benchmark_args(output_dir: Option<PathBuf>) -> BenchmarkInputArgs {
+        BenchmarkInputArgs {
+            source: source(None, Some("uniform-4-backends")),
+            seed: Some(123),
+            algorithms: ["random", "power-of-two"].map(str::to_string).to_vec(),
+            output_dir,
+        }
+    }
+
+    fn algorithm_names(config: &BenchmarkConfig) -> Vec<&str> {
+        config
+            .algorithms
+            .iter()
+            .map(|algorithm| algorithm.name.as_str())
+            .collect()
+    }
+
+    fn model_config<'a>(
+        config: &'a BenchmarkConfig,
+        algorithm_name: &str,
+    ) -> &'a serde_json::Value {
+        &config
+            .algorithms
+            .iter()
+            .find(|algorithm| algorithm.name == algorithm_name)
+            .unwrap_or_else(|| panic!("scenario should include {algorithm_name}"))
+            .config["models"]["dummy-model"]
+    }
+
+    fn topology(config: &BenchmarkConfig) -> (usize, usize, usize) {
+        (
+            config.backends.cluster_count(),
+            config.backends.pylons_per_cluster,
+            config.stargates.count,
+        )
     }
 
     #[test]
     fn scenario_name_resolves_to_bench_yaml() {
-        assert_eq!(
-            scenario_config_path("uniform-4-backends")
-                .expect("scenario should resolve")
-                .file_name()
-                .and_then(|name| name.to_str()),
-            Some("uniform-4-backends.yaml")
-        );
-        assert_eq!(
-            scenario_config_path("uniform-4-backends.yaml")
-                .expect("scenario with extension should resolve")
-                .file_name()
-                .and_then(|name| name.to_str()),
-            Some("uniform-4-backends.yaml")
-        );
+        for name in ["uniform-4-backends", "uniform-4-backends.yaml"] {
+            assert!(
+                scenario_config_path(name)
+                    .unwrap_or_else(|error| panic!("{name} should resolve: {error:#}"))
+                    .ends_with("uniform-4-backends.yaml")
+            );
+        }
     }
 
     #[test]
     fn scenario_yml_name_resolves_in_injected_benches_dir() {
         let tempdir = tempfile::tempdir().expect("tempdir should create");
-        let scenario_path = tempdir.path().join("custom-scenario.yml");
-        std::fs::write(&scenario_path, "name: custom-scenario\n")
+        let scenario_path = tempdir.path().join("raw-quic-scenario.yml");
+        std::fs::write(&scenario_path, "name: raw-quic-scenario\n")
             .expect("scenario file should write");
 
-        assert_eq!(
-            scenario_config_path_in(tempdir.path(), "custom-scenario")
-                .expect("scenario should resolve"),
-            scenario_path
-        );
-        assert_eq!(
-            scenario_config_path_in(tempdir.path(), "custom-scenario.yml")
-                .expect("scenario with yml extension should resolve"),
-            scenario_path
-        );
+        for name in ["raw-quic-scenario", "raw-quic-scenario.yml"] {
+            assert_eq!(
+                scenario_config_path_in(tempdir.path(), name)
+                    .unwrap_or_else(|error| panic!("{name} should resolve: {error:#}")),
+                scenario_path
+            );
+        }
     }
 
     #[test]
     fn scenario_discovery_lists_yaml_and_yml_configs() {
         let tempdir = tempfile::tempdir().expect("tempdir should create");
-        std::fs::write(tempdir.path().join("alpha.yml"), "name: alpha\n")
-            .expect("alpha scenario should write");
-        std::fs::write(tempdir.path().join("beta.yml"), "name: beta-yml\n")
-            .expect("beta yml scenario should write");
-        std::fs::write(tempdir.path().join("beta.yaml"), "name: beta-yaml\n")
-            .expect("beta yaml scenario should write");
-        std::fs::write(tempdir.path().join("ignored.json"), "{}")
-            .expect("ignored file should write");
+        for file in ["alpha.yml", "beta.yml", "beta.yaml", "ignored.json"] {
+            std::fs::write(tempdir.path().join(file), "")
+                .unwrap_or_else(|error| panic!("{file} should write: {error}"));
+        }
 
         let scenarios =
             discover_scenarios_in(tempdir.path()).expect("scenario discovery should work");
@@ -1107,38 +916,16 @@ algorithms:
 
     #[test]
     fn scenario_list_renders_empty_message_and_loaded_rows() {
-        let empty_list = ScenarioList::load(Vec::new()).expect("empty list should load");
         assert_eq!(
-            empty_list.render(),
+            render_scenario_list(Vec::new()).expect("empty list should render"),
             "no benchmark scenarios found under benches/\n"
         );
 
         let tempdir = tempfile::tempdir().expect("tempdir should create");
-        write_scenario_config(
-            &tempdir.path().join("alpha.yaml"),
-            "alpha",
-            7,
-            3,
-            2,
-            &["smoke", "cache"],
-            &["round-robin", "pulsar"],
-        );
+        write_scenario_config(&tempdir.path().join("alpha.yaml"));
         let scenarios =
             discover_scenarios_in(tempdir.path()).expect("scenario discovery should work");
 
-        let list = ScenarioList::load(scenarios).expect("scenario list should load");
-
-        assert_eq!(
-            list.rows,
-            vec![ScenarioListRow {
-                name: "alpha".to_string(),
-                request_count: 7,
-                backend_count: 3,
-                stargate_count: 2,
-                tags: vec!["smoke".to_string(), "cache".to_string()],
-                algorithms: vec!["round-robin".to_string(), "pulsar".to_string()],
-            }]
-        );
         let expected_header = format!(
             "{:<28} {:>8} {:>9} {:>8}  {:<24}  Algorithms",
             "Scenario", "Requests", "Backends", "Stargates", "Tags"
@@ -1148,7 +935,7 @@ algorithms:
             "alpha", 7, 3, 2, "smoke,cache", "round-robin,pulsar"
         );
         assert_eq!(
-            list.render(),
+            render_scenario_list(scenarios).expect("scenario list should render"),
             format!("{expected_header}\n{expected_row}\n")
         );
     }
@@ -1157,85 +944,43 @@ algorithms:
     fn resolve_config_path_handles_direct_scenario_missing_and_ambiguous_sources() {
         let direct_config = PathBuf::from("does-not-need-to-exist.json");
         assert_eq!(
-            resolve_config_path(BenchmarkSourceArgs {
-                config: Some(direct_config.clone()),
-                scenario: None,
-            })
-            .expect("direct config path should pass through"),
+            resolve_config_path(source(Some("does-not-need-to-exist.json"), None))
+                .expect("direct config path should pass through"),
             direct_config
         );
-        assert_eq!(
-            resolve_config_path(BenchmarkSourceArgs {
-                config: None,
-                scenario: Some("uniform-4-backends".to_string()),
-            })
-            .expect("scenario should resolve")
-            .file_name()
-            .and_then(|name| name.to_str()),
-            Some("uniform-4-backends.yaml")
+        assert!(
+            resolve_config_path(source(None, Some("uniform-4-backends")))
+                .expect("scenario should resolve")
+                .ends_with("uniform-4-backends.yaml")
         );
 
-        let missing = resolve_config_path(BenchmarkSourceArgs {
-            config: None,
-            scenario: None,
-        })
-        .expect_err("missing source should fail");
+        let missing =
+            resolve_config_path(source(None, None)).expect_err("missing source should fail");
         assert!(missing.to_string().contains("provide either"));
 
-        let ambiguous = resolve_config_path(BenchmarkSourceArgs {
-            config: Some(PathBuf::from("config.yaml")),
-            scenario: Some("uniform-4-backends".to_string()),
-        })
-        .expect_err("ambiguous source should fail");
+        let ambiguous =
+            resolve_config_path(source(Some("config.yaml"), Some("uniform-4-backends")))
+                .expect_err("ambiguous source should fail");
         assert!(ambiguous.to_string().contains("provide only one"));
     }
 
     #[test]
     fn benchmark_input_filters_algorithms_generates_seed_and_derives_output_dir() {
-        let input = BenchmarkInput::load(
-            BenchmarkSourceArgs {
-                config: None,
-                scenario: Some("uniform-4-backends".to_string()),
-            },
-            Some(123),
-            &["random".to_string(), "power-of-two".to_string()],
-        )
-        .expect("benchmark input should load");
+        let (config, manifest, output_dir) = benchmark_args(None)
+            .load()
+            .expect("benchmark input should load");
 
-        assert_eq!(input.manifest.seed, 123);
-        assert_eq!(
-            input
-                .config
-                .algorithms
-                .iter()
-                .map(|algorithm| algorithm.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["power-of-two", "random"]
-        );
-        assert_eq!(
-            input.output_dir_or_default(None),
-            Path::new(".bench-out").join(&input.config.name)
-        );
-        assert_eq!(
-            input.output_dir_or_default(Some(PathBuf::from("/tmp/explicit-bench"))),
-            PathBuf::from("/tmp/explicit-bench")
-        );
+        assert_eq!(manifest.seed, 123);
+        assert_eq!(algorithm_names(&config), ["power-of-two", "random"]);
+        assert_eq!(output_dir, Path::new(".bench-out").join(&config.name));
     }
 
     #[test]
     fn materialize_uses_benchmark_input_for_filtered_manifest_and_summary() {
         let tempdir = tempfile::tempdir().expect("tempdir should create");
 
-        materialize(
-            BenchmarkSourceArgs {
-                config: None,
-                scenario: Some("uniform-4-backends".to_string()),
-            },
-            Some(123),
-            vec!["random".to_string(), "power-of-two".to_string()],
-            Some(tempdir.path().to_path_buf()),
-        )
-        .expect("materialize should complete");
+        materialize(benchmark_args(Some(tempdir.path().to_path_buf())))
+            .expect("materialize should complete");
 
         let manifest =
             load_manifest(&tempdir.path().join("manifest.json")).expect("manifest should load");
@@ -1246,14 +991,7 @@ algorithms:
             .expect("summary should load");
 
         assert_eq!(manifest.seed, 123);
-        assert_eq!(
-            config_copy
-                .algorithms
-                .iter()
-                .map(|algorithm| algorithm.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["power-of-two", "random"]
-        );
+        assert_eq!(algorithm_names(&config_copy), ["power-of-two", "random"]);
         assert_eq!(summary["seed"], 123);
         assert_eq!(
             summary["algorithm_names"],
@@ -1263,9 +1001,7 @@ algorithms:
 
     #[test]
     fn queue_mismatch_ab_scenario_changes_only_admission_enabled_behavior() {
-        let config =
-            BenchmarkConfig::load(&scenario_config_path("queue-mismatch-retry-ab").unwrap())
-                .expect("A/B scenario config should load");
+        let config = load_scenario("queue-mismatch-retry-ab");
         assert!(
             config.request_count >= 2048,
             "queue mismatch A/B evidence needs at least 2048 requests per arm"
@@ -1281,40 +1017,25 @@ algorithms:
             .as_ref()
             .expect("disabled variant should specify admission");
 
-        assert!(enabled.enabled);
-        assert!(!disabled.enabled);
-        assert_eq!(enabled.min_delta_ms, disabled.min_delta_ms);
-        assert_eq!(enabled.tolerance_factor, disabled.tolerance_factor);
-        assert_eq!(enabled.retry_after_ms, disabled.retry_after_ms);
+        let mut expected_disabled = enabled.clone();
+        assert!(expected_disabled.enabled && !disabled.enabled);
+        expected_disabled.enabled = false;
+        assert_eq!(&expected_disabled, disabled);
     }
 
     #[test]
     fn algorithm_filter_keeps_requested_algorithms_in_config_order() {
-        let mut config =
-            BenchmarkConfig::load(&scenario_config_path("uniform-4-backends").unwrap())
-                .expect("scenario config should load");
+        let mut config = load_scenario("uniform-4-backends");
 
-        filter_algorithms(
-            &mut config,
-            &["random".to_string(), "power-of-two".to_string()],
-        )
-        .expect("algorithm filter should succeed");
+        filter_algorithms(&mut config, &benchmark_args(None).algorithms)
+            .expect("algorithm filter should succeed");
 
-        assert_eq!(
-            config
-                .algorithms
-                .iter()
-                .map(|algorithm| algorithm.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["power-of-two", "random"]
-        );
+        assert_eq!(algorithm_names(&config), ["power-of-two", "random"]);
     }
 
     #[test]
     fn algorithm_filter_rejects_unknown_algorithms() {
-        let mut config =
-            BenchmarkConfig::load(&scenario_config_path("uniform-4-backends").unwrap())
-                .expect("scenario config should load");
+        let mut config = load_scenario("uniform-4-backends");
 
         let error = filter_algorithms(&mut config, &["missing".to_string()])
             .expect_err("unknown algorithm should fail");
@@ -1324,6 +1045,24 @@ algorithms:
 
     #[test]
     fn load_balance_sweep_scenarios_cover_grouped_topologies_and_all_algorithms() {
+        const STANDARD_ALGORITHMS: &[&str] = &[
+            "power-of-two",
+            "round-robin",
+            "random",
+            "groq-multiregion",
+            "pulsar",
+        ];
+        const PREFIX_ALGORITHMS: &[&str] = &[
+            "power-of-two",
+            "round-robin",
+            "random",
+            "groq-multiregion",
+            "groq-multiregion-affinity",
+            "pulsar",
+            "pulsar-consider-kv-free-tokens",
+            "pulsar-multiregion",
+            "pulsar-multiregion-consider-kv-free-tokens",
+        ];
         for (scenario, clusters, pylons_per_cluster, stargates) in [
             ("lb-balance-smoke-2c2p-1s", 2, 2, 1),
             ("lb-balance-bursty-4c2p-2s", 4, 2, 2),
@@ -1331,88 +1070,49 @@ algorithms:
             ("lb-balance-prefix-reuse-smoke-2c2p-1s", 2, 2, 1),
             ("lb-balance-prefix-reuse-4c2p-2s", 4, 2, 2),
         ] {
-            let config = BenchmarkConfig::load(&scenario_config_path(scenario).unwrap())
-                .unwrap_or_else(|error| panic!("{scenario} should load: {error:#}"));
+            let config = load_scenario(scenario);
             config
                 .validate()
                 .unwrap_or_else(|error| panic!("{scenario} should validate: {error:#}"));
-            assert_eq!(config.backends.cluster_count(), clusters, "{scenario}");
             assert_eq!(
-                config.backends.pylons_per_cluster, pylons_per_cluster,
+                topology(&config),
+                (clusters, pylons_per_cluster, stargates),
                 "{scenario}"
             );
-            assert_eq!(config.stargates.count, stargates, "{scenario}");
-            let expected_algorithms = if scenario.contains("prefix-reuse") {
-                vec![
-                    "power-of-two",
-                    "round-robin",
-                    "random",
-                    "groq-multiregion",
-                    "groq-multiregion-affinity",
-                    "pulsar",
-                    "pulsar-consider-kv-free-tokens",
-                    "pulsar-multiregion",
-                    "pulsar-multiregion-consider-kv-free-tokens",
-                ]
+            let prefix_reuse = scenario.contains("prefix-reuse");
+            let expected_algorithms = if prefix_reuse {
+                PREFIX_ALGORITHMS
             } else {
-                vec![
-                    "power-of-two",
-                    "round-robin",
-                    "random",
-                    "groq-multiregion",
-                    "pulsar",
-                ]
+                STANDARD_ALGORITHMS
             };
-            assert_eq!(
-                config
-                    .algorithms
-                    .iter()
-                    .map(|algorithm| algorithm.name.as_str())
-                    .collect::<Vec<_>>(),
-                expected_algorithms,
-                "{scenario}"
-            );
-            if scenario.contains("prefix-reuse") {
-                let affinity_gmr = config
-                    .algorithms
-                    .iter()
-                    .find(|algorithm| algorithm.name == "groq-multiregion-affinity")
-                    .expect("prefix-reuse scenario should include cache-affine GMR");
-                let model_config = &affinity_gmr.config["models"]["dummy-model"];
-                assert_eq!(model_config["algorithm"], "groq-multiregion", "{scenario}");
+            assert_eq!(algorithm_names(&config), expected_algorithms, "{scenario}");
+            if prefix_reuse {
+                let affinity = model_config(&config, "groq-multiregion-affinity");
                 assert_eq!(
-                    model_config["require_cache_affinity_key"], true,
+                    (
+                        affinity["algorithm"].as_str(),
+                        affinity["require_cache_affinity_key"].as_bool(),
+                        affinity["cache_affinity_backend_selection_count"].as_u64(),
+                    ),
+                    (Some("groq-multiregion"), Some(true), Some(1)),
                     "{scenario}"
                 );
+                let multiregion = model_config(&config, "pulsar-multiregion");
                 assert_eq!(
-                    model_config["cache_affinity_backend_selection_count"], 1,
-                    "{scenario}"
-                );
-                let pulsar_multiregion = config
-                    .algorithms
-                    .iter()
-                    .find(|algorithm| algorithm.name == "pulsar-multiregion")
-                    .expect("prefix-reuse scenario should include pulsar-multiregion");
-                let model_config = &pulsar_multiregion.config["models"]["dummy-model"];
-                assert_eq!(
-                    model_config["algorithm"], "pulsar-multiregion",
-                    "{scenario}"
-                );
-                assert_eq!(
-                    model_config["require_cache_affinity_key"], true,
+                    (
+                        multiregion["algorithm"].as_str(),
+                        multiregion["require_cache_affinity_key"].as_bool(),
+                    ),
+                    (Some("pulsar-multiregion"), Some(true)),
                     "{scenario}"
                 );
                 assert!(
-                    model_config.get("queue_slo_ms").is_none(),
+                    multiregion.get("queue_slo_ms").is_none(),
                     "{scenario} should not use the removed queue-SLO alias"
                 );
-                let pulsar = config
-                    .algorithms
-                    .iter()
-                    .find(|algorithm| algorithm.name == "pulsar")
-                    .expect("prefix-reuse scenario should include pulsar");
+                let pulsar = model_config(&config, "pulsar");
                 assert_eq!(
-                    model_config["seed"], pulsar.config["models"]["dummy-model"]["seed"],
+                    multiregion["seed"], pulsar["seed"],
                     "{scenario} should compare PULSAR fallback modes over the same cache-owner ranking"
                 );
                 for (name, algorithm) in [
@@ -1422,17 +1122,15 @@ algorithms:
                         "pulsar-multiregion",
                     ),
                 ] {
-                    let kv_aware = config
-                        .algorithms
-                        .iter()
-                        .find(|candidate| candidate.name == name)
-                        .unwrap_or_else(|| panic!("{scenario} should include {name}"));
-                    let kv_model = &kv_aware.config["models"]["dummy-model"];
-                    assert_eq!(kv_model["algorithm"], algorithm, "{scenario}");
-                    assert_eq!(kv_model["consider_kv_free_tokens"], true, "{scenario}");
+                    let kv_model = model_config(&config, name);
                     assert_eq!(
-                        kv_model["seed"], pulsar.config["models"]["dummy-model"]["seed"],
-                        "{scenario} should compare KV consideration over the same cache-owner ranking"
+                        (
+                            kv_model["algorithm"].as_str(),
+                            kv_model["consider_kv_free_tokens"].as_bool(),
+                            kv_model["seed"].as_u64(),
+                        ),
+                        (Some(algorithm), Some(true), pulsar["seed"].as_u64()),
+                        "{scenario}"
                     );
                 }
             }
@@ -1441,24 +1139,15 @@ algorithms:
 
     #[test]
     fn pulsar_multiregion_slo_scenario_is_a_controlled_fallback_comparison() {
-        let config = BenchmarkConfig::load(
-            &scenario_config_path("lb-balance-prefix-reuse-pmr-slo-4c2p-1s").unwrap(),
-        )
-        .expect("controlled PMR fallback scenario should load");
+        let config = load_scenario("lb-balance-prefix-reuse-pmr-slo-4c2p-1s");
 
         config
             .validate()
             .expect("controlled PMR fallback scenario should validate");
-        assert_eq!(config.stargates.count, 1);
-        assert_eq!(config.backends.cluster_count(), 4);
-        assert_eq!(config.backends.pylons_per_cluster, 2);
+        assert_eq!(topology(&config), (4, 2, 1));
         assert_eq!(
-            config
-                .algorithms
-                .iter()
-                .map(|algorithm| algorithm.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["groq-multiregion-affinity", "pulsar", "pulsar-multiregion"]
+            algorithm_names(&config),
+            ["groq-multiregion-affinity", "pulsar", "pulsar-multiregion"]
         );
         assert!(config.algorithms.iter().all(|algorithm| {
             algorithm
@@ -1474,18 +1163,12 @@ algorithms:
             ),
             _ => panic!("controlled PMR scenario must use growing prefixes"),
         }
-        let pmr = config
-            .algorithms
-            .iter()
-            .find(|algorithm| algorithm.name == "pulsar-multiregion")
-            .expect("scenario should include pulsar-multiregion");
-        assert_eq!(
-            pmr.config["models"]["dummy-model"]["max_queue_time_floor_ms"], 4000,
-            "controlled PMR scenario must leave enough queue budget for useful fallback routing"
-        );
-        assert_eq!(
-            pmr.config["models"]["dummy-model"]["max_queue_time_ceil_ms"], 4000,
-            "controlled PMR scenario must leave enough queue budget for useful fallback routing"
-        );
+        let pmr = model_config(&config, "pulsar-multiregion");
+        for key in ["max_queue_time_floor_ms", "max_queue_time_ceil_ms"] {
+            assert_eq!(
+                pmr[key], 4000,
+                "controlled PMR scenario must leave enough queue budget for useful fallback routing"
+            );
+        }
     }
 }

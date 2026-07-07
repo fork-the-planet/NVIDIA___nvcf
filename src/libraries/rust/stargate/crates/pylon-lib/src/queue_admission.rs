@@ -47,6 +47,7 @@ impl Default for PylonQueueMismatchRetryConfig {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LiveRequestState {
     inner: Arc<Mutex<QueueAdmissionState>>,
+    observation_order: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Default)]
@@ -58,21 +59,13 @@ struct QueueAdmissionState {
 #[derive(Debug, Default)]
 struct QueueModelState {
     last_mean_input_tps: Option<f64>,
-    running_requests: usize,
-    // Keep input totals exact internally so public saturation does not make
-    // current-request exclusion or later removal lossy.
+    phase_requests: [usize; 3],
+    // Exact totals keep public saturation from making exclusion or removal lossy.
     total_input_tokens: u128,
-    input_processing_requests: usize,
-    output_generation_requests: usize,
+    observed_input_tokens: [u128; RequestObservationState::Complete as usize],
     active_chat_output_tps_sum: f64,
     active_chat_output_requests: usize,
-    prompt_work_by_priority: BTreeMap<u32, PromptWork>,
-}
-
-#[derive(Debug, Default)]
-struct PromptWork {
-    request_count: usize,
-    input_tokens: u128,
+    prompt_work_by_priority: BTreeMap<u32, u128>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,12 +79,25 @@ struct TrackedPromptRequest {
 
 #[derive(Clone, Debug)]
 enum LiveRequest {
-    QueueOnly(TrackedPromptRequest),
-    ObservedOnly(ObservedRequestState),
-    QueueAndObserved {
-        queue: TrackedPromptRequest,
-        observed: ObservedRequestState,
-    },
+    Queue(TrackedPromptRequest, Option<ObservedRequestState>),
+    Observed(ObservedRequestState),
+}
+
+impl LiveRequest {
+    fn into_observed(self) -> Option<ObservedRequestState> {
+        match self {
+            Self::Queue(_, observed) => observed,
+            Self::Observed(observed) => Some(observed),
+        }
+    }
+
+    fn update_active_output_tps(&mut self, value: Option<f64>) -> Option<String> {
+        let Self::Queue(queue, _) = self else {
+            return None;
+        };
+        queue.active_chat_output_tps = value.filter(|tps| tps.is_finite() && *tps > 0.0);
+        Some(queue.model_id.clone())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,6 +112,14 @@ pub(crate) struct RequestObservationTransition {
     pub(crate) changed_model_ids: Vec<String>,
     pub(crate) prior: Option<ObservedRequestState>,
     pub(crate) current: Option<ObservedRequestState>,
+    pub(crate) input_token_totals: Vec<ObservedInputTokenTotal>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObservedInputTokenTotal {
+    pub(crate) model_id: String,
+    pub(crate) state: RequestObservationState,
+    pub(crate) input_tokens: u128,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -170,14 +184,14 @@ impl QueueAdmissionDecision {
             Self::Accepted { expected_ms, .. }
             | Self::Rejected { expected_ms, .. }
             | Self::UnknownLocalEstimate { expected_ms } => Some(*expected_ms),
-            Self::MissingEstimate | Self::Disabled => None,
+            _ => None,
         }
     }
 
     pub(crate) fn actual_ms(&self) -> Option<u64> {
         match self {
             Self::Accepted { actual_ms, .. } | Self::Rejected { actual_ms, .. } => Some(*actual_ms),
-            Self::MissingEstimate | Self::UnknownLocalEstimate { .. } | Self::Disabled => None,
+            _ => None,
         }
     }
 
@@ -186,16 +200,24 @@ impl QueueAdmissionDecision {
             Self::Accepted { threshold_ms, .. } | Self::Rejected { threshold_ms, .. } => {
                 Some(*threshold_ms)
             }
-            Self::MissingEstimate | Self::UnknownLocalEstimate { .. } | Self::Disabled => None,
+            _ => None,
         }
     }
 }
 
 impl LiveRequestState {
     pub(crate) fn update_model_throughput(&self, model_id: &str, last_mean_input_tps: f64) {
-        self.inner
-            .lock()
-            .update_model_throughput(model_id, last_mean_input_tps);
+        let mut state = self.inner.lock();
+        if valid_last_mean_input_tps(last_mean_input_tps) {
+            state
+                .models
+                .entry(model_id.to_string())
+                .or_default()
+                .last_mean_input_tps = Some(last_mean_input_tps);
+        } else if let Some(model) = state.models.get_mut(model_id) {
+            model.last_mean_input_tps = None;
+            state.remove_model_if_unused(model_id);
+        }
     }
 
     pub(crate) fn evaluate(
@@ -207,14 +229,28 @@ impl LiveRequestState {
         if !config.enabled {
             return QueueAdmissionDecision::Disabled;
         }
-        let Some(expected_ms) = parse_expected_queue_ms(headers) else {
+        let Some(expected_ms) = headers
+            .get(HEADER_STARGATE_EXPECTED_QUEUE_MS)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+        else {
             return QueueAdmissionDecision::MissingEstimate;
         };
-        let Some(actual_ms) = self.queue_estimate_ms_for_priority_excluding(
-            &required.model_id,
-            required.priority,
-            &required.request_id,
-        ) else {
+        let actual_ms = {
+            let state = self.inner.lock();
+            state.models.get(&required.model_id).and_then(|model| {
+                let excluded_request = state
+                    .requests
+                    .get(&required.request_id)
+                    .and_then(|request| match request {
+                        LiveRequest::Queue(queue, _) => Some(queue),
+                        LiveRequest::Observed(_) => None,
+                    })
+                    .filter(|request| request.model_id == required.model_id);
+                model.queue_estimate_ms_for_priority_excluding(required.priority, excluded_request)
+            })
+        };
+        let Some(actual_ms) = actual_ms else {
             return QueueAdmissionDecision::UnknownLocalEstimate { expected_ms };
         };
         let threshold_ms = mismatch_threshold_ms(expected_ms, config);
@@ -238,6 +274,7 @@ impl LiveRequestState {
         &self,
         required: &RequiredTunnelHeaders,
     ) -> QueueTrackedRequestGuard {
+        let request_id = required.request_id.clone();
         let request = TrackedPromptRequest {
             model_id: required.model_id.clone(),
             priority: required.priority,
@@ -245,26 +282,37 @@ impl LiveRequestState {
             phase: TrackedPromptPhase::Pending,
             active_chat_output_tps: None,
         };
-        self.inner
-            .lock()
-            .start_queue_request(required.request_id.clone(), request);
+        {
+            let mut state = self.inner.lock();
+            let observed = state
+                .remove_request(&request_id)
+                .and_then(|(_, request)| request.into_observed());
+            state.insert_request(request_id.clone(), LiveRequest::Queue(request, observed));
+        }
         QueueTrackedRequestGuard {
             live_requests: self.clone(),
-            request_id: required.request_id.clone(),
+            request_id,
             finished: false,
         }
     }
 
     pub(crate) fn snapshot_model(&self, model_id: &str) -> QueueModelSnapshot {
-        let state = self.inner.lock();
-        state.snapshot_model(model_id)
+        self.inner
+            .lock()
+            .models
+            .get(model_id)
+            .map_or_else(QueueModelSnapshot::default, QueueModelState::snapshot)
     }
 
-    pub(crate) fn transition_observation(
+    pub(crate) fn transition_observation_with(
         &self,
         observation: &RequestObservation,
+        observe: impl FnOnce(&RequestObservationTransition),
     ) -> RequestObservationTransition {
-        self.inner.lock().transition_observation(observation)
+        let _order = self.observation_order.lock();
+        let transition = self.inner.lock().transition_observation(observation);
+        observe(&transition);
+        transition
     }
 
     pub(crate) fn update_active_output_tps(
@@ -277,127 +325,85 @@ impl LiveRequestState {
             .update_active_output_tps(request_id, active_chat_output_tps)
     }
 
-    fn queue_estimate_ms_for_priority_excluding(
-        &self,
-        model_id: &str,
-        priority: u32,
-        excluded_request_id: &str,
-    ) -> Option<u64> {
-        let state = self.inner.lock();
-        state.queue_estimate_ms_for_priority_excluding(model_id, priority, excluded_request_id)
-    }
-
-    fn advance_request_phase(&self, request_id: &str, phase: TrackedPromptPhase) {
-        let _ = self.inner.lock().advance_request_phase(request_id, phase);
-    }
-
     pub(crate) fn finish_queue_request(&self, request_id: &str) {
-        self.inner.lock().finish_queue_request(request_id);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tracked_request_count(&self) -> usize {
-        self.inner
-            .lock()
-            .requests
-            .values()
-            .filter(|request| request.queue().is_some())
-            .count()
+        let mut state = self.inner.lock();
+        if let Some((request_id, request)) = state.remove_request(request_id)
+            && let Some(observed) = request.into_observed()
+        {
+            state.insert_request(request_id, LiveRequest::Observed(observed));
+        }
     }
 }
 
 impl QueueAdmissionState {
-    fn update_model_throughput(&mut self, model_id: &str, last_mean_input_tps: f64) {
-        if valid_last_mean_input_tps(last_mean_input_tps) {
-            self.models
-                .entry(model_id.to_string())
-                .or_default()
-                .last_mean_input_tps = Some(last_mean_input_tps);
-            return;
-        }
-
-        let remove_model = self.models.get_mut(model_id).is_some_and(|model| {
-            model.last_mean_input_tps = None;
-            model.is_unused()
-        });
-        if remove_model {
-            self.models.remove(model_id);
-        }
-    }
-
-    fn start_queue_request(&mut self, request_id: String, request: TrackedPromptRequest) {
-        let (_, observed) = self.take_request(&request_id);
-        self.put_request(request_id, Some(request), observed);
-    }
-
-    fn finish_queue_request(&mut self, request_id: &str) {
-        let (_, observed) = self.take_request(request_id);
-        self.put_request(request_id.to_string(), None, observed);
-    }
-
     fn transition_observation(
         &mut self,
         observation: &RequestObservation,
     ) -> RequestObservationTransition {
-        let (prior_queue, prior_observed) = self.take_request(&observation.request_id);
+        let (request_id, prior_queue, prior_observed) =
+            match self.remove_request(&observation.request_id) {
+                Some((request_id, LiveRequest::Queue(queue, observed))) => {
+                    (request_id, Some(queue), observed)
+                }
+                Some((request_id, LiveRequest::Observed(observed))) => {
+                    (request_id, None, Some(observed))
+                }
+                None => (observation.request_id.clone(), None, None),
+            };
         let changed_model_ids = changed_model_ids(
             &observation.model_id,
             [
-                prior_queue.as_ref().map(|request| request.model_id.clone()),
+                prior_queue
+                    .as_ref()
+                    .map(|request| request.model_id.as_str()),
                 prior_observed
                     .as_ref()
-                    .map(|request| request.model_id.clone()),
+                    .map(|request| request.model_id.as_str()),
             ],
         );
-        if observation.is_terminal() {
-            return RequestObservationTransition {
-                changed_model_ids,
-                prior: prior_observed,
-                current: None,
-            };
-        }
-        let phase = match observation.state {
-            RequestObservationState::Queued | RequestObservationState::UpstreamConnecting => {
-                TrackedPromptPhase::Pending
-            }
-            RequestObservationState::InputProcessing => TrackedPromptPhase::InputProcessing,
-            RequestObservationState::OutputGeneration => TrackedPromptPhase::OutputGeneration,
-            RequestObservationState::Complete
-            | RequestObservationState::Failed
-            | RequestObservationState::Cancelled => unreachable!("terminal observations returned"),
-        };
-        let phase = prior_queue
-            .as_ref()
-            .map(|prior| phase.max(prior.phase))
-            .unwrap_or(phase);
-        let active_chat_output_tps = if phase == TrackedPromptPhase::OutputGeneration {
-            prior_queue
-                .as_ref()
-                .and_then(|request| request.active_chat_output_tps)
-        } else {
+        let current = if observation.is_terminal() {
             None
-        };
-        let current = ObservedRequestState {
-            model_id: observation.model_id.clone(),
-            state: observation.state,
-            input_tokens: observation.input_tokens,
-        };
-        self.put_request(
-            observation.request_id.clone(),
-            Some(TrackedPromptRequest {
+        } else {
+            let phase = [
+                TrackedPromptPhase::Pending,
+                TrackedPromptPhase::Pending,
+                TrackedPromptPhase::InputProcessing,
+                TrackedPromptPhase::OutputGeneration,
+            ][observation.state as usize];
+            let phase = prior_queue
+                .as_ref()
+                .map_or(phase, |prior| phase.max(prior.phase));
+            let active_chat_output_tps = prior_queue
+                .as_ref()
+                .filter(|_| phase == TrackedPromptPhase::OutputGeneration)
+                .and_then(|request| request.active_chat_output_tps);
+            let current = ObservedRequestState {
                 model_id: observation.model_id.clone(),
-                priority: observation.priority,
+                state: observation.state,
                 input_tokens: observation.input_tokens,
-                phase,
-                active_chat_output_tps: active_chat_output_tps
-                    .filter(|output_tps| output_tps.is_finite() && *output_tps > 0.0),
-            }),
-            Some(current.clone()),
-        );
+            };
+            self.insert_request(
+                request_id,
+                LiveRequest::Queue(
+                    TrackedPromptRequest {
+                        model_id: observation.model_id.clone(),
+                        priority: observation.priority,
+                        input_tokens: observation.input_tokens,
+                        phase,
+                        active_chat_output_tps,
+                    },
+                    Some(current.clone()),
+                ),
+            );
+            Some(current)
+        };
+        let input_token_totals =
+            self.input_token_totals([prior_observed.as_ref(), current.as_ref()]);
         RequestObservationTransition {
             changed_model_ids,
             prior: prior_observed,
-            current: Some(current),
+            current,
+            input_token_totals,
         }
     }
 
@@ -406,260 +412,165 @@ impl QueueAdmissionState {
         request_id: &str,
         active_chat_output_tps: Option<f64>,
     ) -> Option<String> {
-        let (queue, observed) = self.take_request(request_id);
-        let Some(mut queue) = queue else {
-            self.put_request(request_id.to_string(), None, observed);
-            return None;
-        };
-        queue.active_chat_output_tps =
-            active_chat_output_tps.filter(|output_tps| output_tps.is_finite() && *output_tps > 0.0);
-        let model_id = queue.model_id.clone();
-        self.put_request(request_id.to_string(), Some(queue), observed);
-        Some(model_id)
+        let (request_id, mut request) = self.remove_request(request_id)?;
+        let model_id = request.update_active_output_tps(active_chat_output_tps);
+        self.insert_request(request_id, request);
+        model_id
     }
 
-    fn advance_request_phase(&mut self, request_id: &str, next_phase: TrackedPromptPhase) -> bool {
-        let Self {
-            requests, models, ..
-        } = self;
-        let Some(request) = requests
-            .get_mut(request_id)
-            .and_then(LiveRequest::queue_mut)
-        else {
-            return false;
-        };
-        if next_phase <= request.phase {
-            return true;
-        }
-        models
-            .get_mut(&request.model_id)
-            .expect("tracked request should have model queue state")
-            .advance_request_phase(request, next_phase);
-        request.phase = next_phase;
-        true
-    }
-
-    fn take_request(
-        &mut self,
-        request_id: &str,
-    ) -> (Option<TrackedPromptRequest>, Option<ObservedRequestState>) {
-        let Some(request) = self.requests.remove(request_id) else {
-            return (None, None);
-        };
-        let (queue, observed) = request.into_parts();
-        if let Some(queue) = &queue {
-            self.remove_request_from_model(queue);
-        }
-        (queue, observed)
-    }
-
-    fn put_request(
-        &mut self,
-        request_id: String,
-        queue: Option<TrackedPromptRequest>,
-        observed: Option<ObservedRequestState>,
-    ) {
-        let Some(request) = LiveRequest::from_parts(queue, observed) else {
+    fn advance_request_phase(&mut self, request_id: &str, next_phase: TrackedPromptPhase) {
+        let Some(LiveRequest::Queue(request, _)) = self.requests.get_mut(request_id) else {
             return;
         };
-        if let Some(queue) = request.queue() {
-            self.add_request_to_model(queue);
+        if next_phase <= request.phase {
+            return;
         }
+        let model = self
+            .models
+            .get_mut(&request.model_id)
+            .expect("tracked request should have model queue state");
+        model.adjust_phase(request.phase, request.priority, request.input_tokens, -1);
+        model.adjust_phase(next_phase, request.priority, request.input_tokens, 1);
+        request.phase = next_phase;
+    }
+
+    fn remove_request(&mut self, request_id: &str) -> Option<(String, LiveRequest)> {
+        let (request_id, request) = self.requests.remove_entry(request_id)?;
+        self.adjust_live_request(&request, -1);
+        Some((request_id, request))
+    }
+
+    fn insert_request(&mut self, request_id: String, request: LiveRequest) {
+        self.adjust_live_request(&request, 1);
         self.requests.insert(request_id, request);
     }
 
-    fn snapshot_model(&self, model_id: &str) -> QueueModelSnapshot {
-        self.models
-            .get(model_id)
-            .map(QueueModelState::snapshot)
-            .unwrap_or_default()
-    }
-
-    fn queue_estimate_ms_for_priority_excluding(
-        &self,
-        model_id: &str,
-        priority: u32,
-        excluded_request_id: &str,
-    ) -> Option<u64> {
-        let model = self.models.get(model_id)?;
-        let excluded_request = self
-            .requests
-            .get(excluded_request_id)
-            .and_then(LiveRequest::queue)
-            .filter(|request| request.model_id == model_id);
-        model.queue_estimate_ms_for_priority_excluding(priority, excluded_request)
-    }
-
-    fn add_request_to_model(&mut self, request: &TrackedPromptRequest) {
-        self.models
-            .entry(request.model_id.clone())
-            .or_default()
-            .add_request(request);
-    }
-
-    fn remove_request_from_model(&mut self, request: &TrackedPromptRequest) {
-        let remove_model = {
-            let model = self
-                .models
-                .get_mut(&request.model_id)
-                .expect("tracked request should have model queue state");
-            model.remove_request(request);
-            model.is_unused()
+    fn adjust_live_request(&mut self, request: &LiveRequest, delta: i8) {
+        let (queue, observed) = match request {
+            LiveRequest::Queue(queue, observed) => (Some(queue), observed.as_ref()),
+            LiveRequest::Observed(observed) => (None, Some(observed)),
         };
-        if remove_model {
-            self.models.remove(&request.model_id);
+        if let Some(observed) = observed {
+            let model = self.models.entry(observed.model_id.clone()).or_default();
+            let total = &mut model.observed_input_tokens[observed.state as usize];
+            *total = total
+                .checked_add_signed(i128::from(observed.input_tokens) * i128::from(delta))
+                .expect("observed input token total overflowed or underflowed");
         }
+        if let Some(queue) = queue {
+            self.models
+                .entry(queue.model_id.clone())
+                .or_default()
+                .adjust_request(queue, delta);
+        }
+        if delta < 0 {
+            let model_ids = [
+                observed.map(|request| request.model_id.as_str()),
+                queue.map(|request| request.model_id.as_str()),
+            ];
+            for model_id in model_ids.into_iter().flatten() {
+                self.remove_model_if_unused(model_id);
+            }
+        }
+    }
+
+    fn remove_model_if_unused(&mut self, model_id: &str) {
+        if matches!(self.models.get(model_id), Some(model) if model.is_unused()) {
+            self.models.remove(model_id);
+        }
+    }
+
+    fn input_token_totals(
+        &self,
+        requests: [Option<&ObservedRequestState>; 2],
+    ) -> Vec<ObservedInputTokenTotal> {
+        let mut totals = Vec::with_capacity(2);
+        for request in requests.into_iter().flatten() {
+            if totals.iter().any(|total: &ObservedInputTokenTotal| {
+                total.model_id == request.model_id && total.state == request.state
+            }) {
+                continue;
+            }
+            totals.push(ObservedInputTokenTotal {
+                model_id: request.model_id.clone(),
+                state: request.state,
+                input_tokens: self.models.get(&request.model_id).map_or(0, |model| {
+                    model.observed_input_tokens[request.state as usize]
+                }),
+            });
+        }
+        totals
     }
 }
 
 impl QueueModelState {
-    fn add_request(&mut self, request: &TrackedPromptRequest) {
-        self.running_requests = self
-            .running_requests
-            .checked_add(1)
-            .expect("model running request count overflowed");
+    fn adjust_request(&mut self, request: &TrackedPromptRequest, request_delta: i8) {
         self.total_input_tokens = self
             .total_input_tokens
-            .checked_add(u128::from(request.input_tokens))
-            .expect("model total input tokens overflowed");
-        self.add_phase(request.phase, request.priority, request.input_tokens);
-        if let Some(output_tps) = request.active_chat_output_tps {
-            self.active_chat_output_tps_sum += output_tps;
-            self.active_chat_output_requests = self
-                .active_chat_output_requests
-                .checked_add(1)
-                .expect("model active output request count overflowed");
-        }
+            .checked_add_signed(i128::from(request.input_tokens) * i128::from(request_delta))
+            .expect("model total input tokens overflowed or underflowed");
+        self.adjust_phase(
+            request.phase,
+            request.priority,
+            request.input_tokens,
+            request_delta,
+        );
+        self.active_chat_output_tps_sum +=
+            request.active_chat_output_tps.unwrap_or_default() * f64::from(request_delta);
+        self.active_chat_output_requests = self
+            .active_chat_output_requests
+            .checked_add_signed(if request.active_chat_output_tps.is_some() {
+                isize::from(request_delta)
+            } else {
+                0
+            })
+            .expect("model active output request count overflowed or underflowed");
     }
 
-    fn remove_request(&mut self, request: &TrackedPromptRequest) {
-        self.running_requests = self
-            .running_requests
-            .checked_sub(1)
-            .expect("model running request count underflowed");
-        self.total_input_tokens = self
-            .total_input_tokens
-            .checked_sub(u128::from(request.input_tokens))
-            .expect("model total input tokens underflowed");
-        self.remove_phase(request.phase, request.priority, request.input_tokens);
-        if let Some(output_tps) = request.active_chat_output_tps {
-            self.active_chat_output_tps_sum -= output_tps;
-            self.active_chat_output_requests = self
-                .active_chat_output_requests
-                .checked_sub(1)
-                .expect("model active output request count underflowed");
-        }
-    }
-
-    fn advance_request_phase(
+    fn adjust_phase(
         &mut self,
-        request: &TrackedPromptRequest,
-        next_phase: TrackedPromptPhase,
+        phase: TrackedPromptPhase,
+        priority: u32,
+        input_tokens: u64,
+        request_delta: i8,
     ) {
-        self.remove_phase(request.phase, request.priority, request.input_tokens);
-        self.add_phase(next_phase, request.priority, request.input_tokens);
-    }
-
-    fn add_phase(&mut self, phase: TrackedPromptPhase, priority: u32, input_tokens: u64) {
-        match phase {
-            TrackedPromptPhase::Pending => {}
-            TrackedPromptPhase::InputProcessing => {
-                self.input_processing_requests = self
-                    .input_processing_requests
-                    .checked_add(1)
-                    .expect("model input-processing request count overflowed");
-            }
-            TrackedPromptPhase::OutputGeneration => {
-                self.output_generation_requests = self
-                    .output_generation_requests
-                    .checked_add(1)
-                    .expect("model output-generation request count overflowed");
-            }
-        }
-        if let Some((effective_priority, remaining)) =
-            TrackedPromptRequest::prompt_work_for(phase, priority, input_tokens)
-        {
-            let work = self
-                .prompt_work_by_priority
-                .entry(effective_priority)
-                .or_default();
-            work.request_count = work
-                .request_count
-                .checked_add(1)
-                .expect("model prompt request count overflowed");
-            work.input_tokens = work
-                .input_tokens
-                .checked_add(u128::from(remaining))
-                .expect("model prompt input tokens overflowed");
-        }
-    }
-
-    fn remove_phase(&mut self, phase: TrackedPromptPhase, priority: u32, input_tokens: u64) {
-        match phase {
-            TrackedPromptPhase::Pending => {}
-            TrackedPromptPhase::InputProcessing => {
-                self.input_processing_requests = self
-                    .input_processing_requests
-                    .checked_sub(1)
-                    .expect("model input-processing request count underflowed");
-            }
-            TrackedPromptPhase::OutputGeneration => {
-                self.output_generation_requests = self
-                    .output_generation_requests
-                    .checked_sub(1)
-                    .expect("model output-generation request count underflowed");
-            }
-        }
-        let Some((effective_priority, remaining)) =
-            TrackedPromptRequest::prompt_work_for(phase, priority, input_tokens)
+        let count = &mut self.phase_requests[phase as usize];
+        *count = count
+            .checked_add_signed(isize::from(request_delta))
+            .expect("model phase request count overflowed or underflowed");
+        let Some((effective_priority, remaining)) = phase.prompt_work(priority, input_tokens)
         else {
             return;
         };
-        let remove_priority = {
-            let work = self
-                .prompt_work_by_priority
-                .get_mut(&effective_priority)
-                .expect("tracked prompt request should have priority work");
-            work.request_count = work
-                .request_count
-                .checked_sub(1)
-                .expect("model prompt request count underflowed");
-            work.input_tokens = work
-                .input_tokens
-                .checked_sub(u128::from(remaining))
-                .expect("model prompt input tokens underflowed");
-            work.request_count == 0
-        };
-        if remove_priority {
-            let work = self
-                .prompt_work_by_priority
-                .remove(&effective_priority)
-                .expect("empty priority work should remain present until removal");
-            assert_eq!(
-                work.input_tokens, 0,
-                "empty prompt priority should not retain input tokens"
-            );
+        let work = self
+            .prompt_work_by_priority
+            .entry(effective_priority)
+            .or_default();
+        *work = work
+            .checked_add_signed(i128::from(remaining) * i128::from(request_delta))
+            .expect("model prompt input tokens overflowed or underflowed");
+        if *work == 0 {
+            self.prompt_work_by_priority.remove(&effective_priority);
         }
     }
 
     fn snapshot(&self) -> QueueModelSnapshot {
-        let mut queue_size = 0usize;
-        let mut queued_input_tokens = 0u128;
         let mut cumulative_input_tokens = 0u128;
         let mut estimates = self.last_mean_input_tps.map(|_| HashMap::new());
+        let [pending, input_processing, output_generation] = self.phase_requests;
+        let queued = pending
+            .checked_add(input_processing)
+            .expect("model queued request count overflowed");
+        let running = queued
+            .checked_add(output_generation)
+            .expect("model running request count overflowed");
 
-        for (priority, work) in &self.prompt_work_by_priority {
-            queue_size = queue_size
-                .checked_add(work.request_count)
-                .expect("model queued request count overflowed");
-            queued_input_tokens = queued_input_tokens
-                .checked_add(work.input_tokens)
-                .expect("model queued input tokens overflowed");
+        for (priority, input_tokens) in &self.prompt_work_by_priority {
             cumulative_input_tokens = cumulative_input_tokens
-                .checked_add(work.input_tokens)
+                .checked_add(*input_tokens)
                 .expect("model cumulative input tokens overflowed");
-            if let (Some(last_mean_input_tps), Some(estimates)) =
-                (self.last_mean_input_tps, estimates.as_mut())
+            if let Some((last_mean_input_tps, estimates)) =
+                self.last_mean_input_tps.zip(estimates.as_mut())
             {
                 estimates.insert(
                     *priority,
@@ -674,12 +585,12 @@ impl QueueModelState {
             } else {
                 self.active_chat_output_tps_sum / self.active_chat_output_requests as f64
             },
-            queue_size: saturated_count(queue_size),
-            queued_input_size: saturated_input_tokens(queued_input_tokens),
-            num_running_queries: saturated_count(self.running_requests),
-            total_query_input_size: saturated_input_tokens(self.total_input_tokens),
-            input_processing_queries: saturated_count(self.input_processing_requests),
-            output_generation_queries: saturated_count(self.output_generation_requests),
+            queue_size: saturated_u64(queued),
+            queued_input_size: saturated_u64(cumulative_input_tokens),
+            num_running_queries: saturated_u64(running),
+            total_query_input_size: saturated_u64(self.total_input_tokens),
+            input_processing_queries: saturated_u64(input_processing),
+            output_generation_queries: saturated_u64(output_generation),
             // Valid throughput and no prompt work is an explicit empty map:
             // downstream merges must clear previously published queues.
             queue_time_estimate_ms_by_priority: estimates,
@@ -695,12 +606,16 @@ impl QueueModelState {
         let mut input_tokens = self
             .prompt_work_by_priority
             .range(..=priority)
-            .try_fold(0u128, |total, (_, work)| {
-                total.checked_add(work.input_tokens)
+            .try_fold(0u128, |total, (_, input_tokens)| {
+                total.checked_add(*input_tokens)
             })
             .expect("model cumulative input tokens overflowed");
         if let Some((excluded_priority, excluded_input_tokens)) =
-            excluded_request.and_then(TrackedPromptRequest::prompt_work)
+            excluded_request.and_then(|request| {
+                request
+                    .phase
+                    .prompt_work(request.priority, request.input_tokens)
+            })
             && excluded_priority <= priority
         {
             input_tokens = input_tokens
@@ -711,102 +626,56 @@ impl QueueModelState {
     }
 
     fn is_unused(&self) -> bool {
-        self.running_requests == 0 && self.last_mean_input_tps.is_none()
+        self.phase_requests == [0; 3]
+            && self.observed_input_tokens == [0; RequestObservationState::Complete as usize]
+            && self.last_mean_input_tps.is_none()
     }
 }
 
-fn changed_model_ids(model_id: &str, prior_model_ids: [Option<String>; 2]) -> Vec<String> {
-    let mut changed = vec![model_id.to_string()];
-    for prior_model_id in prior_model_ids.into_iter().flatten() {
-        if prior_model_id != model_id {
-            changed.push(prior_model_id);
-        }
-    }
+fn changed_model_ids(model_id: &str, prior_model_ids: [Option<&str>; 2]) -> Vec<String> {
+    let mut changed: Vec<_> = prior_model_ids
+        .into_iter()
+        .flatten()
+        .filter(|prior| *prior != model_id)
+        .chain([model_id])
+        .map(str::to_string)
+        .collect();
     changed.sort();
     changed.dedup();
     changed
 }
 
-fn saturated_count(count: usize) -> u64 {
-    u64::try_from(count).unwrap_or(u64::MAX)
-}
-
-fn saturated_input_tokens(input_tokens: u128) -> u64 {
-    u64::try_from(input_tokens).unwrap_or(u64::MAX)
+fn saturated_u64(value: impl TryInto<u64>) -> u64 {
+    value.try_into().unwrap_or(u64::MAX)
 }
 
 fn saturated_queue_time_ms(input_tokens: u128, last_mean_input_tps: f64) -> u64 {
     debug_assert!(valid_last_mean_input_tps(last_mean_input_tps));
-    let Ok(input_tokens) = u64::try_from(input_tokens) else {
-        return u64::MAX;
-    };
-    queue_time_delta_ms(input_tokens, last_mean_input_tps).unwrap_or(u64::MAX)
+    u64::try_from(input_tokens)
+        .ok()
+        .and_then(|input_tokens| queue_time_delta_ms(input_tokens, last_mean_input_tps))
+        .unwrap_or(u64::MAX)
 }
 
-impl TrackedPromptRequest {
-    fn prompt_work(&self) -> Option<(u32, u64)> {
-        Self::prompt_work_for(self.phase, self.priority, self.input_tokens)
-    }
-
-    fn prompt_work_for(
-        phase: TrackedPromptPhase,
-        priority: u32,
-        input_tokens: u64,
-    ) -> Option<(u32, u64)> {
-        match phase {
-            TrackedPromptPhase::OutputGeneration => None,
-            TrackedPromptPhase::Pending => Some((priority, input_tokens)),
-            TrackedPromptPhase::InputProcessing => Some((0, input_tokens)),
-        }
-        .filter(|(_, remaining)| *remaining > 0)
-    }
-}
-
-impl LiveRequest {
-    fn from_parts(
-        queue: Option<TrackedPromptRequest>,
-        observed: Option<ObservedRequestState>,
-    ) -> Option<Self> {
-        match (queue, observed) {
-            (Some(queue), Some(observed)) => Some(Self::QueueAndObserved { queue, observed }),
-            (Some(queue), None) => Some(Self::QueueOnly(queue)),
-            (None, Some(observed)) => Some(Self::ObservedOnly(observed)),
-            (None, None) => None,
-        }
-    }
-
-    fn into_parts(self) -> (Option<TrackedPromptRequest>, Option<ObservedRequestState>) {
-        match self {
-            Self::QueueOnly(queue) => (Some(queue), None),
-            Self::ObservedOnly(observed) => (None, Some(observed)),
-            Self::QueueAndObserved { queue, observed } => (Some(queue), Some(observed)),
-        }
-    }
-
-    fn queue(&self) -> Option<&TrackedPromptRequest> {
-        match self {
-            Self::QueueOnly(queue) | Self::QueueAndObserved { queue, .. } => Some(queue),
-            Self::ObservedOnly(_) => None,
-        }
-    }
-
-    fn queue_mut(&mut self) -> Option<&mut TrackedPromptRequest> {
-        match self {
-            Self::QueueOnly(queue) | Self::QueueAndObserved { queue, .. } => Some(queue),
-            Self::ObservedOnly(_) => None,
+impl TrackedPromptPhase {
+    fn prompt_work(self, priority: u32, input_tokens: u64) -> Option<(u32, u64)> {
+        match (self, input_tokens) {
+            (_, 0) | (Self::OutputGeneration, _) => None,
+            (Self::Pending, input_tokens) => Some((priority, input_tokens)),
+            (Self::InputProcessing, input_tokens) => Some((0, input_tokens)),
         }
     }
 }
 
 impl QueueTrackedRequestGuard {
     pub(crate) fn on_upstream_response_headers(&mut self) {
-        self.live_requests
-            .advance_request_phase(&self.request_id, TrackedPromptPhase::InputProcessing);
+        let mut state = self.live_requests.inner.lock();
+        state.advance_request_phase(&self.request_id, TrackedPromptPhase::InputProcessing);
     }
 
     pub(crate) fn observe_output(&mut self) {
-        self.live_requests
-            .advance_request_phase(&self.request_id, TrackedPromptPhase::OutputGeneration);
+        let mut state = self.live_requests.inner.lock();
+        state.advance_request_phase(&self.request_id, TrackedPromptPhase::OutputGeneration);
     }
 
     pub(crate) fn finish(&mut self) {
@@ -823,30 +692,15 @@ impl Drop for QueueTrackedRequestGuard {
     }
 }
 
-fn parse_expected_queue_ms(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get(HEADER_STARGATE_EXPECTED_QUEUE_MS)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-}
-
-pub(crate) fn mismatch_threshold_ms(
-    expected_ms: u64,
-    config: &PylonQueueMismatchRetryConfig,
-) -> u64 {
+fn mismatch_threshold_ms(expected_ms: u64, config: &PylonQueueMismatchRetryConfig) -> u64 {
     let additive_threshold = expected_ms.saturating_add(config.min_delta_ms);
     let factor = if config.tolerance_factor.is_finite() && config.tolerance_factor > 0.0 {
         config.tolerance_factor
     } else {
         1.0
     };
-    let multiplicative = ((expected_ms as f64) * factor).ceil();
-    let multiplicative_threshold =
-        if multiplicative.is_finite() && multiplicative <= u64::MAX as f64 {
-            multiplicative as u64
-        } else {
-            u64::MAX
-        };
+    // Float-to-integer conversion saturates, matching the additive overflow policy.
+    let multiplicative_threshold = ((expected_ms as f64) * factor).ceil() as u64;
     additive_threshold.max(multiplicative_threshold)
 }
 
@@ -854,8 +708,26 @@ pub(crate) fn mismatch_threshold_ms(
 mod tests {
     use super::*;
     use crate::request_observer::RequestObservationEndpoint;
-    use reqwest::header::HeaderValue;
+    use reqwest::header::{HeaderName, HeaderValue};
     use std::time::{Duration, Instant};
+
+    impl LiveRequestState {
+        fn transition_observation(
+            &self,
+            observation: &RequestObservation,
+        ) -> RequestObservationTransition {
+            self.transition_observation_with(observation, |_| {})
+        }
+
+        pub(crate) fn tracked_request_count(&self) -> usize {
+            self.inner
+                .lock()
+                .requests
+                .values()
+                .filter(|request| matches!(request, LiveRequest::Queue(..)))
+                .count()
+        }
+    }
 
     fn required(request_id: &str, priority: u32, input_tokens: u64) -> RequiredTunnelHeaders {
         required_for_model(request_id, "model-a", priority, input_tokens)
@@ -878,12 +750,25 @@ mod tests {
     }
 
     fn headers_with_expected(expected_ms: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HEADER_STARGATE_EXPECTED_QUEUE_MS,
-            HeaderValue::from_str(expected_ms).unwrap(),
-        );
-        headers
+        let name = HeaderName::from_static(HEADER_STARGATE_EXPECTED_QUEUE_MS);
+        [(name, HeaderValue::from_str(expected_ms).unwrap())]
+            .into_iter()
+            .collect()
+    }
+
+    fn estimates(live_requests: &LiveRequestState) -> Option<HashMap<u32, u64>> {
+        live_requests
+            .snapshot_model("model-a")
+            .queue_time_estimate_ms_by_priority
+    }
+
+    fn rejected(actual_ms: u64) -> QueueAdmissionDecision {
+        QueueAdmissionDecision::Rejected {
+            expected_ms: 0,
+            actual_ms,
+            threshold_ms: 25,
+            retry_after_ms: None,
+        }
     }
 
     fn observation(request_id: &str, state: RequestObservationState) -> RequestObservation {
@@ -915,16 +800,13 @@ mod tests {
         let _first = live_requests.track_request(&required("req-a", 0, 100));
         let _second = live_requests.track_request(&required("req-b", 0, 100));
 
-        live_requests.transition_observation(&observation(
-            "req-a",
-            RequestObservationState::OutputGeneration,
-        ));
-        live_requests.update_active_output_tps("req-a", Some(20.0));
-        live_requests.transition_observation(&observation(
-            "req-b",
-            RequestObservationState::OutputGeneration,
-        ));
-        live_requests.update_active_output_tps("req-b", Some(10.0));
+        for (request_id, output_tps) in [("req-a", 20.0), ("req-b", 10.0)] {
+            live_requests.transition_observation(&observation(
+                request_id,
+                RequestObservationState::OutputGeneration,
+            ));
+            live_requests.update_active_output_tps(request_id, Some(output_tps));
+        }
 
         let active = live_requests.snapshot_model("model-a");
         assert_eq!(active.output_generation_queries, 2);
@@ -939,12 +821,102 @@ mod tests {
     }
 
     #[test]
+    fn metric_publication_does_not_hold_live_request_state_lock() {
+        let live_requests = LiveRequestState::default();
+        let worker = live_requests.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let transition = std::thread::spawn(move || {
+            worker.transition_observation_with(
+                &observation("req-a", RequestObservationState::InputProcessing),
+                |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let reader = live_requests.clone();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(0);
+        let snapshot = std::thread::spawn(move || {
+            snapshot_tx.send(reader.snapshot_model("model-a")).unwrap();
+        });
+        assert_eq!(
+            snapshot_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("metric publication must not block request-state snapshots")
+                .input_processing_queries,
+            1
+        );
+
+        release_tx.send(()).unwrap();
+        snapshot.join().unwrap();
+        transition.join().unwrap();
+    }
+
+    #[test]
+    fn concurrent_observation_publication_preserves_transition_order() {
+        let live_requests = LiveRequestState::default();
+        let (totals_tx, totals_rx) = std::sync::mpsc::channel();
+        let (first_entered_tx, first_entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+
+        let first_state = live_requests.clone();
+        let first_totals = totals_tx.clone();
+        let first = std::thread::spawn(move || {
+            first_state.transition_observation_with(
+                &observation("req-a", RequestObservationState::InputProcessing),
+                |transition| {
+                    first_totals
+                        .send(transition.input_token_totals[0].input_tokens)
+                        .unwrap();
+                    first_entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            );
+        });
+        first_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(totals_rx.recv().unwrap(), 100);
+
+        let second_state = live_requests.clone();
+        let second = std::thread::spawn(move || {
+            second_state.transition_observation_with(
+                &observation("req-b", RequestObservationState::InputProcessing),
+                |transition| {
+                    totals_tx
+                        .send(transition.input_token_totals[0].input_tokens)
+                        .unwrap();
+                },
+            );
+        });
+        assert!(
+            matches!(
+                totals_rx.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a later transition must not publish before the earlier callback completes"
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(totals_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 200);
+        first.join().unwrap();
+        second.join().unwrap();
+    }
+
+    #[test]
     fn threshold_helper_accepts_at_threshold_and_rejects_above() {
-        let config = PylonQueueMismatchRetryConfig::default();
-        assert_eq!(mismatch_threshold_ms(100, &config), 125);
-        assert!(126 > mismatch_threshold_ms(100, &config));
-        assert!(125 <= mismatch_threshold_ms(100, &config));
+        let mut config = PylonQueueMismatchRetryConfig::default();
+        let threshold = mismatch_threshold_ms(100, &config);
+        assert_eq!(threshold, 125);
+        assert!(126 > threshold);
+        assert!(125 <= threshold);
         assert_eq!(mismatch_threshold_ms(0, &config), 25);
+        assert_eq!(mismatch_threshold_ms(u64::MAX, &config), u64::MAX);
+        config.tolerance_factor = f64::NAN;
+        assert_eq!(mismatch_threshold_ms(100, &config), 125);
     }
 
     #[test]
@@ -953,16 +925,22 @@ mod tests {
         live_requests.update_model_throughput("model-a", 100.0);
         let _priority_two = live_requests.track_request(&required("req-p2", 2, 20));
         let mut priority_four = live_requests.track_request(&required("req-p4", 4, 30));
+        let mut zero_input = live_requests.track_request(&required("req-zero", 1, 0));
         priority_four.on_upstream_response_headers();
 
+        assert_eq!(live_requests.snapshot_model("model-a").queue_size, 3);
+        zero_input.on_upstream_response_headers();
         let snapshot = live_requests.snapshot_model("model-a");
 
-        assert_eq!(snapshot.queue_size, 2);
+        assert_eq!(snapshot.queue_size, 3);
         assert_eq!(snapshot.queued_input_size, 50);
+        assert_eq!(snapshot.num_running_queries, 3);
         assert_eq!(
             snapshot.queue_time_estimate_ms_by_priority,
             Some(HashMap::from([(0, 300), (2, 500)]))
         );
+        drop(zero_input);
+        assert_eq!(live_requests.snapshot_model("model-a").queue_size, 2);
     }
 
     #[test]
@@ -987,20 +965,10 @@ mod tests {
         live_requests.update_model_throughput("model-a", 100.0);
         let request = live_requests.track_request(&required("req-drained", 2, 20));
 
-        assert_eq!(
-            live_requests
-                .snapshot_model("model-a")
-                .queue_time_estimate_ms_by_priority,
-            Some(HashMap::from([(2, 200)]))
-        );
+        assert_eq!(estimates(&live_requests), Some(HashMap::from([(2, 200)])));
 
         drop(request);
-        assert_eq!(
-            live_requests
-                .snapshot_model("model-a")
-                .queue_time_estimate_ms_by_priority,
-            Some(HashMap::new())
-        );
+        assert_eq!(estimates(&live_requests), Some(HashMap::new()));
     }
 
     #[test]
@@ -1093,9 +1061,7 @@ mod tests {
         let _queued = live_requests.track_request(&required("req-huge", 0, u64::MAX));
 
         assert_eq!(
-            live_requests
-                .snapshot_model("model-a")
-                .queue_time_estimate_ms_by_priority,
+            estimates(&live_requests),
             Some(HashMap::from([(0, u64::MAX)]))
         );
         assert_eq!(
@@ -1104,12 +1070,7 @@ mod tests {
                 &required("req-new", 0, 1),
                 &headers_with_expected("0"),
             ),
-            QueueAdmissionDecision::Rejected {
-                expected_ms: 0,
-                actual_ms: u64::MAX,
-                threshold_ms: 25,
-                retry_after_ms: None,
-            }
+            rejected(u64::MAX)
         );
     }
 
@@ -1129,12 +1090,7 @@ mod tests {
                 &current,
                 &headers_with_expected("0"),
             ),
-            QueueAdmissionDecision::Rejected {
-                expected_ms: 0,
-                actual_ms: 1000,
-                threshold_ms: 25,
-                retry_after_ms: None,
-            }
+            rejected(1000)
         );
     }
 
@@ -1167,12 +1123,7 @@ mod tests {
         live_requests.update_model_throughput("model-a", 100.0);
         assert_eq!(
             live_requests.evaluate(&config, &incoming, &headers),
-            QueueAdmissionDecision::Rejected {
-                expected_ms: 0,
-                actual_ms: 1000,
-                threshold_ms: 25,
-                retry_after_ms: None,
-            }
+            rejected(1000)
         );
     }
 
@@ -1219,13 +1170,11 @@ mod tests {
         let live_requests = LiveRequestState::default();
         let config = PylonQueueMismatchRetryConfig::default();
         let incoming = required("req-new", 0, 1);
-        assert_eq!(
-            live_requests.evaluate(&config, &incoming, &HeaderMap::new()),
-            QueueAdmissionDecision::MissingEstimate
-        );
-        assert_eq!(
-            live_requests.evaluate(&config, &incoming, &headers_with_expected("nope")),
-            QueueAdmissionDecision::MissingEstimate
-        );
+        for headers in [HeaderMap::new(), headers_with_expected("nope")] {
+            assert_eq!(
+                live_requests.evaluate(&config, &incoming, &headers),
+                QueueAdmissionDecision::MissingEstimate
+            );
+        }
     }
 }

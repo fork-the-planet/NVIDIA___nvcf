@@ -12,6 +12,12 @@ gateway -> stargate proxy -> QUIC tunnel -> pylon -> local inference server
 backend/pylon -> stargate gRPC registration -> local routing state
 ```
 
+`--backend-connectivity=direct|reverse` selects who establishes the QUIC
+connection. Direct is the Edge topology: pylon advertises a reachable
+`quic://` listener and Stargate dials it. Reverse is the Cloud topology: pylon
+dials the reverse target returned by Stargate. The transport protocol remains
+an independent `raw-quic|http3|webtransport` choice.
+
 Stargate is the control plane and routing entrypoint. Pylon is the backend
 sidecar.
 
@@ -63,7 +69,7 @@ One short-held local registration registry owns exact-id records, active
 cluster generations, each registration's `Stable`/`Applying` advertised-model
 lifecycle, and registered-target advertiser counts. Membership transitions
 update those indexes atomically without holding a guard across asynchronous
-calibration, routing, or network work. Cluster and registered-target lookups
+upstream, routing, or network work. Cluster and registered-target lookups
 are average `O(1)` rather than full-registration scans.
 
 Overlapping registrations in the same `(routing_key, cluster_id)` scope share
@@ -102,13 +108,17 @@ Architecture invariants:
   immutable bytes are shared across retries.
 - Proxy requests use an already-established tunnel to a selected pylon.
 - Stargate strips caller-supplied internal queue headers.
-- Pylon strips Stargate internal headers before forwarding upstream.
+- Pylon strips the private retry-control header family before forwarding
+  upstream and before returning upstream headers through the tunnel. Pylon
+  alone translates `x-stargate-upstream-retryable` into the
+  `x-stargate-retryable`, reason, and retry-delay response fields consumed by
+  Stargate; callers and inference servers cannot inject that control exchange.
 
 ## Tunnel Transports
 
-`--tunnel-protocol=custom|http3|webtransport` must match on Stargate and pylon.
+`--tunnel-protocol=raw-quic|http3|webtransport` must match on Stargate and pylon.
 
-- `custom`: raw QUIC bidirectional stream with Stargate framing.
+- `raw-quic`: raw QUIC bidirectional stream with Stargate framing.
 - `http3`: HTTP/3 request stream.
 - `webtransport`: HTTP/3 extended CONNECT session plus WebTransport streams.
 
@@ -125,13 +135,12 @@ A backend is routable only after:
 - registration is active for the model
 - the QUIC path exists
 - a forwarded `/health` RTT sample succeeds
-- any required local calibration is complete
 
 Backend RTT comes from the registration-scoped forwarded `/health` loop, not
 QUIC transport stats.
 
-Stargates do not share routing or calibration state. HTTP proxy and
-`ListModels` requests use only local state.
+Stargates do not share routing state. HTTP proxy and `ListModels` requests use
+only local state.
 
 ## Pylon Contract
 
@@ -139,12 +148,15 @@ Pylon:
 
 - uses the workspace `stargate-runtime` abort-on-drop task owner for its
   registration, tunnel, stats, metrics, bringup, and canary task trees;
-- registers with every concrete Stargate it should be reachable through
+- completes input-TPS bootstrap and local startup before its first Stargate
+  RPC, then keeps recursive discovery live and registers with every discovered
+  Stargate
 - validates tunneled request headers and endpoint body shape
 - forwards to the local HTTP upstream
 - converts local upstream retry hints into Stargate retry metadata
 - observes request lifecycle and runtime stats
-- runs bringup calibration and active canaries
+- optionally runs one local startup calibration plan per model and runs active
+  canaries after startup
 - opens reverse tunnels when configured
 - treats registration, stats collection, metrics serving, required engine
   stats, and the direct tunnel accept loop as critical process roots
@@ -166,24 +178,24 @@ loops.
 Request-observer terminal transitions are invariants. Terminalizing an already
 terminal request is a bug.
 
-## Calibration
+## Input-TPS Bootstrap
 
-Each Stargate owns only local calibration state.
+Every Pylon must choose exactly one bootstrap source before startup:
 
-- Pylons with coordinated calibration register to all discovered Stargates.
-- Each Stargate assigns one local owner for each
-  `(routing_key, cluster_id, model_id)`.
-- Assignments live inside the active registration-cluster generation, not in a
-  global calibration index. A completed floor survives while any overlapping
-  local cluster registration remains and cannot cross a zero-registration
-  boundary.
-- The assigned pylon measures local upstream capacity and submits one result to
-  the assigning Stargate.
-- Calibration values are not replicated and are not sent back to pylons.
-- Effective cluster input capacity is
-  `max(local_calibration_floor, sum(runtime_backend_reports))`.
+- `--do-calibration` runs a health check and one local calibration sweep per
+  configured model. Use it only when that process is the cluster's sole Pylon.
+- `--initial-input-tps <TPS>` installs a finite positive operator-selected
+  per-Pylon value. Shared-hardware clusters must use this source.
 
-Read [coordinated-calibration-state-machine.md](coordinated-calibration-state-machine.md).
+Bootstrap initializes the input-throughput estimator, runtime publication, and
+queue admission before Pylon starts `WatchStargates`. Model calibration sweeps
+are sequential, though requests within one model's plan may run concurrently.
+Any bootstrap failure terminates startup without a Stargate RPC. Later runtime
+samples update an unpinned bootstrap normally.
+
+Stargate has no calibration protocol or state. It receives capacity only in
+ordinary registration `ModelStats`, and cluster input capacity is the sum of
+active backend reports.
 
 ## Load Balancing
 
@@ -202,6 +214,13 @@ positional arguments.
 All algorithms evaluate cluster candidates. Backend selection inside a chosen
 cluster is a state-owned round robin. PULSAR ranks by stable capacity and keeps
 transient live load in feasibility gates.
+Each cluster candidate's representative RTT is the unweighted arithmetic mean
+of the latest forwarded `/health` RTT publication from every current active
+backend in that cluster. Publication insertion, heartbeat replacement, and
+removal refresh that shared snapshot value at nanosecond precision, truncating
+fractional nanoseconds toward zero.
+Groq multiregion shuffles each sampled prefix; `min_by` retains the first
+equal-score candidate, so that shuffled order is the intentional tie-break.
 
 Stateful cluster-selection instances are owned by the authoritative
 `RoutingTargetState`. `LoadBalancerRouter` owns immutable configuration and
@@ -246,15 +265,19 @@ performing their existing linear reconciliation.
 - `stargate-headless`: peer discovery and pod identity.
 - `stargate-model-discovery`: frontend `ListModels`.
 - `stargate-proxy`: frontend OpenAI-compatible HTTP proxy.
-- `stargate-k8s-router`: optional backend-facing router for the `custom`
-  transport.
+- `stargate-k8s-router`: optional backend-facing router for `raw-quic` or
+  `webtransport`; one transport mode is selected per UDP listener.
 
 Gateway traffic uses only `stargate-model-discovery` and `stargate-proxy`.
-Backend traffic uses `WatchStargates`, registration, calibration submission,
-and reverse tunnels.
+Backend traffic always uses `WatchStargates` and registration. Edge/direct
+deployments then have Stargate connect to each pylon's advertised pod URL;
+Cloud/reverse deployments have pylon connect to Stargate's reverse listener.
 
-Raw pod IPs are not a client contract. Use advertised per-pod hostnames and
-headless DNS for discovery and pod identity.
+Raw Stargate pod IPs are not a pylon discovery contract. Use advertised
+per-pod hostnames and headless DNS for Stargate discovery and identity. In an
+Edge/direct deployment, a pylon may advertise its own live pod IP as the
+registration-scoped tunnel URL because that URL retires with the exact
+registration generation.
 
 ### Development-Only Built-In Peer Relay
 
@@ -277,10 +300,16 @@ Deployment. Pylon forwards to the colocated inference container on loopback,
 keeps the pod labeled `role=inference-engine`, and adds `pylon-sidecar=true`
 for pylon metrics scraping.
 
+The `kustomize/overlays/edge` example is router-free. Its backend-facing
+`stargate` Service selects Stargate pods directly, Stargates publish concrete
+headless-Service pod hostnames to pylons, and pylons bind their direct QUIC
+listeners to pod IPs. The cloud-oriented base and local overlays retain reverse
+listeners and `stargate-k8s-router`.
+
 The active-development GKE overlay keeps the base `stargate` ClusterIP Service
 for in-cluster backend traffic and also exposes split internal L4
 LoadBalancer Services: `stargate-grpc-lb` for TCP `443` registration/watch
-traffic and `stargate-quic-lb` for UDP `8080` custom QUIC reverse tunnels. The
+traffic and `stargate-quic-lb` for UDP `8080` Raw QUIC reverse tunnels. The
 split is required because GKE internal LoadBalancer Services cannot mix TCP and
 UDP ports. Both Services use the Terraform-managed shared internal VIP
 `ip-us-central1-stargate-backend` (`10.69.170.115`) while LB DNS names are not
@@ -304,10 +333,16 @@ Services on `443` and `8080` that target router pod ports `50071` and `50072`.
 
 - Stargate metrics: `--metrics-port`, default `9090`.
 - Pylon metrics: default `9089`.
+- Stargate's HTTP listener has a local `GET /v1/models` mirror of `ListModels`
+  and trusted-operator `GET /debug/state` inspection. The latter exposes a
+  small, safe listener/tunnel configuration and the local active-model set;
+  it does not mirror routing topology or serialize credential-bearing fields.
 - Router metrics: router health listener.
 - OTel export is opt-in with `--otel-endpoint`.
 - Main proxy span: `proxy_openai_request`.
 - Use `x-request-id` as the request correlation id.
+- Pylon-generated calibration and canary requests set `x-request-id` as
+  `calibration-<pylon-uuid>-<counter>` or `canary-<pylon-uuid>-<counter>`.
 - Kubernetes base manifests expose VictoriaMetrics `VMPodScrape` resources for
   Stargate, `stargate-k8s-router`, and pods labeled `pylon-sidecar=true`.
 
@@ -327,12 +362,10 @@ Services on `443` and `8080` that target router pod ports `50071` and `50072`.
   - `clusters.rs`: target lifecycle, cluster state, active models, and metrics.
   - `snapshots.rs`: routable backend and cluster snapshot types plus exact
     selected-cluster ownership.
-  - `calibration.rs`: generation-owned coordinated calibration assignment and
-    completion state.
   - `reservations.rs`: exact-owner routing reservation tokens, accounting, and
     queue estimates.
 - `crates/stargate/src/metrics.rs`
-- `crates/stargate/src/telemetry.rs`
+- `crates/stargate/src/lib.rs` (`telemetry` module)
 - `crates/pylon-lib/src/`
 - `crates/protocol/`
 - `crates/proto/`

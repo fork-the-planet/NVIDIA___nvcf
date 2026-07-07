@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow};
 use quinn::{Connection, Endpoint, EndpointConfig};
 use tokio_util::task::TaskTracker;
 use tracing::{Instrument, info, info_span, warn};
@@ -30,9 +30,9 @@ use stargate_runtime::CriticalTaskGroup;
 
 use super::QuicHttpProxy;
 use super::connection::TunnelConnection;
-use super::custom::CustomConnectionHandle;
 use super::endpoint::{build_client_config, build_server_config};
 use super::http3::build_h3_client_connection;
+use super::raw_quic::RawQuicConnectionHandle;
 
 mod handshake;
 mod webtransport;
@@ -54,16 +54,22 @@ pub(super) fn spawn_reverse_connection_cleanup(
 ) {
     let inference_server_id = registration.inference_server_id().to_string();
     let closed_id = connection.stable_id();
-    let cleanup_span = match kind {
-        ReverseConnectionCleanupKind::Tunnel => info_span!(
-            "reverse_tunnel_connection_cleanup",
-            inference_server_id = %inference_server_id,
-            stable_id = closed_id,
+    let (cleanup_span, closed_message) = match kind {
+        ReverseConnectionCleanupKind::Tunnel => (
+            info_span!(
+                "reverse_tunnel_connection_cleanup",
+                inference_server_id = %inference_server_id,
+                stable_id = closed_id,
+            ),
+            "reverse tunnel connection closed, removed from pool",
         ),
-        ReverseConnectionCleanupKind::WebTransport => info_span!(
-            "reverse_webtransport_connection_cleanup",
-            inference_server_id = %inference_server_id,
-            stable_id = closed_id,
+        ReverseConnectionCleanupKind::WebTransport => (
+            info_span!(
+                "reverse_webtransport_connection_cleanup",
+                inference_server_id = %inference_server_id,
+                stable_id = closed_id,
+            ),
+            "reverse WebTransport connection closed, removed from pool",
         ),
     };
     task_tracker.spawn(
@@ -73,14 +79,7 @@ pub(super) fn spawn_reverse_connection_cleanup(
                 .tunnel_connections()
                 .remove_connection(closed_id)
             {
-                match kind {
-                    ReverseConnectionCleanupKind::Tunnel => {
-                        warn!(inference_server_id = %inference_server_id, "reverse tunnel connection closed, removed from pool");
-                    }
-                    ReverseConnectionCleanupKind::WebTransport => {
-                        warn!(inference_server_id = %inference_server_id, "reverse WebTransport connection closed, removed from pool");
-                    }
-                }
+                warn!(inference_server_id = %inference_server_id, "{closed_message}");
             }
         }
         .instrument(cleanup_span),
@@ -108,87 +107,74 @@ impl QuicHttpProxy {
             return false;
         };
 
-        let tunnel_connection = match self.build_reverse_tunnel_connection(connection).await {
-            Ok(connection) => connection,
-            Err(error) => {
+        let initialized = match self.config.tunnel_protocol {
+            TunnelTransportProtocol::RawQuic => Ok(TunnelConnection::RawQuic(
+                RawQuicConnectionHandle::new(connection),
+            )),
+            TunnelTransportProtocol::Http3 => build_h3_client_connection(connection)
+                .await
+                .map(TunnelConnection::Http3),
+            TunnelTransportProtocol::WebTransport => Err(anyhow!(
+                "reverse WebTransport connections are established by CONNECT handshake"
+            )),
+        };
+        initialized
+            .inspect_err(|error| {
                 warn!(
                     inference_server_id = %registration.inference_server_id(),
                     error = %error,
                     "failed to initialize tunnel connection"
                 );
-                return false;
-            }
-        };
-        install.finish(tunnel_connection)
-    }
-
-    async fn build_reverse_tunnel_connection(
-        &self,
-        connection: Connection,
-    ) -> Result<TunnelConnection> {
-        match self.config.tunnel_protocol {
-            TunnelTransportProtocol::Custom => Ok(TunnelConnection::Custom(
-                CustomConnectionHandle::new(connection),
-            )),
-            TunnelTransportProtocol::Http3 => Ok(TunnelConnection::Http3(
-                build_h3_client_connection(connection).await?,
-            )),
-            TunnelTransportProtocol::WebTransport => {
-                bail!("reverse WebTransport connections are established by CONNECT handshake")
-            }
-        }
+            })
+            .is_ok_and(|connection| install.finish(connection))
     }
 
     pub async fn start_reverse_listener(
         self: &Arc<Self>,
-        listen_addr: SocketAddr,
         state: Arc<StargateState>,
         tasks: CriticalTaskGroup,
         forwarding: Option<Arc<dyn ForwardingResolver>>,
-        pre_bound_socket: Option<std::net::UdpSocket>,
+        socket: std::net::UdpSocket,
     ) -> Result<SocketAddr> {
         let server_config = build_server_config(
             &self.config.server_tls_identity,
             self.config.tunnel_protocol,
         )?;
-        let endpoint = match pre_bound_socket {
-            Some(socket) => {
-                socket
-                    .set_nonblocking(true)
-                    .context("set reverse listener socket to non-blocking")?;
-                let runtime =
-                    quinn::default_runtime().context("no async runtime for quinn endpoint")?;
-                Endpoint::new(
-                    EndpointConfig::default(),
-                    Some(server_config),
-                    socket,
-                    runtime,
-                )
-                .context("create reverse listener from pre-bound socket")?
-            }
-            None => {
-                Endpoint::server(server_config, listen_addr).context("bind reverse listener")?
-            }
-        };
+        socket
+            .set_nonblocking(true)
+            .context("set reverse listener socket to non-blocking")?;
+        let endpoint = Endpoint::new(
+            EndpointConfig::default(),
+            Some(server_config),
+            socket,
+            quinn::default_runtime().context("no async runtime for quinn endpoint")?,
+        )
+        .context("create reverse listener from pre-bound socket")?;
         let bound_addr = endpoint
             .local_addr()
             .context("reverse listener local addr")?;
 
-        let relay_client_config = build_client_config(
-            self.config.tls_cert_pem.as_deref(),
-            self.config.quic_insecure,
-            self.config.tunnel_protocol,
-        )?;
         let relay_endpoints = Arc::new(
             forwarding::build_relay_endpoints(
                 forwarding::RelayEndpointConfig::default(),
-                relay_client_config,
+                build_client_config(
+                    self.config.tls_cert_pem.as_deref(),
+                    self.config.quic_insecure,
+                    self.config.tunnel_protocol,
+                )?,
             )
             .context("build relay endpoints")?,
         );
 
-        let proxy = self.clone();
-        let listener_tasks = tasks.task_tracker();
+        let dispatch = ReverseDispatchContext {
+            proxy: self.clone(),
+            state,
+            forwarding,
+            relay_endpoints,
+            listen_port: bound_addr.port(),
+            task_tracker: tasks.task_tracker(),
+        };
+        let listener_tasks = dispatch.task_tracker.clone();
         let listener_span = info_span!("reverse_tunnel_listener", addr = %bound_addr);
         tasks.spawn_critical("reverse tunnel listener", move |stop| {
             async move {
@@ -197,24 +183,9 @@ impl QuicHttpProxy {
                         _ = stop.cancelled() => break,
                         incoming = endpoint.accept() => {
                             let Some(incoming) = incoming else { break };
-                            let proxy = proxy.clone();
-                            let state = state.clone();
-                            let forwarding = forwarding.clone();
-                            let relay_endpoints = relay_endpoints.clone();
-                            let port = bound_addr.port();
-                            let peer_connect_timeout = proxy.config.connect_timeout;
-                            let connection_tasks = listener_tasks.clone();
-                            let connection_span = info_span!("reverse_tunnel_connection", port);
+                            let dispatch = dispatch.clone();
+                            let connection_span = info_span!("reverse_tunnel_connection", port = dispatch.listen_port);
                             listener_tasks.spawn(async move {
-                                let dispatch = ReverseDispatchContext {
-                                    proxy: &proxy,
-                                    state: &state,
-                                    forwarding: forwarding.as_deref(),
-                                    relay_endpoints: &relay_endpoints,
-                                    listen_port: port,
-                                    peer_connect_timeout,
-                                    task_tracker: &connection_tasks,
-                                };
                                 if let Err(e) = dispatch_incoming(incoming, dispatch).await {
                                     warn!(error = %e, "reverse tunnel connection failed");
                                 }
@@ -233,47 +204,45 @@ impl QuicHttpProxy {
     }
 }
 
-struct ReverseDispatchContext<'a> {
-    proxy: &'a QuicHttpProxy,
-    state: &'a StargateState,
-    forwarding: Option<&'a dyn ForwardingResolver>,
-    relay_endpoints: &'a forwarding::RelayEndpoints,
+#[derive(Clone)]
+struct ReverseDispatchContext {
+    proxy: Arc<QuicHttpProxy>,
+    state: Arc<StargateState>,
+    forwarding: Option<Arc<dyn ForwardingResolver>>,
+    relay_endpoints: Arc<forwarding::RelayEndpoints>,
     listen_port: u16,
-    peer_connect_timeout: Duration,
-    task_tracker: &'a TaskTracker,
+    task_tracker: TaskTracker,
 }
 
 async fn dispatch_incoming(
     incoming: quinn::Incoming,
-    dispatch: ReverseDispatchContext<'_>,
+    dispatch: ReverseDispatchContext,
 ) -> Result<()> {
     let connection = incoming.await.context("accept reverse connection")?;
 
-    if let Some(fwd) = dispatch.forwarding {
-        let sni = connection
+    if let Some(fwd) = dispatch.forwarding.as_deref()
+        && let Some(sni) = connection
             .handshake_data()
             .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
-            .and_then(|hd| hd.server_name);
-
-        if let Some(sni) = sni {
-            match fwd.resolve_peer(&sni, dispatch.listen_port) {
-                PeerResolution::Peer(peer) => {
-                    info!(
-                        peer = %peer.dial_addr,
-                        server_name = %peer.server_name,
-                        sni = %sni,
-                        "relaying QUIC connection to peer"
-                    );
-                    return forwarding::forward_quic_connection(
-                        connection,
-                        &peer,
-                        dispatch.relay_endpoints,
-                        dispatch.peer_connect_timeout,
-                    )
-                    .await;
-                }
-                PeerResolution::Local | PeerResolution::NotPeer => {}
+            .and_then(|hd| hd.server_name)
+    {
+        match fwd.resolve_peer(&sni, dispatch.listen_port) {
+            PeerResolution::Peer(peer) => {
+                info!(
+                    peer = %peer.dial_addr,
+                    server_name = %peer.server_name,
+                    sni = %sni,
+                    "relaying QUIC connection to peer"
+                );
+                return forwarding::forward_quic_connection(
+                    connection,
+                    &peer,
+                    &dispatch.relay_endpoints,
+                    dispatch.proxy.config.connect_timeout,
+                )
+                .await;
             }
+            PeerResolution::Local | PeerResolution::NotPeer => {}
         }
     }
 
@@ -281,18 +250,18 @@ async fn dispatch_incoming(
         TunnelTransportProtocol::WebTransport => {
             handle_reverse_webtransport_connect(
                 connection,
-                dispatch.proxy,
-                dispatch.state,
-                dispatch.task_tracker,
+                &dispatch.proxy,
+                &dispatch.state,
+                &dispatch.task_tracker,
             )
             .await
         }
-        TunnelTransportProtocol::Custom | TunnelTransportProtocol::Http3 => {
+        TunnelTransportProtocol::RawQuic | TunnelTransportProtocol::Http3 => {
             handle_reverse_handshake(
                 connection,
-                dispatch.proxy,
-                dispatch.state,
-                dispatch.task_tracker,
+                &dispatch.proxy,
+                &dispatch.state,
+                &dispatch.task_tracker,
             )
             .await
         }

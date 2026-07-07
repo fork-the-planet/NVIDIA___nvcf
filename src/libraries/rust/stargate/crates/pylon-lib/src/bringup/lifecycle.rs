@@ -21,90 +21,78 @@ use crate::runtime_state::PylonRuntimeState;
 use stargate_runtime::{OwnedTask, TASK_SHUTDOWN_TIMEOUT};
 
 use super::upstream::{check_upstream_health, send_canary_request};
-use super::{BringupTaskConfig, ModelBringupState};
+use super::{BringupConfig, BringupError, BringupTaskConfig};
 
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BringupLifecycleState {
-    #[default]
-    Initializing,
-    Active,
-    Recovering,
+pub struct BringupHandle {
+    task: OwnedTask,
 }
 
-impl BringupLifecycleState {
-    pub(super) fn next_action(self) -> BringupLifecycleAction {
-        match self {
-            Self::Recovering => BringupLifecycleAction::RunRecoveryCanary,
-            Self::Active => BringupLifecycleAction::AdvertiseActive,
-            Self::Initializing => BringupLifecycleAction::AdvertiseInitialActive,
-        }
+impl BringupHandle {
+    pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
+        self.task.wait_for_exit().await
     }
 
-    pub(super) fn complete_initial_bringup(&mut self) {
-        match self {
-            Self::Initializing => *self = Self::Active,
-            Self::Active => panic!("initial bringup completed after model was already active"),
-            Self::Recovering => panic!("initial bringup completed while recovery was pending"),
-        }
-    }
-
-    pub(super) fn require_recovery_canary(&mut self) {
-        match self {
-            Self::Active => *self = Self::Recovering,
-            Self::Recovering => {}
-            Self::Initializing => panic!("recovery canary requested before initial bringup"),
-        }
-    }
-
-    pub(super) fn complete_recovery_canary(&mut self) {
-        match self {
-            Self::Recovering => *self = Self::Active,
-            Self::Initializing => panic!("recovery canary completed before initial bringup"),
-            Self::Active => panic!("recovery canary completed while model was already active"),
-        }
+    pub async fn shutdown(self) {
+        self.task.shutdown(TASK_SHUTDOWN_TIMEOUT).await;
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BringupLifecycleAction {
-    RunRecoveryCanary,
-    AdvertiseActive,
-    AdvertiseInitialActive,
+pub async fn start_bringup(
+    upstream_http_base_url: &str,
+    config: BringupConfig,
+    runtime_state: PylonRuntimeState,
+) -> Result<Option<BringupHandle>, BringupError> {
+    if !config.enabled {
+        runtime_state.mark_initial_bringup_complete();
+        return Ok(None);
+    }
+
+    if !check_upstream_health(
+        &reqwest::Client::new(),
+        upstream_http_base_url,
+        config.canary_timeout,
+    )
+    .await
+    {
+        return Err(BringupError::UnhealthyUpstream);
+    }
+
+    runtime_state.mark_initial_bringup_complete();
+
+    let task_configs = runtime_state
+        .model_ids()
+        .into_iter()
+        .map(|model_id| BringupTaskConfig {
+            upstream_http_base_url: upstream_http_base_url.to_string(),
+            model_id,
+            config: config.clone(),
+        })
+        .collect();
+    let task = OwnedTask::spawn("bringup supervisor", move |stop| async move {
+        run_bringup_supervisor(task_configs, runtime_state, stop).await;
+    });
+    Ok(Some(BringupHandle { task }))
 }
 
-enum ActiveMonitorOutcome {
-    Stop,
-    CanaryFailed(ModelBringupState),
-}
-
-pub(crate) fn start_bringup_supervisor(
-    parent_stop: &CancellationToken,
+async fn run_bringup_supervisor(
     task_configs: Vec<BringupTaskConfig>,
     runtime_state: PylonRuntimeState,
-) -> OwnedTask {
-    OwnedTask::spawn_child("bringup supervisor", parent_stop, move |stop| async move {
-        let mut tasks = Vec::new();
-        for task_config in task_configs {
-            if !task_config.config.enabled {
-                publish_state(
-                    &runtime_state,
-                    &task_config.model_id,
-                    ModelBringupState::AdvertisingActive,
-                );
-                continue;
-            }
-            let runtime_state = runtime_state.clone();
-            let task = OwnedTask::spawn_child("model bringup", &stop, move |model_stop| {
-                run_bringup_task(task_config, runtime_state, model_stop)
-            });
-            tasks.push(task);
-        }
+    stop: CancellationToken,
+) {
+    let mut tasks = Vec::with_capacity(task_configs.len());
+    for task_config in task_configs {
+        let runtime_state = runtime_state.clone();
+        tasks.push(OwnedTask::spawn_child(
+            "model bringup",
+            &stop,
+            move |model_stop| run_bringup_task(task_config, runtime_state, model_stop),
+        ));
+    }
 
-        stop.cancelled().await;
-        OwnedTask::shutdown_all(tasks, TASK_SHUTDOWN_TIMEOUT).await;
-    })
+    stop.cancelled().await;
+    OwnedTask::shutdown_all(tasks, TASK_SHUTDOWN_TIMEOUT).await;
 }
 
 pub(super) async fn run_bringup_task(
@@ -116,169 +104,106 @@ pub(super) async fn run_bringup_task(
         upstream_http_base_url,
         model_id,
         config,
-        metrics: _,
     } = task_config;
     let http_client = reqwest::Client::new();
-    let mut lifecycle = BringupLifecycleState::default();
-
-    assert!(
-        config.enabled,
-        "disabled bringup is applied by the supervisor"
-    );
 
     loop {
-        if stop.is_cancelled() {
-            return;
-        }
-
-        let Some(upstream_healthy) = stop
-            .run_until_cancelled(check_upstream_health(
-                &http_client,
-                &upstream_http_base_url,
-                config.canary_timeout,
-            ))
-            .await
-        else {
-            return;
-        };
-        if !upstream_healthy {
-            publish_state(
-                &runtime_state,
-                &model_id,
-                ModelBringupState::ConnectingUnavailable,
-            );
-            if wait_or_stop(&stop, CONNECT_RETRY_INTERVAL).await {
-                return;
-            }
-            continue;
-        }
-
-        match lifecycle.next_action() {
-            BringupLifecycleAction::RunRecoveryCanary => {
-                publish_state(&runtime_state, &model_id, ModelBringupState::Recovering);
-                let Some(canary_result) = stop
-                    .run_until_cancelled(send_canary_request(
-                        &http_client,
-                        &upstream_http_base_url,
-                        &model_id,
-                        config.canary_timeout,
-                        config.canary_max_generation_threshold,
-                    ))
-                    .await
-                else {
-                    return;
-                };
-                match canary_result {
-                    Ok(()) => {
-                        lifecycle.complete_recovery_canary();
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(model_id, error = %error, "bringup recovery canary failed");
-                        if wait_or_stop(&stop, CONNECT_RETRY_INTERVAL).await {
-                            return;
-                        }
-                        continue;
-                    }
-                }
-            }
-            BringupLifecycleAction::AdvertiseActive => {
-                publish_state(
-                    &runtime_state,
-                    &model_id,
-                    ModelBringupState::AdvertisingActive,
-                );
-            }
-            BringupLifecycleAction::AdvertiseInitialActive => {
-                publish_state(
-                    &runtime_state,
-                    &model_id,
-                    ModelBringupState::AdvertisingActive,
-                );
-                lifecycle.complete_initial_bringup();
-            }
-        }
-
-        match monitor_active_model(
+        if !wait_for_active_canary_failure(
             &http_client,
             &upstream_http_base_url,
             &model_id,
-            config.active_canary_interval,
-            config.canary_timeout,
-            config.canary_max_generation_threshold,
+            &config,
             &stop,
         )
         .await
         {
-            ActiveMonitorOutcome::Stop => return,
-            ActiveMonitorOutcome::CanaryFailed(next_state) => {
-                lifecycle.require_recovery_canary();
-                publish_state(&runtime_state, &model_id, next_state);
+            return;
+        }
+        runtime_state.set_model_bringup_ready(&model_id, false);
+
+        loop {
+            let Some(upstream_healthy) = stop
+                .run_until_cancelled(check_upstream_health(
+                    &http_client,
+                    &upstream_http_base_url,
+                    config.canary_timeout,
+                ))
+                .await
+            else {
+                return;
+            };
+            if !upstream_healthy {
+                if wait_or_stop(&stop, CONNECT_RETRY_INTERVAL).await {
+                    return;
+                }
+                continue;
             }
+
+            let Some(canary_result) = stop
+                .run_until_cancelled(send_canary_request(
+                    &http_client,
+                    &upstream_http_base_url,
+                    &model_id,
+                    config.canary_timeout,
+                    config.canary_max_generation_threshold,
+                ))
+                .await
+            else {
+                return;
+            };
+            if let Err(error) = canary_result {
+                tracing::warn!(model_id, error = %error, "bringup recovery canary failed");
+                if wait_or_stop(&stop, CONNECT_RETRY_INTERVAL).await {
+                    return;
+                }
+                continue;
+            }
+
+            runtime_state.set_model_bringup_ready(&model_id, true);
+            break;
         }
     }
 }
 
-async fn monitor_active_model(
+async fn wait_for_active_canary_failure(
     http_client: &reqwest::Client,
     upstream_http_base_url: &str,
     model_id: &str,
-    active_canary_interval: Duration,
-    canary_timeout: Duration,
-    canary_max_generation_threshold: u32,
+    config: &BringupConfig,
     stop: &CancellationToken,
-) -> ActiveMonitorOutcome {
-    if active_canary_interval.is_zero() {
+) -> bool {
+    if config.active_canary_interval.is_zero() {
         stop.cancelled().await;
-        return ActiveMonitorOutcome::Stop;
+        return false;
     }
 
-    let mut canary_interval = tokio::time::interval(active_canary_interval);
+    let mut canary_interval = tokio::time::interval(config.active_canary_interval);
     canary_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     canary_interval.tick().await;
 
     loop {
         tokio::select! {
-            _ = stop.cancelled() => return ActiveMonitorOutcome::Stop,
+            _ = stop.cancelled() => return false,
             _ = canary_interval.tick() => {
                 let Some(canary_result) = stop
                     .run_until_cancelled(send_canary_request(
                         http_client,
                         upstream_http_base_url,
                         model_id,
-                        canary_timeout,
-                        canary_max_generation_threshold,
+                        config.canary_timeout,
+                        config.canary_max_generation_threshold,
                     ))
                     .await
                 else {
-                    return ActiveMonitorOutcome::Stop;
+                    return false;
                 };
                 if let Err(error) = canary_result {
                     tracing::warn!(model_id, error = %error, "active canary failed");
-                    let Some(upstream_healthy) = stop
-                        .run_until_cancelled(check_upstream_health(
-                            http_client,
-                            upstream_http_base_url,
-                            canary_timeout,
-                        ))
-                        .await
-                    else {
-                        return ActiveMonitorOutcome::Stop;
-                    };
-                    let next_state = if upstream_healthy {
-                        ModelBringupState::Recovering
-                    } else {
-                        ModelBringupState::ConnectingUnavailable
-                    };
-                    return ActiveMonitorOutcome::CanaryFailed(next_state);
+                    return true;
                 }
             }
         }
     }
-}
-
-fn publish_state(runtime_state: &PylonRuntimeState, model_id: &str, state: ModelBringupState) {
-    runtime_state.set_model_bringup(model_id, state);
 }
 
 pub(super) async fn wait_or_stop(stop: &CancellationToken, duration: Duration) -> bool {

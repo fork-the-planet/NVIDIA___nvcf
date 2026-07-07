@@ -48,35 +48,19 @@ pub struct HeadlessDnsDiscoveryConfig {
 }
 
 pub struct HeadlessDnsDiscovery {
-    self_pod_name: String,
-    pod_namespace: String,
-    advertised_hostname_template: String,
-    discovery_dns_name: String,
-    resolver: TokioAsyncResolver,
-    grpc_port: u16,
+    config: HeadlessDnsDiscoveryConfig,
 }
 
 impl HeadlessDnsDiscovery {
     pub fn new(config: HeadlessDnsDiscoveryConfig) -> Self {
-        Self {
-            self_pod_name: config.self_pod_name,
-            pod_namespace: config.pod_namespace,
-            advertised_hostname_template: config.advertised_hostname_template,
-            discovery_dns_name: config.discovery_dns_name,
-            resolver: config.resolver,
-            grpc_port: config.grpc_port,
-        }
-    }
-
-    fn srv_lookup_name(&self) -> String {
-        format!("_grpc._tcp.{}", self.discovery_dns_name)
+        Self { config }
     }
 
     fn stargate_info_for_endpoint(&self, endpoint_hostname: &str, grpc_port: u16) -> StargateInfo {
         let hostname = render_hostname(
-            &self.advertised_hostname_template,
+            &self.config.advertised_hostname_template,
             endpoint_hostname,
-            &self.pod_namespace,
+            &self.config.pod_namespace,
         );
         StargateInfo {
             stargate_id: endpoint_hostname.to_string(),
@@ -88,20 +72,44 @@ impl HeadlessDnsDiscovery {
             grpc_pylon_dial_addr: String::new(),
         }
     }
+
+    fn stargates_from_srv_records<I>(&self, srv_records: I) -> Vec<StargateInfo>
+    where
+        I: IntoIterator<Item = (String, u16)>,
+    {
+        let mut stargates = Vec::new();
+        for (target, port) in srv_records {
+            let Some(endpoint_hostname) =
+                endpoint_hostname_from_srv_target(&target, &self.config.discovery_dns_name)
+            else {
+                warn!(
+                    dns_name = %self.config.discovery_dns_name,
+                    srv_target = %target,
+                    "ignoring SRV target outside headless service domain"
+                );
+                continue;
+            };
+            stargates.push(self.stargate_info_for_endpoint(endpoint_hostname, port));
+        }
+        let self_info =
+            self.stargate_info_for_endpoint(&self.config.self_pod_name, self.config.grpc_port);
+        finalize_stargates(stargates, self_info, |stargate| &stargate.stargate_id)
+    }
 }
 
 #[async_trait::async_trait]
 impl Discovery for HeadlessDnsDiscovery {
     fn initial_stargates(&self) -> Vec<StargateInfo> {
-        vec![self.stargate_info_for_endpoint(&self.self_pod_name, self.grpc_port)]
+        vec![self.stargate_info_for_endpoint(&self.config.self_pod_name, self.config.grpc_port)]
     }
 
     // StatefulSet-backed headless Service SRV records carry canonical pod
     // hostnames and are backed by ready EndpointSlices.
     async fn discover_stargates(&self) -> Vec<StargateInfo> {
-        let srv_lookup_name = self.srv_lookup_name();
+        let config = &self.config;
+        let srv_lookup_name = format!("_grpc._tcp.{}", config.discovery_dns_name);
 
-        match self.resolver.srv_lookup(srv_lookup_name.as_str()).await {
+        match config.resolver.srv_lookup(&srv_lookup_name).await {
             Ok(lookup) => self.stargates_from_srv_records(
                 lookup
                     .iter()
@@ -119,62 +127,36 @@ impl Discovery for HeadlessDnsDiscovery {
     }
 }
 
-impl HeadlessDnsDiscovery {
-    fn stargates_from_srv_records<I>(&self, srv_records: I) -> Vec<StargateInfo>
-    where
-        I: IntoIterator<Item = (String, u16)>,
+fn finalize_stargates(
+    mut stargates: Vec<StargateInfo>,
+    self_info: StargateInfo,
+    self_key: fn(&StargateInfo) -> &str,
+) -> Vec<StargateInfo> {
+    if !stargates
+        .iter()
+        .any(|stargate| self_key(stargate) == self_key(&self_info))
     {
-        let mut stargates = Vec::new();
-        for (target, port) in srv_records {
-            let Some(endpoint_hostname) =
-                endpoint_hostname_from_srv_target(&target, &self.discovery_dns_name)
-            else {
-                warn!(
-                    dns_name = %self.discovery_dns_name,
-                    srv_target = %target,
-                    "ignoring SRV target outside headless service domain"
-                );
-                continue;
-            };
-            stargates.push(self.stargate_info_for_endpoint(&endpoint_hostname, port));
-        }
-        self.finalize_stargates(stargates)
+        stargates.push(self_info);
     }
-
-    fn finalize_stargates(&self, mut stargates: Vec<StargateInfo>) -> Vec<StargateInfo> {
-        if stargates.is_empty() {
-            return self.initial_stargates();
-        }
-
-        if !stargates
-            .iter()
-            .any(|s| s.stargate_id == self.self_pod_name)
-        {
-            stargates.push(self.stargate_info_for_endpoint(&self.self_pod_name, self.grpc_port));
-        }
-
-        sort_stargates(&mut stargates);
-        stargates
-    }
-}
-
-fn sort_stargates(stargates: &mut [StargateInfo]) {
     stargates.sort_by(|left, right| {
         left.stargate_id
             .cmp(&right.stargate_id)
             .then_with(|| left.advertise_addr.cmp(&right.advertise_addr))
     });
+    stargates
 }
 
-fn endpoint_hostname_from_srv_target(target: &str, headless_dns_suffix: &str) -> Option<String> {
+fn endpoint_hostname_from_srv_target<'a>(
+    target: &'a str,
+    headless_dns_suffix: &str,
+) -> Option<&'a str> {
     let target = target.trim_end_matches('.');
     let suffix = headless_dns_suffix.trim_end_matches('.');
-    let service_suffix = format!(".{suffix}");
-    let endpoint_hostname = target.strip_suffix(&service_suffix)?;
+    let endpoint_hostname = target.strip_suffix(suffix)?.strip_suffix('.')?;
     if endpoint_hostname.is_empty() || endpoint_hostname.contains('.') {
         return None;
     }
-    Some(endpoint_hostname.to_string())
+    Some(endpoint_hostname)
 }
 
 pub struct SelfOnlyDiscovery {
@@ -201,7 +183,7 @@ impl Discovery for SelfOnlyDiscovery {
     }
 
     async fn discover_stargates(&self) -> Vec<StargateInfo> {
-        vec![self.self_info.clone()]
+        self.initial_stargates()
     }
 }
 
@@ -233,7 +215,7 @@ impl DnsDiscovery {
     fn stargate_info_for_ip(&self, ip: IpAddr) -> Option<StargateInfo> {
         let addr = SocketAddr::new(ip, self.self_addr.port());
         let is_self = addr == self.self_addr;
-        if !is_self && is_non_self_local_alias(ip) {
+        if !is_self && (ip.is_loopback() || ip.is_unspecified()) {
             return None;
         }
 
@@ -255,10 +237,9 @@ impl DnsDiscovery {
     }
 
     fn self_stargate_info(&self) -> StargateInfo {
-        let self_addr = self.self_addr.to_string();
         StargateInfo {
             stargate_id: self.self_stargate_id.clone(),
-            advertise_addr: self_addr,
+            advertise_addr: self.self_addr.to_string(),
             http_advertise_addr: SocketAddr::new(self.self_addr.ip(), self.http_port).to_string(),
             grpc_pylon_dial_addr: String::new(),
         }
@@ -272,17 +253,9 @@ impl DnsDiscovery {
             .into_iter()
             .filter_map(|ip| self.stargate_info_for_ip(ip))
             .collect();
-        self.finalize_stargates(stargates)
-    }
-
-    fn finalize_stargates(&self, mut stargates: Vec<StargateInfo>) -> Vec<StargateInfo> {
-        let self_addr_str = self.self_addr.to_string();
-        if !stargates.iter().any(|s| s.advertise_addr == self_addr_str) {
-            stargates.push(self.self_stargate_info());
-        }
-
-        sort_stargates(&mut stargates);
-        stargates
+        finalize_stargates(stargates, self.self_stargate_info(), |stargate| {
+            &stargate.advertise_addr
+        })
     }
 }
 
@@ -307,14 +280,19 @@ impl Discovery for DnsDiscovery {
     }
 }
 
-fn is_non_self_local_alias(ip: IpAddr) -> bool {
-    ip.is_loopback() || ip.is_unspecified()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+
+    fn stargate(id: &str, advertise_addr: &str, http_advertise_addr: &str) -> StargateInfo {
+        StargateInfo {
+            stargate_id: id.to_string(),
+            advertise_addr: advertise_addr.to_string(),
+            http_advertise_addr: http_advertise_addr.to_string(),
+            grpc_pylon_dial_addr: String::new(),
+        }
+    }
 
     fn make_headless_discovery() -> HeadlessDnsDiscovery {
         let resolver =
@@ -335,12 +313,11 @@ mod tests {
 
         assert_eq!(
             discovery.initial_stargates(),
-            vec![StargateInfo {
-                stargate_id: "stargate-0".to_string(),
-                advertise_addr: "stargate-0.stargate.external:50071".to_string(),
-                http_advertise_addr: String::new(),
-                grpc_pylon_dial_addr: String::new(),
-            }]
+            vec![stargate(
+                "stargate-0",
+                "stargate-0.stargate.external:50071",
+                ""
+            )]
         );
     }
 
@@ -350,12 +327,7 @@ mod tests {
 
         assert_eq!(
             discovery.stargate_info_for_endpoint("stargate-1", 50071),
-            StargateInfo {
-                stargate_id: "stargate-1".to_string(),
-                advertise_addr: "stargate-1.stargate.external:50071".to_string(),
-                http_advertise_addr: String::new(),
-                grpc_pylon_dial_addr: String::new(),
-            }
+            stargate("stargate-1", "stargate-1.stargate.external:50071", "")
         );
     }
 
@@ -366,7 +338,7 @@ mod tests {
                 "stargate-1.stargate-headless.prod.svc.cluster.local.",
                 "stargate-headless.prod.svc.cluster.local",
             ),
-            Some("stargate-1".to_string())
+            Some("stargate-1")
         );
         assert_eq!(
             endpoint_hostname_from_srv_target(
@@ -374,34 +346,6 @@ mod tests {
                 "stargate-headless.prod.svc.cluster.local",
             ),
             None
-        );
-    }
-
-    #[test]
-    fn sort_stargates_orders_by_id_for_stable_watch_snapshots() {
-        let mut stargates = vec![
-            StargateInfo {
-                stargate_id: "stargate-1".to_string(),
-                advertise_addr: "stargate-1.stargate.external:50071".to_string(),
-                http_advertise_addr: String::new(),
-                grpc_pylon_dial_addr: String::new(),
-            },
-            StargateInfo {
-                stargate_id: "stargate-0".to_string(),
-                advertise_addr: "stargate-0.stargate.external:50071".to_string(),
-                http_advertise_addr: String::new(),
-                grpc_pylon_dial_addr: String::new(),
-            },
-        ];
-
-        sort_stargates(&mut stargates);
-
-        assert_eq!(
-            stargates
-                .into_iter()
-                .map(|stargate| stargate.stargate_id)
-                .collect::<Vec<_>>(),
-            vec!["stargate-0", "stargate-1"]
         );
     }
 
@@ -427,24 +371,9 @@ mod tests {
         assert_eq!(
             stargates,
             vec![
-                StargateInfo {
-                    stargate_id: "stargate-0".to_string(),
-                    advertise_addr: "stargate-0.stargate.external:50071".to_string(),
-                    http_advertise_addr: String::new(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
-                StargateInfo {
-                    stargate_id: "stargate-1".to_string(),
-                    advertise_addr: "stargate-1.stargate.external:50071".to_string(),
-                    http_advertise_addr: String::new(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
-                StargateInfo {
-                    stargate_id: "stargate-2".to_string(),
-                    advertise_addr: "stargate-2.stargate.external:50072".to_string(),
-                    http_advertise_addr: String::new(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
+                stargate("stargate-0", "stargate-0.stargate.external:50071", ""),
+                stargate("stargate-1", "stargate-1.stargate.external:50071", ""),
+                stargate("stargate-2", "stargate-2.stargate.external:50072", ""),
             ]
         );
     }
@@ -482,24 +411,9 @@ mod tests {
         assert_eq!(
             stargates,
             vec![
-                StargateInfo {
-                    stargate_id: "10.0.0.1:50071".to_string(),
-                    advertise_addr: "10.0.0.1:50071".to_string(),
-                    http_advertise_addr: String::new(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
-                StargateInfo {
-                    stargate_id: "10.0.0.3:50071".to_string(),
-                    advertise_addr: "10.0.0.3:50071".to_string(),
-                    http_advertise_addr: String::new(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
-                StargateInfo {
-                    stargate_id: "local-stargate".to_string(),
-                    advertise_addr: "10.0.0.2:50071".to_string(),
-                    http_advertise_addr: "10.0.0.2:8000".to_string(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
+                stargate("10.0.0.1:50071", "10.0.0.1:50071", ""),
+                stargate("10.0.0.3:50071", "10.0.0.3:50071", ""),
+                stargate("local-stargate", "10.0.0.2:50071", "10.0.0.2:8000"),
             ]
         );
     }
@@ -511,12 +425,11 @@ mod tests {
             "local-stargate".to_string(),
             8000,
         );
-        let expected = vec![StargateInfo {
-            stargate_id: "local-stargate".to_string(),
-            advertise_addr: "127.0.0.1:50071".to_string(),
-            http_advertise_addr: "127.0.0.1:8000".to_string(),
-            grpc_pylon_dial_addr: String::new(),
-        }];
+        let expected = vec![stargate(
+            "local-stargate",
+            "127.0.0.1:50071",
+            "127.0.0.1:8000",
+        )];
 
         assert_eq!(discovery.initial_stargates(), expected);
         assert_eq!(discovery.discover_stargates().await, expected);
@@ -536,13 +449,29 @@ mod tests {
 
         assert_eq!(
             discovery.stargate_info_for_ip("127.0.0.1".parse().unwrap()),
-            Some(StargateInfo {
-                stargate_id: "local-stargate".to_string(),
-                advertise_addr: "127.0.0.1:50071".to_string(),
-                http_advertise_addr: "127.0.0.1:8000".to_string(),
-                grpc_pylon_dial_addr: String::new(),
-            })
+            Some(stargate(
+                "local-stargate",
+                "127.0.0.1:50071",
+                "127.0.0.1:8000"
+            ))
         );
         assert_eq!(discovery.stargate_info_for_ip("::1".parse().unwrap()), None);
+
+        let scoped_self = "[fe80::1%3]:50071".parse().unwrap();
+        let scoped = DnsDiscovery::new(
+            scoped_self,
+            "scoped-stargate".to_string(),
+            "headless".to_string(),
+            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()),
+            8000,
+        );
+        assert_eq!(
+            scoped.initial_stargates(),
+            vec![stargate(
+                "scoped-stargate",
+                &scoped_self.to_string(),
+                "[fe80::1]:8000"
+            )]
+        );
     }
 }

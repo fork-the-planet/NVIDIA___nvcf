@@ -21,28 +21,14 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use stargate_auth::AuthTokenProvider;
 use stargate_proto::pb::InferenceServerAck;
-use stargate_protocol::TunnelTransportProtocol;
 
 use crate::quic_http_tunnel::{
-    ReverseQuicTunnelConfig, ReverseQuicTunnelHandle, TunnelError, TunnelForwardingConfig,
-    start_reverse_quic_tunnel,
+    ReverseQuicTunnelConfig, ReverseQuicTunnelHandle, TunnelError, start_reverse_quic_tunnel,
 };
-use stargate_runtime::{OwnedTask, TASK_SHUTDOWN_TIMEOUT};
 
 use super::REVERSE_TUNNEL_CONNECT_TIMEOUT;
-
-#[derive(Debug, Clone)]
-pub(super) struct ReverseTunnelLoopConfig {
-    pub(super) router_addr: String,
-    pub(super) inference_server_id: String,
-    pub(super) tls_cert_pem: Option<Vec<u8>>,
-    pub(super) quic_insecure: bool,
-    pub(super) tunnel_protocol: TunnelTransportProtocol,
-    pub(super) forwarding: TunnelForwardingConfig,
-    pub(super) auth_token_provider: Option<Arc<AuthTokenProvider>>,
-}
+use super::types::RegistrationSessionConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReverseTunnelEndpoint {
@@ -80,98 +66,38 @@ impl ReverseTunnelState {
     }
 
     pub(super) fn mark_connected(&mut self, endpoint: &ReverseTunnelEndpoint) -> bool {
-        let Self::Disconnected(current) = self else {
-            return false;
-        };
-        if current != endpoint {
-            return false;
+        if matches!(self, Self::Disconnected(current) if current == endpoint) {
+            *self = Self::Connected(endpoint.clone());
+            true
+        } else {
+            false
         }
-        *self = Self::Connected(current.clone());
-        true
     }
 
     fn mark_disconnected(&mut self, endpoint: &ReverseTunnelEndpoint) -> bool {
-        let Self::Connected(current) = self else {
-            return false;
-        };
-        if current != endpoint {
-            return false;
+        if matches!(self, Self::Connected(current) if current == endpoint) {
+            *self = Self::Disconnected(endpoint.clone());
+            true
+        } else {
+            false
         }
-        *self = Self::Disconnected(current.clone());
-        true
     }
-}
-
-pub(super) struct ReverseQuicTunnelConfigParams {
-    pub(super) dial_addr: String,
-    pub(super) sni_override: Option<String>,
-    pub(super) inference_server_id: String,
-    pub(super) tls_cert_pem: Option<Vec<u8>>,
-    pub(super) quic_insecure: bool,
-    pub(super) tunnel_protocol: TunnelTransportProtocol,
-    pub(super) forwarding: TunnelForwardingConfig,
-    pub(super) auth_token_provider: Option<Arc<AuthTokenProvider>>,
-}
-
-pub(super) fn build_reverse_quic_tunnel_config(
-    params: ReverseQuicTunnelConfigParams,
-) -> ReverseQuicTunnelConfig {
-    let forwarding = params.forwarding;
-    let mut tunnel_config = ReverseQuicTunnelConfig::new(
-        params.dial_addr,
-        params.inference_server_id,
-        forwarding.upstream_http_base_url.clone(),
-    );
-    tunnel_config.tls_cert_pem = params.tls_cert_pem;
-    tunnel_config.quic_insecure = params.quic_insecure;
-    tunnel_config.tunnel_protocol = params.tunnel_protocol;
-    tunnel_config.sni_override = params.sni_override;
-    tunnel_config.max_request_body_bytes = forwarding.max_request_body_bytes;
-    tunnel_config.max_sse_buffer_bytes = forwarding.max_sse_buffer_bytes;
-    tunnel_config.first_output_timeout = forwarding.first_output_timeout;
-    tunnel_config.output_chunk_timeout = forwarding.output_chunk_timeout;
-    tunnel_config.output_token_parser_factory = forwarding.output_token_parser_factory;
-    tunnel_config.runtime_state = forwarding.runtime_state;
-    tunnel_config.request_quality_monitor = forwarding.request_quality_monitor;
-    tunnel_config.retry = forwarding.retry;
-    tunnel_config.queue_mismatch_retry = forwarding.queue_mismatch_retry;
-    tunnel_config.metrics = forwarding.metrics;
-    #[cfg(test)]
-    {
-        tunnel_config.webtransport_stream_header_wait_tx =
-            forwarding.webtransport_stream_header_wait_tx;
-    }
-    tunnel_config.auth_token_provider = params.auth_token_provider;
-    tunnel_config
-}
-
-pub(super) async fn stop_reverse_tunnel_task(task: OwnedTask) {
-    task.shutdown(TASK_SHUTDOWN_TIMEOUT).await;
 }
 
 pub(super) fn reverse_tunnel_endpoint_from_ack(
     ack: &InferenceServerAck,
 ) -> Option<ReverseTunnelEndpoint> {
     let routing_target_addr = ack.reverse_tunnel_target.trim();
-    if routing_target_addr.is_empty() {
-        return None;
-    }
     let pylon_dial_addr = ack.reverse_tunnel_pylon_dial_addr.trim();
-    if pylon_dial_addr.is_empty() {
+    if routing_target_addr.is_empty() || pylon_dial_addr.is_empty() {
         return None;
-    }
-    if pylon_dial_addr == routing_target_addr {
-        return Some(ReverseTunnelEndpoint {
-            routing_target_addr: routing_target_addr.to_string(),
-            pylon_dial_addr: routing_target_addr.to_string(),
-            sni_override: None,
-        });
     }
 
     Some(ReverseTunnelEndpoint {
         routing_target_addr: routing_target_addr.to_string(),
         pylon_dial_addr: pylon_dial_addr.to_string(),
-        sni_override: Some(reverse_tunnel_sni_from_routing_target(routing_target_addr)),
+        sni_override: (pylon_dial_addr != routing_target_addr)
+            .then(|| reverse_tunnel_sni_from_routing_target(routing_target_addr)),
     })
 }
 
@@ -188,13 +114,10 @@ pub(super) fn reverse_tunnel_sni_from_routing_target(routing_target_addr: &str) 
     }
 }
 
-pub(super) async fn reverse_tunnel_connect_with_timeout<F>(
+pub(super) async fn reverse_tunnel_connect_with_timeout(
     connect_timeout: Duration,
-    connect_attempt: F,
-) -> Result<ReverseQuicTunnelHandle, TunnelError>
-where
-    F: Future<Output = Result<ReverseQuicTunnelHandle, TunnelError>>,
-{
+    connect_attempt: impl Future<Output = Result<ReverseQuicTunnelHandle, TunnelError>>,
+) -> Result<ReverseQuicTunnelHandle, TunnelError> {
     tokio::time::timeout(connect_timeout, connect_attempt)
         .await
         .map_err(|_| TunnelError::ConnectTimeout {
@@ -202,31 +125,56 @@ where
         })?
 }
 
+async fn wait_for_reverse_tunnel_retry(
+    state_rx: &mut watch::Receiver<ReverseTunnelState>,
+    stop: &CancellationToken,
+    backoff: &mut Duration,
+) -> bool {
+    tokio::select! {
+        _ = stop.cancelled() => false,
+        changed = state_rx.changed() => {
+            if changed.is_ok() {
+                *backoff = Duration::from_secs(1);
+                true
+            } else {
+                false
+            }
+        }
+        _ = tokio::time::sleep(*backoff) => {
+            *backoff = (*backoff * 2).min(Duration::from_secs(30));
+            true
+        }
+    }
+}
+
+pub(super) fn reverse_quic_tunnel_config(
+    endpoint: &ReverseTunnelEndpoint,
+    config: &RegistrationSessionConfig,
+) -> ReverseQuicTunnelConfig {
+    ReverseQuicTunnelConfig {
+        target_addr: endpoint.pylon_dial_addr.clone(),
+        inference_server_id: config.inference_server_id.clone(),
+        upstream_http_base_url: config.inference_server_url.clone(),
+        forwarding: config.forwarding.clone(),
+        tls_cert_pem: config.tls_cert_pem.clone(),
+        quic_insecure: config.quic_insecure,
+        tunnel_protocol: config.tunnel_protocol,
+        sni_override: endpoint.sni_override.clone(),
+        auth_token_provider: config.auth_token_provider.clone(),
+    }
+}
+
 /// Maintains a single reverse QUIC tunnel connection to a stargate router.
 pub(super) async fn run_reverse_tunnel_loop(
-    config: ReverseTunnelLoopConfig,
+    router_addr: String,
+    config: Arc<RegistrationSessionConfig>,
     state_tx: watch::Sender<ReverseTunnelState>,
     stop: CancellationToken,
 ) {
-    let ReverseTunnelLoopConfig {
-        router_addr,
-        inference_server_id,
-        tls_cert_pem,
-        quic_insecure,
-        tunnel_protocol,
-        forwarding,
-        auth_token_provider,
-    } = config;
-    let reverse_tunnel_connect_timeout = REVERSE_TUNNEL_CONNECT_TIMEOUT;
     let mut state_rx = state_tx.subscribe();
     let mut backoff = Duration::from_secs(1);
-    const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-    loop {
-        if stop.is_cancelled() {
-            return;
-        }
-
+    while !stop.is_cancelled() {
         let endpoint = state_rx.borrow_and_update().endpoint().cloned();
         let Some(endpoint) = endpoint else {
             tokio::select! {
@@ -240,16 +188,7 @@ pub(super) async fn run_reverse_tunnel_loop(
             continue;
         };
 
-        let tunnel_config = build_reverse_quic_tunnel_config(ReverseQuicTunnelConfigParams {
-            dial_addr: endpoint.pylon_dial_addr.clone(),
-            sni_override: endpoint.sni_override.clone(),
-            inference_server_id: inference_server_id.clone(),
-            tls_cert_pem: tls_cert_pem.clone(),
-            quic_insecure,
-            tunnel_protocol,
-            forwarding: forwarding.clone(),
-            auth_token_provider: auth_token_provider.clone(),
-        });
+        let tunnel_config = reverse_quic_tunnel_config(&endpoint, &config);
         let connect_result = tokio::select! {
             _ = stop.cancelled() => return,
             changed = state_rx.changed() => {
@@ -260,22 +199,18 @@ pub(super) async fn run_reverse_tunnel_loop(
                 continue;
             }
             result = reverse_tunnel_connect_with_timeout(
-                reverse_tunnel_connect_timeout,
+                REVERSE_TUNNEL_CONNECT_TIMEOUT,
                 start_reverse_quic_tunnel(tunnel_config),
             ) => result,
         };
         match connect_result {
             Ok(handle) => {
-                if !state_tx.send_if_modified(|state| state.mark_connected(&endpoint)) {
-                    handle.shutdown().await;
-                    backoff = Duration::from_secs(1);
-                    continue;
-                }
-                let committed = state_rx.borrow_and_update().clone();
-                if !matches!(
-                    committed,
-                    ReverseTunnelState::Connected(ref current) if current == &endpoint
-                ) {
+                if !state_tx.send_if_modified(|state| state.mark_connected(&endpoint))
+                    || !matches!(
+                        &*state_rx.borrow_and_update(),
+                        ReverseTunnelState::Connected(current) if current == &endpoint
+                    )
+                {
                     handle.shutdown().await;
                     backoff = Duration::from_secs(1);
                     continue;
@@ -284,7 +219,7 @@ pub(super) async fn run_reverse_tunnel_loop(
                     router_addr = %router_addr,
                     dial_addr = %endpoint.pylon_dial_addr,
                     routing_target_addr = %endpoint.routing_target_addr,
-                    inference_server_id = %inference_server_id,
+                    inference_server_id = %config.inference_server_id,
                     "reverse tunnel connected"
                 );
                 let connected_at = tokio::time::Instant::now();
@@ -292,9 +227,7 @@ pub(super) async fn run_reverse_tunnel_loop(
                 tokio::select! {
                     _ = stop.cancelled() => {
                         handle.shutdown().await;
-                        state_tx.send_if_modified(|state| {
-                            state.mark_disconnected(&endpoint)
-                        });
+                        state_tx.send_if_modified(|state| state.mark_disconnected(&endpoint));
                         return;
                     }
                     changed = state_rx.changed() => {
@@ -302,9 +235,7 @@ pub(super) async fn run_reverse_tunnel_loop(
                         if changed.is_err() {
                             return;
                         }
-                        state_tx.send_if_modified(|state| {
-                            state.mark_disconnected(&endpoint)
-                        });
+                        state_tx.send_if_modified(|state| state.mark_disconnected(&endpoint));
                         backoff = Duration::from_secs(1);
                     }
                     _ = handle.closed() => {
@@ -312,13 +243,12 @@ pub(super) async fn run_reverse_tunnel_loop(
                             router_addr = %router_addr,
                             dial_addr = %endpoint.pylon_dial_addr,
                             routing_target_addr = %endpoint.routing_target_addr,
-                            inference_server_id = %inference_server_id,
+                            inference_server_id = %config.inference_server_id,
                             backoff_ms = backoff.as_millis(),
                             "reverse tunnel connection dropped, reconnecting"
                         );
-                        let disconnected = state_tx.send_if_modified(|state| {
-                            state.mark_disconnected(&endpoint)
-                        });
+                        let disconnected = state_tx
+                            .send_if_modified(|state| state.mark_disconnected(&endpoint));
                         if disconnected
                             && state_rx.borrow_and_update().endpoint() != Some(&endpoint)
                         {
@@ -328,17 +258,8 @@ pub(super) async fn run_reverse_tunnel_loop(
                         if connected_at.elapsed() > Duration::from_secs(60) {
                             backoff = Duration::from_secs(1);
                         }
-                        tokio::select! {
-                            _ = stop.cancelled() => return,
-                            changed = state_rx.changed() => {
-                                if changed.is_err() {
-                                    return;
-                                }
-                                backoff = Duration::from_secs(1);
-                            }
-                            _ = tokio::time::sleep(backoff) => {
-                                backoff = (backoff * 2).min(BACKOFF_MAX);
-                            }
+                        if !wait_for_reverse_tunnel_retry(&mut state_rx, &stop, &mut backoff).await {
+                            return;
                         }
                     }
                 }
@@ -348,22 +269,13 @@ pub(super) async fn run_reverse_tunnel_loop(
                     router_addr = %router_addr,
                     dial_addr = %endpoint.pylon_dial_addr,
                     routing_target_addr = %endpoint.routing_target_addr,
-                    inference_server_id = %inference_server_id,
+                    inference_server_id = %config.inference_server_id,
                     error = %error,
                     backoff_ms = backoff.as_millis(),
                     "reverse tunnel connect failed, retrying"
                 );
-                tokio::select! {
-                    _ = stop.cancelled() => return,
-                    changed = state_rx.changed() => {
-                        if changed.is_err() {
-                            return;
-                        }
-                        backoff = Duration::from_secs(1);
-                    }
-                    _ = tokio::time::sleep(backoff) => {
-                        backoff = (backoff * 2).min(BACKOFF_MAX);
-                    }
+                if !wait_for_reverse_tunnel_retry(&mut state_rx, &stop, &mut backoff).await {
+                    return;
                 }
             }
         }

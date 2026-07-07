@@ -13,59 +13,65 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 
+use crate::stats::PylonMetrics;
 use crate::stats::token_metrics::{SNAPSHOT_THRESHOLD, TpsDistribution};
 
+use super::CalibrationConfig;
 use super::upstream::{BringupError, check_upstream_health, send_completion_request};
-use super::{BringupConfig, BringupTaskConfig};
 
 pub(super) const CALIBRATION_PROMPT_UNITS_FLOOR: usize = 256;
 
-pub(crate) async fn run_assigned_cluster_calibration(
-    task_config: &BringupTaskConfig,
-) -> Result<f64, BringupError> {
+pub async fn run_startup_calibration(
+    upstream_http_base_url: &str,
+    model_ids: &[String],
+    config: &CalibrationConfig,
+    metrics: Option<Arc<PylonMetrics>>,
+) -> Result<HashMap<String, f64>, BringupError> {
+    if config.calibration_requests == 0 {
+        return Err(BringupError::InvalidCalibrationConfig(
+            "calibration_requests must be greater than zero",
+        ));
+    }
+
     let client = reqwest::Client::new();
-    let started_at = Instant::now();
-    let result = if check_upstream_health(
-        &client,
-        &task_config.upstream_http_base_url,
-        task_config.config.canary_timeout,
-    )
-    .await
-    {
-        run_calibration(
+    let mut bootstrap_input_tps = HashMap::with_capacity(model_ids.len());
+    for model_id in model_ids {
+        let started_at = Instant::now();
+        let result = if check_upstream_health(
             &client,
-            &task_config.upstream_http_base_url,
-            &task_config.model_id,
-            &task_config.config,
+            upstream_http_base_url,
+            config.health_timeout,
         )
         .await
-    } else {
-        Err(BringupError::UnhealthyUpstream)
-    };
-    if let Some(metrics) = task_config.metrics.as_deref() {
-        metrics.observe_model_calibration_duration(
-            &task_config.model_id,
-            started_at.elapsed(),
-            result.is_ok(),
-        );
+        {
+            run_calibration(&client, upstream_http_base_url, model_id, config).await
+        } else {
+            Err(BringupError::UnhealthyUpstream)
+        };
+        if let Some(metrics) = metrics.as_deref() {
+            metrics.observe_model_calibration_duration(
+                model_id,
+                started_at.elapsed(),
+                result.is_ok(),
+            );
+        }
+        bootstrap_input_tps.insert(model_id.clone(), result?);
     }
-    result
+    Ok(bootstrap_input_tps)
 }
 
 pub(super) async fn run_calibration(
     http_client: &reqwest::Client,
     upstream_http_base_url: &str,
     model_id: &str,
-    config: &BringupConfig,
+    config: &CalibrationConfig,
 ) -> Result<f64, BringupError> {
-    if config.calibration_requests == 0 {
-        return Ok(0.0);
-    }
-
     let mut distribution = TpsDistribution::default();
     let mut last_error = None;
 
@@ -84,23 +90,20 @@ pub(super) async fn run_calibration(
                     distribution.update(sample);
                 }
             }
-            Err(BringupError::PromptTooLong) => {
-                last_error = Some(BringupError::PromptTooLong);
-            }
+            Err(BringupError::PromptTooLong) => last_error = Some(BringupError::PromptTooLong),
             Err(error) => return Err(error),
         }
     }
 
     let required_samples = config.calibration_requests.min(SNAPSHOT_THRESHOLD);
     if distribution.count >= required_samples {
-        Ok(distribution.mean)
-    } else if let Some(error) = last_error {
-        Err(error)
-    } else {
-        Err(BringupError::InsufficientCalibrationSamples {
-            valid_samples: distribution.count,
-        })
+        return Ok(distribution.mean);
     }
+    Err(
+        last_error.unwrap_or(BringupError::InsufficientCalibrationSamples {
+            valid_samples: distribution.count,
+        }),
+    )
 }
 
 async fn send_calibration_batch_with_prompt_backoff(
@@ -124,30 +127,21 @@ async fn send_calibration_batch_with_prompt_backoff(
         .await
         {
             Err(BringupError::PromptTooLong) if prompt_units > CALIBRATION_PROMPT_UNITS_FLOOR => {
-                let next_prompt_units = ((prompt_units + CALIBRATION_PROMPT_UNITS_FLOOR) / 2)
-                    .max(CALIBRATION_PROMPT_UNITS_FLOOR);
-                if next_prompt_units >= prompt_units {
-                    return Err(BringupError::PromptTooLong);
-                }
-                prompt_units = next_prompt_units;
+                prompt_units = CALIBRATION_PROMPT_UNITS_FLOOR
+                    + (prompt_units - CALIBRATION_PROMPT_UNITS_FLOOR) / 2;
             }
             result => return result,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CalibrationBatch {
     pub(super) prompt_units: usize,
     pub(super) concurrency: usize,
 }
 
-pub(super) fn calibration_plan(config: &BringupConfig) -> Vec<CalibrationBatch> {
+pub(super) fn calibration_plan(config: &CalibrationConfig) -> Vec<CalibrationBatch> {
     let requests = config.calibration_requests;
-    if requests == 0 {
-        return Vec::new();
-    }
-
     let max_prompt_units = config
         .calibration_prompt_units
         .max(CALIBRATION_PROMPT_UNITS_FLOOR);
@@ -160,52 +154,20 @@ pub(super) fn calibration_plan(config: &BringupConfig) -> Vec<CalibrationBatch> 
         }];
     }
 
-    if max_concurrency == 1 {
-        return (0..requests)
-            .map(|index| {
-                let prompt_units = interpolate_usize(
-                    CALIBRATION_PROMPT_UNITS_FLOOR,
-                    max_prompt_units,
-                    index,
-                    requests - 1,
-                );
-                let concurrency = interpolate_usize(1, max_concurrency, index, requests - 1);
-                CalibrationBatch {
-                    prompt_units,
-                    concurrency,
-                }
-            })
-            .collect();
-    }
-
     let final_concurrency = max_concurrency.min(requests - 1);
     let single_request_runs = requests - final_concurrency;
-    let mut batches = Vec::with_capacity(single_request_runs + 1);
-    for index in 0..single_request_runs {
-        batches.push(CalibrationBatch {
-            prompt_units: interpolate_usize(
-                CALIBRATION_PROMPT_UNITS_FLOOR,
-                max_prompt_units,
-                index,
-                single_request_runs,
-            ),
+    let prompt_span = max_prompt_units - CALIBRATION_PROMPT_UNITS_FLOOR;
+    (0..single_request_runs)
+        .map(|index| CalibrationBatch {
+            prompt_units: CALIBRATION_PROMPT_UNITS_FLOOR
+                + (prompt_span as u128 * index as u128 / single_request_runs as u128) as usize,
             concurrency: 1,
-        });
-    }
-    batches.push(CalibrationBatch {
-        prompt_units: max_prompt_units,
-        concurrency: final_concurrency,
-    });
-
-    batches
-}
-
-fn interpolate_usize(start: usize, end: usize, index: usize, last_index: usize) -> usize {
-    if last_index == 0 {
-        return end;
-    }
-    let span = end - start;
-    start + (span * index / last_index)
+        })
+        .chain(std::iter::once(CalibrationBatch {
+            prompt_units: max_prompt_units,
+            concurrency: final_concurrency,
+        }))
+        .collect()
 }
 
 pub(super) fn aggregate_input_tps(
@@ -228,10 +190,9 @@ pub(super) async fn send_calibration_batch(
     concurrency: usize,
 ) -> Result<Vec<f64>, BringupError> {
     assert!(concurrency > 0, "calibration batch concurrency must be > 0");
-    let prompt = "1".repeat(prompt_units);
     let request = serde_json::json!({
         "model": model_id,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": "1".repeat(prompt_units)}],
         "max_tokens": 1,
         "seed": 33,
         "temperature": 0.7,
@@ -240,17 +201,18 @@ pub(super) async fn send_calibration_batch(
     });
 
     let batch_started_at = Instant::now();
-    let requests = (0..concurrency).map(|_| {
-        let request = request.clone();
-        async move {
-            send_completion_request(http_client, upstream_http_base_url, timeout, request).await?;
-            Ok::<_, BringupError>(())
-        }
+    let responses = std::iter::repeat_n(request, concurrency).map(|request| {
+        send_completion_request(
+            http_client,
+            upstream_http_base_url,
+            timeout,
+            request,
+            "calibration",
+        )
     });
-    let _: Vec<()> = join_all(requests)
-        .await
-        .into_iter()
-        .collect::<Result<_, _>>()?;
+    for response in join_all(responses).await {
+        response?;
+    }
     let aggregate_input_tps =
         aggregate_input_tps(prompt_units, concurrency, batch_started_at.elapsed());
     Ok(vec![aggregate_input_tps; concurrency])

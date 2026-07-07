@@ -80,26 +80,3 @@ fn watch_stargates_probe_invalid_endpoint_exits_nonzero() {
         "watch-stargates probe should reject invalid control-plane endpoints"
     );
 }
-
-#[test]
-fn webtransport_l7_proxy_occupied_listen_addr_exits_nonzero() {
-    let occupied_socket =
-        std::net::UdpSocket::bind("127.0.0.1:0").expect("test UDP socket should bind");
-    let occupied_addr = occupied_socket
-        .local_addr()
-        .expect("test UDP socket should expose its local address");
-    let status = Command::new(env!("CARGO_BIN_EXE_stargate-webtransport-l7-proxy"))
-        .args([
-            "--listen-addr",
-            &occupied_addr.to_string(),
-            "--upstream-template",
-            "{server_name}:50072",
-        ])
-        .status()
-        .expect("stargate-webtransport-l7-proxy process should start");
-
-    assert!(
-        !status.success(),
-        "WebTransport L7 proxy should reject an occupied QUIC listen address"
-    );
-}

@@ -13,6 +13,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+macro_rules! owned_task_handle {
+    ($name:ident) => {
+        pub struct $name {
+            task: stargate_runtime::OwnedTask,
+        }
+
+        impl $name {
+            pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
+                self.task.wait_for_exit().await
+            }
+
+            pub async fn shutdown(self) {
+                self.task
+                    .shutdown(stargate_runtime::TASK_SHUTDOWN_TIMEOUT)
+                    .await;
+            }
+        }
+    };
+}
+
 mod aggregator;
 mod collector;
 mod engine_stats_stream;

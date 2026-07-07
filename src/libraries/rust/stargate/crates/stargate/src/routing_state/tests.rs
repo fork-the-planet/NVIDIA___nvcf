@@ -21,251 +21,490 @@ use super::reservations::update_reserved_priority_queue_time;
 use super::snapshots::{ClusterBackendUpsert, RoutedClusterState, RoutingTargetGeneration};
 use super::*;
 use crate::load_balancer::{
-    LoadBalancerAlgorithm, LoadBalancerConfig, LoadBalancerRequest, LoadBalancerRouter,
+    GroqMultiregionAlgorithmConfig, LoadBalancerAlgorithm, LoadBalancerAlgorithmConfig,
+    LoadBalancerAlgorithmSettings, LoadBalancerConfig, LoadBalancerModelConfig,
+    LoadBalancerRequest, LoadBalancerRouter,
 };
+use InferenceServerStatus::{Active, Inactive};
 use stargate_proto::pb::InferenceServerModelRegistration;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn model_registration(status: i32) -> InferenceServerModelRegistration {
-    InferenceServerModelRegistration {
-        stats: Some(ModelStats::default()),
-        status,
-    }
-}
-
-fn model_registration_with_stats(
-    status: i32,
-    stats: ModelStats,
-) -> InferenceServerModelRegistration {
-    InferenceServerModelRegistration {
-        stats: Some(stats),
-        status,
-    }
-}
-
-fn running_registration(
-    state: &StargateState,
-    id: &str,
-    url: &str,
-    routing_key: Option<&str>,
-) -> RunningRegistration {
-    running_registration_in_cluster(state, id, id, url, routing_key)
-}
-
-fn running_registration_in_cluster(
-    state: &StargateState,
-    id: &str,
-    cluster_id: &str,
-    url: &str,
-    routing_key: Option<&str>,
-) -> RunningRegistration {
-    let identity = RegistrationIdentity {
-        inference_server_id: id.to_string(),
-        cluster_id: cluster_id.to_string(),
-        inference_server_url: url.to_string(),
-        routing_key: routing_key.map(ToOwned::to_owned),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-    state.begin_registration(&identity).unwrap()
-}
-
-fn running_coordinated_registration_in_cluster(
-    state: &StargateState,
-    id: &str,
-    cluster_id: &str,
-    url: &str,
-    routing_key: Option<&str>,
-) -> RunningRegistration {
-    let identity = RegistrationIdentity {
-        inference_server_id: id.to_string(),
-        cluster_id: cluster_id.to_string(),
-        inference_server_url: url.to_string(),
-        routing_key: routing_key.map(ToOwned::to_owned),
-        reverse_tunnel: false,
-        coordinated_calibration: true,
-    };
-    state.begin_registration(&identity).unwrap()
-}
-
 fn make_target(routing_key: Option<&str>, model_id: &str) -> RoutingTargetKey {
-    RoutingTargetKey {
-        routing_key: routing_key.map(ToOwned::to_owned),
-        model_id: model_id.to_string(),
+    RoutingTargetKey::new(routing_key.map(ToOwned::to_owned), model_id)
+}
+
+fn model_set<const N: usize>(models: [&str; N]) -> BTreeSet<String> {
+    models.into_iter().map(str::to_string).collect()
+}
+
+struct RegistrationScenario {
+    state: StargateState,
+    routing_key: Option<String>,
+}
+
+impl RegistrationScenario {
+    fn new(routing_key: Option<&str>) -> Self {
+        Self {
+            state: StargateState::default(),
+            routing_key: routing_key.map(ToOwned::to_owned),
+        }
+    }
+
+    fn target(&self, model_id: &str) -> RoutingTargetKey {
+        make_target(self.routing_key.as_deref(), model_id)
+    }
+
+    fn assert_registered_models(&self, present: &[&str], absent: &[&str]) {
+        for model_id in present {
+            assert!(
+                self.state
+                    .has_registered_model_for_target(&self.target(model_id))
+            );
+        }
+        for model_id in absent {
+            assert!(
+                !self
+                    .state
+                    .has_registered_model_for_target(&self.target(model_id))
+            );
+        }
+    }
+
+    fn start(&self, id: &str, port: u16) -> RunningRegistration {
+        self.start_in(id, id, port)
+    }
+
+    fn start_in(&self, id: &str, cluster_id: &str, port: u16) -> RunningRegistration {
+        self.start_at(
+            id,
+            cluster_id,
+            &format!("quic://127.0.0.1:{port}"),
+            self.routing_key.clone(),
+        )
+    }
+
+    fn start_keyed(&self, id: &str, port: u16, routing_key: &str) -> RunningRegistration {
+        self.start_at(
+            id,
+            id,
+            &format!("quic://127.0.0.1:{port}"),
+            Some(routing_key.to_string()),
+        )
+    }
+
+    fn start_at(
+        &self,
+        id: &str,
+        cluster_id: &str,
+        url: &str,
+        routing_key: Option<String>,
+    ) -> RunningRegistration {
+        self.state
+            .begin_registration(&RegistrationIdentity {
+                inference_server_id: id.to_string(),
+                cluster_id: cluster_id.to_string(),
+                inference_server_url: url.to_string(),
+                routing_key,
+                reverse_tunnel: false,
+            })
+            .unwrap()
+    }
+
+    fn update(
+        &self,
+        running: &RunningRegistration,
+        model_id: &str,
+        status: InferenceServerStatus,
+        stats: ModelStats,
+    ) -> InferenceServerRegistration {
+        let identity = running.identity();
+        InferenceServerRegistration {
+            inference_server_id: identity.inference_server_id.clone(),
+            cluster_id: identity.cluster_id.clone(),
+            inference_server_url: identity.inference_server_url.clone(),
+            models: HashMap::from([(
+                model_id.to_string(),
+                InferenceServerModelRegistration {
+                    stats: Some(stats),
+                    status: status as i32,
+                },
+            )]),
+            reverse_tunnel: identity.reverse_tunnel,
+        }
+    }
+
+    fn update_default_stats(
+        &self,
+        running: &RunningRegistration,
+        model_id: &str,
+        status: InferenceServerStatus,
+    ) -> InferenceServerRegistration {
+        self.update(running, model_id, status, ModelStats::default())
+    }
+
+    fn empty_update(&self, running: &RunningRegistration) -> InferenceServerRegistration {
+        let mut update = self.update(running, "unused", Inactive, ModelStats::default());
+        update.models.clear();
+        update
+    }
+
+    async fn publish(
+        &self,
+        running: &RunningRegistration,
+        model_id: &str,
+        status: InferenceServerStatus,
+        stats: ModelStats,
+        rtt_ms: Option<u64>,
+    ) {
+        let update = self.update(running, model_id, status, stats);
+        self.publish_update(running, &update, rtt_ms).await
+    }
+
+    async fn publish_default_stats(
+        &self,
+        running: &RunningRegistration,
+        model_id: &str,
+        status: InferenceServerStatus,
+        rtt_ms: Option<u64>,
+    ) {
+        self.publish(running, model_id, status, ModelStats::default(), rtt_ms)
+            .await
+    }
+
+    async fn activate(&self, running: &RunningRegistration, model_id: &str) {
+        self.publish_default_stats(running, model_id, Active, Some(5))
+            .await
+    }
+
+    async fn publish_update(
+        &self,
+        running: &RunningRegistration,
+        update: &InferenceServerRegistration,
+        rtt_ms: Option<u64>,
+    ) {
+        self.state
+            .apply_registration_update(running, update, true, rtt_ms.map(Duration::from_millis))
+            .await
+    }
+
+    async fn publish_connected(
+        &self,
+        running: &RunningRegistration,
+        update: &InferenceServerRegistration,
+    ) {
+        self.publish_update(running, update, Some(5)).await
+    }
+
+    async fn candidates(&self, model_id: &str) -> Vec<RoutedInferenceServerSnapshot> {
+        self.state
+            .candidates_for_target(&self.target(model_id))
+            .await
+    }
+
+    async fn only_candidate(&self, model_id: &str) -> RoutedInferenceServerSnapshot {
+        let candidates = self.candidates(model_id).await;
+        assert_eq!(candidates.len(), 1);
+        candidates.into_iter().next().unwrap()
+    }
+
+    async fn clusters(&self, model_id: &str) -> Vec<RoutedClusterSnapshot> {
+        self.state
+            .cluster_candidates_for_target(&self.target(model_id))
+            .await
+    }
+
+    async fn only_cluster(&self, model_id: &str) -> RoutedClusterSnapshot {
+        let clusters = self.clusters(model_id).await;
+        assert_eq!(clusters.len(), 1);
+        clusters.into_iter().next().unwrap()
+    }
+
+    async fn selected_cluster(&self, model_id: &str) -> SelectedRoutedCluster {
+        self.state
+            .routing_target_snapshot(&self.target(model_id))
+            .await
+            .expect("target should be routable")
+            .into_selected_cluster(0)
     }
 }
 
-async fn selected_cluster_for_target(
-    state: &StargateState,
-    target: &RoutingTargetKey,
-) -> SelectedRoutedCluster {
-    state
-        .routing_target_snapshot(target)
-        .await
-        .expect("target should be routable")
-        .into_selected_cluster(0)
+fn assert_queue_stats(
+    stats: &ModelStats,
+    running: u64,
+    queued: u64,
+    total_input: u64,
+    queued_input: u64,
+    priority: u32,
+    estimate_ms: u64,
+) {
+    assert_eq!(stats.num_running_queries, running);
+    assert_eq!(stats.queue_size, queued);
+    assert_eq!(stats.total_query_input_size, total_input);
+    assert_eq!(stats.queued_input_size, queued_input);
+    assert_eq!(
+        stats.queue_time_estimate_ms_by_priority.get(&priority),
+        Some(&estimate_ms)
+    );
+}
+
+fn priority_stats<const N: usize>(
+    last_mean_input_tps: f64,
+    estimates: [(u32, u64); N],
+) -> ModelStats {
+    ModelStats {
+        last_mean_input_tps,
+        queue_time_estimate_ms_by_priority: HashMap::from(estimates),
+        ..ModelStats::default()
+    }
+}
+
+fn queued_stats<const N: usize>(
+    last_mean_input_tps: f64,
+    estimates: [(u32, u64); N],
+) -> ModelStats {
+    ModelStats {
+        last_mean_input_tps,
+        queued_input_size: 25,
+        queue_time_estimate_ms_by_priority: HashMap::from(estimates),
+        ..ModelStats::default()
+    }
+}
+
+async fn assert_reserved_priority_map<const N: usize, const M: usize>(
+    routing_key: &str,
+    inference_server_id: &str,
+    model_id: &str,
+    initial: [(u32, u64); N],
+    request_priority: u32,
+    expected: [(u32, u64); M],
+) {
+    let scenario = RegistrationScenario::new(Some(routing_key));
+    let running = scenario.start(inference_server_id, 8888);
+    scenario
+        .publish(
+            &running,
+            model_id,
+            Active,
+            priority_stats(100.0, initial),
+            Some(5),
+        )
+        .await;
+    let cluster = scenario.selected_cluster(model_id).await;
+    let _reservation = cluster.reserve_backend(&running.generation(), 10, request_priority);
+
+    assert_eq!(
+        scenario
+            .only_cluster(model_id)
+            .await
+            .stats
+            .queue_time_estimate_ms_by_priority,
+        HashMap::from(expected)
+    );
+}
+
+fn shared_backend_a_stats() -> ModelStats {
+    ModelStats {
+        output_tps: 2.0,
+        last_mean_input_tps: 100.0,
+        max_output_tps: 50.0,
+        queue_size: 1,
+        queued_input_size: 100,
+        input_processing_queries: 1,
+        output_generation_queries: 2,
+        stats_observed_at_unix_ms: 1000,
+        stats_capabilities: vec!["request.output.chunk_usage".to_string()],
+        stats_sources: vec!["chunk_usage".to_string()],
+        kv_cache_capacity_tokens: 1000,
+        kv_cache_used_tokens: 100,
+        kv_cache_free_tokens: 900,
+        num_running_queries: 11,
+        max_engine_concurrency: 111,
+        total_query_input_size: 1111,
+        queue_time_estimate_ms_by_priority: HashMap::from([(1, 111)]),
+    }
+}
+
+fn shared_backend_b_stats() -> ModelStats {
+    ModelStats {
+        output_tps: 5.0,
+        last_mean_input_tps: 120.0,
+        max_output_tps: 60.0,
+        queue_size: 2,
+        queued_input_size: 200,
+        input_processing_queries: 3,
+        output_generation_queries: 4,
+        stats_observed_at_unix_ms: 2000,
+        stats_capabilities: vec![
+            "request.output.chunk_usage".to_string(),
+            "machine.kv_cache.http".to_string(),
+        ],
+        stats_sources: vec!["chunk_usage".to_string(), "kv_cache_stats".to_string()],
+        kv_cache_capacity_tokens: 2000,
+        kv_cache_used_tokens: 500,
+        kv_cache_free_tokens: 1500,
+        num_running_queries: 7,
+        max_engine_concurrency: 77,
+        total_query_input_size: 777,
+        queue_time_estimate_ms_by_priority: HashMap::from([(1, 222), (2, 333)]),
+    }
+}
+
+async fn published_shared_cluster(
+    stats_a: ModelStats,
+    stats_b: ModelStats,
+    rtt_a_ms: u64,
+) -> (
+    RegistrationScenario,
+    RunningRegistration,
+    RunningRegistration,
+) {
+    let scenario = RegistrationScenario::new(Some("rk-a"));
+    let running_a = scenario.start_in("inst-a", "cluster-shared", 1111);
+    let running_b = scenario.start_in("inst-b", "cluster-shared", 2222);
+    let update_a = scenario.update(&running_a, "shared-model", Active, stats_a);
+    let update_b = scenario.update(&running_b, "shared-model", Active, stats_b);
+    scenario
+        .publish_update(&running_a, &update_a, Some(rtt_a_ms))
+        .await;
+    scenario.publish_connected(&running_b, &update_b).await;
+    (scenario, running_a, running_b)
+}
+
+macro_rules! assert_stats {
+    ($stats:expr, $($field:ident: $expected:expr),+ $(,)?) => {{
+        let stats = &$stats;
+        $(assert_eq!(stats.$field, $expected);)+
+    }};
+}
+
+macro_rules! backend {
+    ($cluster:expr, $id:expr, $output_tps:expr, $input_tps:expr, $rtt_ms:expr) => {
+        routed_backend(
+            None,
+            $cluster,
+            $id,
+            $output_tps,
+            $input_tps,
+            Duration::from_millis($rtt_ms),
+        )
+    };
+    ($generation:expr => $cluster:expr, $id:expr, $output_tps:expr, $input_tps:expr, $rtt_ms:expr) => {
+        routed_backend(
+            Some($generation),
+            $cluster,
+            $id,
+            $output_tps,
+            $input_tps,
+            Duration::from_millis($rtt_ms),
+        )
+    };
 }
 
 fn routed_backend(
+    cluster_generation: Option<Arc<RegistrationClusterGeneration>>,
     cluster_id: &str,
     inference_server_id: &str,
     output_tps: f64,
     last_mean_input_tps: f64,
     rtt: Duration,
 ) -> RoutedInferenceServerSnapshot {
-    let registration = test_registration_generation(RegistrationIdentity {
+    let identity = RegistrationIdentity {
         inference_server_id: inference_server_id.to_string(),
         cluster_id: cluster_id.to_string(),
         inference_server_url: format!("quic://{inference_server_id}"),
         routing_key: None,
         reverse_tunnel: false,
-        coordinated_calibration: false,
-    });
-    RoutedInferenceServerSnapshot {
+    };
+    let registration = match cluster_generation {
+        Some(generation) => test_registration_generation_in_cluster(identity, generation),
+        None => test_registration_generation(identity),
+    };
+    RoutedInferenceServerSnapshot::new(
         registration,
-        cluster_id: cluster_id.to_string(),
-        inference_server_id: inference_server_id.to_string(),
-        inference_server_url: format!("quic://{inference_server_id}"),
-        stats: ModelStats {
+        ModelStats {
             output_tps,
             last_mean_input_tps,
             ..ModelStats::default()
         },
         rtt,
-        snapshot_updated_at: Instant::now(),
-        status: InferenceServerStatus::Active,
-        reverse_tunnel: false,
-    }
+        Instant::now(),
+        Active,
+    )
 }
 
-fn routed_backend_in_cluster_generation(
-    cluster_generation: Arc<RegistrationClusterGeneration>,
-    cluster_id: &str,
-    inference_server_id: &str,
-    output_tps: f64,
-    last_mean_input_tps: f64,
-    rtt: Duration,
-) -> RoutedInferenceServerSnapshot {
-    let mut snapshot = routed_backend(
-        cluster_id,
-        inference_server_id,
-        output_tps,
-        last_mean_input_tps,
-        rtt,
-    );
-    let registration = test_registration_generation_in_cluster(
-        RegistrationIdentity {
-            inference_server_id: snapshot.inference_server_id.clone(),
-            cluster_id: snapshot.cluster_id.clone(),
-            inference_server_url: snapshot.inference_server_url.clone(),
-            routing_key: None,
-            reverse_tunnel: snapshot.reverse_tunnel,
-            coordinated_calibration: false,
-        },
-        cluster_generation,
-    );
-    snapshot.registration = registration;
-    snapshot
+#[derive(Clone, Copy)]
+enum ReplacementClusterLifetime {
+    Retired,
+    Overlapping,
 }
 
-fn routed_backend_snapshot_in_cluster_generation(
-    mut snapshot: RoutedInferenceServerSnapshot,
-    cluster_generation: Arc<RegistrationClusterGeneration>,
-) -> RoutedInferenceServerSnapshot {
-    let registration = test_registration_generation_in_cluster(
-        RegistrationIdentity {
-            inference_server_id: snapshot.inference_server_id.clone(),
-            cluster_id: snapshot.cluster_id.clone(),
-            inference_server_url: snapshot.inference_server_url.clone(),
-            routing_key: None,
-            reverse_tunnel: snapshot.reverse_tunnel,
-            coordinated_calibration: false,
-        },
-        cluster_generation,
-    );
-    snapshot.registration = registration;
-    snapshot
-}
-
-fn registration_update(
-    running: &RunningRegistration,
+async fn assert_stale_cleanup_preserves_replacement(
+    routing_key: &str,
     model_id: &str,
-    status: i32,
-    stats: ModelStats,
-) -> InferenceServerRegistration {
-    let identity = running.identity();
-    InferenceServerRegistration {
-        inference_server_id: identity.inference_server_id.clone(),
-        cluster_id: identity.cluster_id.clone(),
-        inference_server_url: identity.inference_server_url.clone(),
-        models: HashMap::from([(
-            model_id.to_string(),
-            model_registration_with_stats(status, stats),
-        )]),
-        reverse_tunnel: identity.reverse_tunnel,
-        coordinated_calibration: identity.coordinated_calibration,
-    }
-}
-
-fn empty_registration_update(running: &RunningRegistration) -> InferenceServerRegistration {
-    let identity = running.identity();
-    InferenceServerRegistration {
-        inference_server_id: identity.inference_server_id.clone(),
-        cluster_id: identity.cluster_id.clone(),
-        inference_server_url: identity.inference_server_url.clone(),
-        models: HashMap::new(),
-        reverse_tunnel: identity.reverse_tunnel,
-        coordinated_calibration: identity.coordinated_calibration,
-    }
-}
-
-async fn submit_assigned_calibration(
-    state: &StargateState,
-    routing_key: Option<&str>,
     inference_server_id: &str,
     cluster_id: &str,
-    model_id: &str,
-    assignment_token: &str,
-    last_mean_input_tps: f64,
+    lifetime: ReplacementClusterLifetime,
 ) {
-    state
-        .submit_cluster_calibration(
-            routing_key.map(ToOwned::to_owned),
-            &SubmitClusterCalibrationRequest {
-                inference_server_id: inference_server_id.to_string(),
-                cluster_id: cluster_id.to_string(),
-                model_id: model_id.to_string(),
-                assignment_token: assignment_token.to_string(),
-                measured_last_mean_input_tps: last_mean_input_tps,
-            },
-        )
-        .await
-        .expect("assigned local calibration result should be accepted");
+    let scenario = RegistrationScenario::new(Some(routing_key));
+    let target = scenario.target(model_id);
+    let old = scenario.start_in(inference_server_id, cluster_id, 1111);
+    let peer = match lifetime {
+        ReplacementClusterLifetime::Retired => None,
+        ReplacementClusterLifetime::Overlapping => {
+            Some(scenario.start_in(&format!("{inference_server_id}-peer"), cluster_id, 3333))
+        }
+    };
+    scenario.activate(&old, model_id).await;
+
+    let ended = scenario
+        .state
+        .registrations
+        .end_registration(old)
+        .expect("exact old registration should be removed");
+    assert_eq!(
+        ended.registration.cluster_generation.is_retired(),
+        matches!(lifetime, ReplacementClusterLifetime::Retired)
+    );
+
+    let replacement = scenario.start_in(inference_server_id, cluster_id, 2222);
+    if matches!(lifetime, ReplacementClusterLifetime::Overlapping) {
+        assert!(Arc::ptr_eq(
+            &ended.registration.cluster_generation,
+            replacement.cluster_generation()
+        ));
+    }
+    scenario
+        .publish_default_stats(&replacement, model_id, Active, Some(6))
+        .await;
+    assert_eq!(
+        scenario.only_candidate(model_id).await.inference_server_url,
+        "quic://127.0.0.1:2222"
+    );
+    scenario
+        .state
+        .routing
+        .remove_inference_server_targets(&ended.registration, &HashSet::from([target]))
+        .await;
+
+    assert_eq!(
+        scenario.only_candidate(model_id).await.inference_server_url,
+        "quic://127.0.0.1:2222"
+    );
+    if let Some(peer) = peer {
+        scenario.state.end_registration(peer).await;
+    }
+    scenario.state.end_registration(replacement).await;
 }
 
 #[tokio::test]
 async fn registration_cluster_generation_tracks_overlap_and_final_retirement() {
-    let state = StargateState::default();
+    let scenario = RegistrationScenario::new(Some("rk-cluster-generation"));
     let (running_a, running_b) = std::thread::scope(|scope| {
-        let registration_a = scope.spawn(|| {
-            running_registration_in_cluster(
-                &state,
-                "inst-cluster-generation-a",
-                "cluster-generation",
-                "quic://127.0.0.1:1111",
-                Some("rk-cluster-generation"),
-            )
-        });
-        let registration_b = scope.spawn(|| {
-            running_registration_in_cluster(
-                &state,
-                "inst-cluster-generation-b",
-                "cluster-generation",
-                "quic://127.0.0.1:2222",
-                Some("rk-cluster-generation"),
-            )
-        });
+        let registration_a = scope
+            .spawn(|| scenario.start_in("inst-cluster-generation-a", "cluster-generation", 1111));
+        let registration_b = scope
+            .spawn(|| scenario.start_in("inst-cluster-generation-b", "cluster-generation", 2222));
         (
             registration_a
                 .join()
@@ -281,231 +520,92 @@ async fn registration_cluster_generation_tracks_overlap_and_final_retirement() {
         &first_generation,
         running_b.cluster_generation()
     ));
-    state.end_registration(running_a).await;
+    scenario.state.end_registration(running_a).await;
     assert!(!first_generation.is_retired());
 
-    let running_c = running_registration_in_cluster(
-        &state,
-        "inst-cluster-generation-c",
-        "cluster-generation",
-        "quic://127.0.0.1:3333",
-        Some("rk-cluster-generation"),
-    );
+    let running_c = scenario.start_in("inst-cluster-generation-c", "cluster-generation", 3333);
     assert!(Arc::ptr_eq(
         &first_generation,
         running_c.cluster_generation()
     ));
 
-    state.end_registration(running_b).await;
-    state.end_registration(running_c).await;
+    scenario.state.end_registration(running_b).await;
+    scenario.state.end_registration(running_c).await;
     assert!(first_generation.is_retired());
 
-    let replacement = running_registration_in_cluster(
-        &state,
+    let replacement = scenario.start_in(
         "inst-cluster-generation-replacement",
         "cluster-generation",
-        "quic://127.0.0.1:4444",
-        Some("rk-cluster-generation"),
+        4444,
     );
     assert!(!Arc::ptr_eq(
         &first_generation,
         replacement.cluster_generation()
     ));
     assert!(!replacement.cluster_generation().is_retired());
-    state.end_registration(replacement).await;
+    scenario.state.end_registration(replacement).await;
 }
 
 #[tokio::test]
 async fn stale_registration_cleanup_cannot_remove_replacement_route() {
-    let state = StargateState::default();
-    let target = make_target(Some("rk-reused-generation"), "model-reused-generation");
-    let old = running_registration_in_cluster(
-        &state,
+    assert_stale_cleanup_preserves_replacement(
+        "rk-reused-generation",
+        "model-reused-generation",
         "inst-reused-generation",
         "cluster-reused-generation",
-        "quic://127.0.0.1:1111",
-        Some("rk-reused-generation"),
-    );
-    let old_update = registration_update(
-        &old,
-        "model-reused-generation",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(&old, &old_update, true, Some(Duration::from_millis(5)))
-        .await;
-
-    let ended = state
-        .registrations
-        .end_registration(old)
-        .expect("exact old registration should be removed");
-    assert!(ended.registration.cluster_generation.is_retired());
-
-    let replacement = running_registration_in_cluster(
-        &state,
-        "inst-reused-generation",
-        "cluster-reused-generation",
-        "quic://127.0.0.1:2222",
-        Some("rk-reused-generation"),
-    );
-    let replacement_update = registration_update(
-        &replacement,
-        "model-reused-generation",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(
-            &replacement,
-            &replacement_update,
-            true,
-            Some(Duration::from_millis(6)),
-        )
-        .await;
-    let candidates = state.candidates_for_target(&target).await;
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].inference_server_url, "quic://127.0.0.1:2222");
-
-    state
-        .routing
-        .remove_inference_server_targets(&ended.registration, &HashSet::from([target.clone()]))
-        .await;
-
-    let candidates = state.candidates_for_target(&target).await;
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].inference_server_url, "quic://127.0.0.1:2222");
-    state.end_registration(replacement).await;
+        ReplacementClusterLifetime::Retired,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn stale_cleanup_cannot_remove_same_cluster_generation_replacement_route() {
-    let state = StargateState::default();
-    let target = make_target(Some("rk-reused-overlap"), "model-reused-overlap");
-    let old = running_registration_in_cluster(
-        &state,
+    assert_stale_cleanup_preserves_replacement(
+        "rk-reused-overlap",
+        "model-reused-overlap",
         "inst-reused-overlap",
         "cluster-reused-overlap",
-        "quic://127.0.0.1:1111",
-        Some("rk-reused-overlap"),
-    );
-    let peer = running_registration_in_cluster(
-        &state,
-        "inst-reused-overlap-peer",
-        "cluster-reused-overlap",
-        "quic://127.0.0.1:3333",
-        Some("rk-reused-overlap"),
-    );
-    let old_update = registration_update(
-        &old,
-        "model-reused-overlap",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(&old, &old_update, true, Some(Duration::from_millis(5)))
-        .await;
-
-    let ended = state
-        .registrations
-        .end_registration(old)
-        .expect("exact old registration should be removed");
-    assert!(!ended.registration.cluster_generation.is_retired());
-
-    let replacement = running_registration_in_cluster(
-        &state,
-        "inst-reused-overlap",
-        "cluster-reused-overlap",
-        "quic://127.0.0.1:2222",
-        Some("rk-reused-overlap"),
-    );
-    assert!(Arc::ptr_eq(
-        &ended.registration.cluster_generation,
-        replacement.cluster_generation()
-    ));
-    let replacement_update = registration_update(
-        &replacement,
-        "model-reused-overlap",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(
-            &replacement,
-            &replacement_update,
-            true,
-            Some(Duration::from_millis(6)),
-        )
-        .await;
-
-    state
-        .routing
-        .remove_inference_server_targets(&ended.registration, &HashSet::from([target.clone()]))
-        .await;
-
-    let candidates = state.candidates_for_target(&target).await;
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].inference_server_url, "quic://127.0.0.1:2222");
-    state.end_registration(peer).await;
-    state.end_registration(replacement).await;
+        ReplacementClusterLifetime::Overlapping,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn stale_selected_registration_cannot_reserve_same_id_replacement() {
-    let state = StargateState::default();
-    let target = make_target(Some("rk-stale-reservation"), "model-stale-reservation");
-    let old = running_registration_in_cluster(
-        &state,
-        "inst-stale-reservation",
-        "cluster-stale-reservation",
-        "quic://127.0.0.1:1111",
-        Some("rk-stale-reservation"),
-    );
-    let old_update = registration_update(
-        &old,
-        "model-stale-reservation",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 100.0,
-            queue_time_estimate_ms_by_priority: HashMap::from([(4, 5)]),
-            ..ModelStats::default()
-        },
-    );
-    state
-        .apply_registration_update(&old, &old_update, true, Some(Duration::from_millis(5)))
+    let scenario = RegistrationScenario::new(Some("rk-stale-reservation"));
+    let old = scenario.start_in("inst-stale-reservation", "cluster-stale-reservation", 1111);
+    let stats = ModelStats {
+        last_mean_input_tps: 100.0,
+        queue_time_estimate_ms_by_priority: HashMap::from([(4, 5)]),
+        ..ModelStats::default()
+    };
+    scenario
+        .publish(
+            &old,
+            "model-stale-reservation",
+            Active,
+            stats.clone(),
+            Some(5),
+        )
         .await;
-    let stale_selected = state
-        .candidates_for_target(&target)
+    let stale_selected = scenario
+        .candidates("model-stale-reservation")
         .await
         .into_iter()
         .next()
         .expect("old registration should be routable");
-    let selected_cluster = selected_cluster_for_target(&state, &target).await;
+    let selected_cluster = scenario.selected_cluster("model-stale-reservation").await;
 
-    state.end_registration(old).await;
-    let replacement = running_registration_in_cluster(
-        &state,
-        "inst-stale-reservation",
-        "cluster-stale-reservation",
-        "quic://127.0.0.1:2222",
-        Some("rk-stale-reservation"),
-    );
-    let replacement_update = registration_update(
-        &replacement,
-        "model-stale-reservation",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 100.0,
-            queue_time_estimate_ms_by_priority: HashMap::from([(4, 5)]),
-            ..ModelStats::default()
-        },
-    );
-    state
-        .apply_registration_update(
+    scenario.state.end_registration(old).await;
+    let replacement =
+        scenario.start_in("inst-stale-reservation", "cluster-stale-reservation", 2222);
+    scenario
+        .publish(
             &replacement,
-            &replacement_update,
-            true,
-            Some(Duration::from_millis(6)),
+            "model-stale-reservation",
+            Active,
+            stats,
+            Some(6),
         )
         .await;
 
@@ -515,58 +615,22 @@ async fn stale_selected_registration_cannot_reserve_same_id_replacement() {
         reservation.is_none(),
         "a stale selected registration must not reserve its same-ID replacement"
     );
-    let clusters = state.cluster_candidates_for_target(&target).await;
+    let clusters = scenario.clusters("model-stale-reservation").await;
     assert_eq!(clusters[0].stats.num_running_queries, 0);
     assert_eq!(clusters[0].stats.total_query_input_size, 0);
 }
 
 #[tokio::test]
 async fn stale_selected_cluster_cannot_choose_same_id_replacement() {
-    let state = StargateState::default();
-    let target = make_target(Some("rk-stale-cluster"), "model-stale-cluster");
-    let old = running_registration_in_cluster(
-        &state,
-        "inst-stale-cluster",
-        "cluster-stale-cluster",
-        "quic://127.0.0.1:1111",
-        Some("rk-stale-cluster"),
-    );
-    let old_update = registration_update(
-        &old,
-        "model-stale-cluster",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(&old, &old_update, true, Some(Duration::from_millis(5)))
-        .await;
-    let selected_cluster = state
-        .routing_target_snapshot(&target)
-        .await
-        .expect("old target should be routable")
-        .into_selected_cluster(0);
+    let scenario = RegistrationScenario::new(Some("rk-stale-cluster"));
+    let old = scenario.start_in("inst-stale-cluster", "cluster-stale-cluster", 1111);
+    scenario.activate(&old, "model-stale-cluster").await;
+    let selected_cluster = scenario.selected_cluster("model-stale-cluster").await;
 
-    state.end_registration(old).await;
-    let replacement = running_registration_in_cluster(
-        &state,
-        "inst-stale-cluster",
-        "cluster-stale-cluster",
-        "quic://127.0.0.1:2222",
-        Some("rk-stale-cluster"),
-    );
-    let replacement_update = registration_update(
-        &replacement,
-        "model-stale-cluster",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(
-            &replacement,
-            &replacement_update,
-            true,
-            Some(Duration::from_millis(6)),
-        )
+    scenario.state.end_registration(old).await;
+    let replacement = scenario.start_in("inst-stale-cluster", "cluster-stale-cluster", 2222);
+    scenario
+        .publish_default_stats(&replacement, "model-stale-cluster", Active, Some(6))
         .await;
 
     assert!(
@@ -577,115 +641,51 @@ async fn stale_selected_cluster_cannot_choose_same_id_replacement() {
 
 #[tokio::test]
 async fn inactive_fresh_cluster_generation_clears_retired_routing_state() {
-    let state = StargateState::default();
-    let target = make_target(Some("rk-retired-cluster"), "model-retired-cluster");
-    let old = running_registration_in_cluster(
-        &state,
-        "inst-retired-cluster",
-        "cluster-retired-cluster",
-        "quic://127.0.0.1:1111",
-        Some("rk-retired-cluster"),
-    );
-    let old_update = registration_update(
-        &old,
-        "model-retired-cluster",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(&old, &old_update, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(state.candidates_for_target(&target).await.len(), 1);
+    let scenario = RegistrationScenario::new(Some("rk-retired-cluster"));
+    let old = scenario.start_in("inst-retired-cluster", "cluster-retired-cluster", 1111);
+    scenario.activate(&old, "model-retired-cluster").await;
+    assert_eq!(scenario.candidates("model-retired-cluster").await.len(), 1);
 
-    let ended = state
+    let ended = scenario
+        .state
         .registrations
         .end_registration(old)
         .expect("exact old registration should be removed");
     assert!(ended.registration.cluster_generation.is_retired());
 
-    let replacement = running_registration_in_cluster(
-        &state,
-        "inst-retired-cluster",
-        "cluster-retired-cluster",
-        "quic://127.0.0.1:2222",
-        Some("rk-retired-cluster"),
-    );
-    let inactive_update = registration_update(
-        &replacement,
-        "model-retired-cluster",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(
-            &replacement,
-            &inactive_update,
-            true,
-            Some(Duration::from_millis(6)),
-        )
+    let replacement = scenario.start_in("inst-retired-cluster", "cluster-retired-cluster", 2222);
+    scenario
+        .publish_default_stats(&replacement, "model-retired-cluster", Inactive, Some(6))
         .await;
 
-    assert!(state.candidates_for_target(&target).await.is_empty());
-    state.end_registration(replacement).await;
+    assert!(
+        scenario
+            .candidates("model-retired-cluster")
+            .await
+            .is_empty()
+    );
+    scenario.state.end_registration(replacement).await;
 }
 
 #[tokio::test]
 async fn apply_registration_update_removes_models_no_longer_advertised() {
-    let state = StargateState::default();
-    let running = running_registration(&state, "inst-1", "quic://127.0.0.1:1234", Some("rk-1"));
-    let initial_update = InferenceServerRegistration {
-        inference_server_id: "inst-1".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:1234".to_string(),
-        models: HashMap::from([(
-            "model-a".to_string(),
-            model_registration(InferenceServerStatus::Active as i32),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-    state
-        .apply_registration_update(
-            &running,
-            &initial_update,
-            true,
-            Some(Duration::from_millis(10)),
-        )
+    let scenario = RegistrationScenario::new(Some("rk-1"));
+    let running = scenario.start("inst-1", 1234);
+    scenario
+        .publish_default_stats(&running, "model-a", Active, Some(10))
         .await;
 
-    let update = InferenceServerRegistration {
-        inference_server_id: "inst-1".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:1234".to_string(),
-        models: HashMap::from([(
-            "model-b".to_string(),
-            model_registration(InferenceServerStatus::Active as i32),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(10)))
+    scenario
+        .publish_default_stats(&running, "model-b", Active, Some(10))
         .await;
 
+    assert!(scenario.candidates("model-a").await.is_empty());
+    assert_eq!(scenario.candidates("model-b").await.len(), 1);
     assert!(
-        state
-            .candidates_for_target(&make_target(Some("rk-1"), "model-a"))
-            .await
-            .is_empty()
-    );
-    assert_eq!(
-        state
-            .candidates_for_target(&make_target(Some("rk-1"), "model-b"))
-            .await
-            .len(),
-        1
-    );
-    assert!(
-        state
+        scenario
+            .state
             .routing
-            .target_state(&make_target(Some("rk-1"), "model-a"))
+            .target_state(&scenario.target("model-a"))
             .await
             .is_none()
     );
@@ -693,173 +693,133 @@ async fn apply_registration_update_removes_models_no_longer_advertised() {
 
 #[tokio::test]
 async fn registered_inactive_model_is_known_without_routable_candidates() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
-        "inst-known-inactive",
-        "quic://127.0.0.1:1234",
-        Some("rk-known"),
-    );
-    let target = make_target(Some("rk-known"), "model-known");
-    let update = registration_update(
-        &running,
-        "model-known",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(10)))
+    let scenario = RegistrationScenario::new(Some("rk-known"));
+    let running = scenario.start("inst-known-inactive", 1234);
+    let target = scenario.target("model-known");
+    scenario
+        .publish_default_stats(&running, "model-known", Inactive, Some(10))
         .await;
 
-    assert!(state.has_registered_model_for_target(&target));
-    assert!(state.candidates_for_target(&target).await.is_empty());
-    assert!(!state.has_registered_model_for_target(&make_target(Some("wrong-rk"), "model-known")));
+    assert!(scenario.state.has_registered_model_for_target(&target));
+    assert!(scenario.candidates("model-known").await.is_empty());
+    assert!(
+        !scenario
+            .state
+            .has_registered_model_for_target(&make_target(Some("wrong-rk"), "model-known"))
+    );
 
-    state.end_registration(running).await;
-    assert!(!state.has_registered_model_for_target(&target));
+    scenario.state.end_registration(running).await;
+    assert!(!scenario.state.has_registered_model_for_target(&target));
 }
 
 #[tokio::test]
 async fn registered_target_membership_survives_until_final_advertiser_leaves() {
-    let state = StargateState::default();
-    let running_a = running_registration(
-        &state,
-        "inst-shared-target-a",
-        "quic://127.0.0.1:1234",
-        Some("rk-shared-target"),
-    );
-    let running_b = running_registration(
-        &state,
-        "inst-shared-target-b",
-        "quic://127.0.0.1:1235",
-        Some("rk-shared-target"),
-    );
-    let target = make_target(Some("rk-shared-target"), "model-shared-target");
+    let scenario = RegistrationScenario::new(Some("rk-shared-target"));
+    let running_a = scenario.start("inst-shared-target-a", 1234);
+    let running_b = scenario.start("inst-shared-target-b", 1235);
+    let target = scenario.target("model-shared-target");
 
     for running in [&running_a, &running_b] {
-        let update = registration_update(
-            running,
-            "model-shared-target",
-            InferenceServerStatus::Inactive as i32,
-            ModelStats::default(),
-        );
-        state
-            .apply_registration_update(running, &update, true, Some(Duration::from_millis(10)))
+        scenario
+            .publish_default_stats(running, "model-shared-target", Inactive, Some(10))
             .await;
     }
 
-    assert!(state.has_registered_model_for_target(&target));
+    assert!(scenario.state.has_registered_model_for_target(&target));
     assert!(
-        !state
+        !scenario
+            .state
             .has_registered_model_for_target(&make_target(Some("rk-other"), "model-shared-target"))
     );
 
-    state.end_registration(running_a).await;
-    assert!(state.has_registered_model_for_target(&target));
+    scenario.state.end_registration(running_a).await;
+    assert!(scenario.state.has_registered_model_for_target(&target));
 
-    let empty_update = empty_registration_update(&running_b);
-    state
-        .apply_registration_update(
-            &running_b,
-            &empty_update,
-            true,
-            Some(Duration::from_millis(10)),
-        )
+    let empty_update = scenario.empty_update(&running_b);
+    scenario
+        .publish_update(&running_b, &empty_update, Some(10))
         .await;
-    assert!(!state.has_registered_model_for_target(&target));
+    assert!(!scenario.state.has_registered_model_for_target(&target));
 
-    state.end_registration(running_b).await;
+    scenario.state.end_registration(running_b).await;
 }
 
 #[tokio::test]
 async fn registration_model_update_publishes_advertised_generation_and_retains_cleanup_union() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
-        "inst-generation",
-        "quic://127.0.0.1:1234",
-        Some("rk-generation"),
-    );
+    let scenario = RegistrationScenario::new(Some("rk-generation"));
+    let running = scenario.start("inst-generation", 1234);
 
-    let first = BTreeSet::from(["model-a".to_string(), "model-b".to_string()]);
+    let first = model_set(["model-a", "model-b"]);
     assert!(
-        state
+        scenario
+            .state
             .registrations
             .begin_advertised_model_update(&running, first.clone())
             .is_empty()
     );
-    assert!(state.has_registered_model_for_target(&make_target(Some("rk-generation"), "model-a")));
-    assert!(state.has_registered_model_for_target(&make_target(Some("rk-generation"), "model-b")));
-    assert_eq!(state.registrations.cleanup_model_ids(&running), first);
-    state.registrations.finish_advertised_model_update(&running);
-
-    let second = BTreeSet::from(["model-b".to_string(), "model-c".to_string()]);
+    scenario.assert_registered_models(&["model-a", "model-b"], &[]);
     assert_eq!(
-        state
+        scenario.state.registrations.cleanup_model_ids(&running),
+        first
+    );
+    scenario
+        .state
+        .registrations
+        .finish_advertised_model_update(&running);
+
+    let second = model_set(["model-b", "model-c"]);
+    assert_eq!(
+        scenario
+            .state
             .registrations
             .begin_advertised_model_update(&running, second.clone()),
-        BTreeSet::from(["model-a".to_string()])
+        model_set(["model-a"])
     );
-    assert!(!state.has_registered_model_for_target(&make_target(Some("rk-generation"), "model-a")));
-    assert!(state.has_registered_model_for_target(&make_target(Some("rk-generation"), "model-b")));
-    assert!(state.has_registered_model_for_target(&make_target(Some("rk-generation"), "model-c")));
+    scenario.assert_registered_models(&["model-b", "model-c"], &["model-a"]);
     assert_eq!(
-        state.registrations.cleanup_model_ids(&running),
-        BTreeSet::from([
-            "model-a".to_string(),
-            "model-b".to_string(),
-            "model-c".to_string(),
-        ])
+        scenario.state.registrations.cleanup_model_ids(&running),
+        model_set(["model-a", "model-b", "model-c"])
     );
-    state.registrations.finish_advertised_model_update(&running);
-    assert_eq!(state.registrations.cleanup_model_ids(&running), second);
+    scenario
+        .state
+        .registrations
+        .finish_advertised_model_update(&running);
+    assert_eq!(
+        scenario.state.registrations.cleanup_model_ids(&running),
+        second
+    );
 }
 
 #[tokio::test]
 #[should_panic(expected = "registration model update started while another update is applying")]
 async fn registration_model_update_rejects_overlapping_apply() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
-        "inst-overlap",
-        "quic://127.0.0.1:1234",
-        Some("rk-overlap"),
-    );
+    let scenario = RegistrationScenario::new(Some("rk-overlap"));
+    let running = scenario.start("inst-overlap", 1234);
 
-    state
+    scenario
+        .state
         .registrations
         .begin_advertised_model_update(&running, BTreeSet::new());
-    state
+    scenario
+        .state
         .registrations
         .begin_advertised_model_update(&running, BTreeSet::new());
 }
 
 #[tokio::test]
 async fn registration_cleanup_during_applying_update_removes_previous_and_advertised_routes() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
-        "inst-cleanup-union",
-        "quic://127.0.0.1:1234",
-        Some("rk-cleanup-union"),
-    );
-    let initial = registration_update(
-        &running,
-        "model-a",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    state
-        .apply_registration_update(&running, &initial, true, Some(Duration::from_millis(5)))
-        .await;
+    let scenario = RegistrationScenario::new(Some("rk-cleanup-union"));
+    let running = scenario.start("inst-cleanup-union", 1234);
+    scenario.activate(&running, "model-a").await;
 
-    let model_a = make_target(Some("rk-cleanup-union"), "model-a");
-    let model_b = make_target(Some("rk-cleanup-union"), "model-b");
-    state
+    let model_a = scenario.target("model-a");
+    let model_b = scenario.target("model-b");
+    scenario
+        .state
         .registrations
-        .begin_advertised_model_update(&running, BTreeSet::from(["model-b".to_string()]));
-    state
+        .begin_advertised_model_update(&running, model_set(["model-b"]));
+    scenario
+        .state
         .routing
         .upsert_inference_server_target(
             &model_b,
@@ -868,1599 +828,224 @@ async fn registration_cleanup_during_applying_update_removes_previous_and_advert
                 ModelStats::default(),
                 Duration::from_millis(5),
                 Instant::now(),
-                InferenceServerStatus::Active,
+                Active,
             ),
         )
         .await;
 
-    state.end_registration(running).await;
+    scenario.state.end_registration(running).await;
 
-    assert!(state.candidates_for_target(&model_a).await.is_empty());
-    assert!(state.candidates_for_target(&model_b).await.is_empty());
+    assert!(
+        scenario
+            .state
+            .candidates_for_target(&model_a)
+            .await
+            .is_empty()
+    );
+    assert!(
+        scenario
+            .state
+            .candidates_for_target(&model_b)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn active_registration_keeps_connection_rtt_in_snapshot() {
-    let state = StargateState::default();
-    let running = running_registration(&state, "inst-rtt", "quic://127.0.0.1:7777", Some("rk-rtt"));
-    let update = InferenceServerRegistration {
-        inference_server_id: "inst-rtt".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:7777".to_string(),
-        models: HashMap::from([(
-            "model-rtt".to_string(),
-            model_registration(InferenceServerStatus::Active as i32),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-
+    let scenario = RegistrationScenario::new(Some("rk-rtt"));
+    let running = scenario.start("inst-rtt", 7777);
     let expected_rtt = Duration::from_millis(42);
-    state
-        .apply_registration_update(&running, &update, true, Some(expected_rtt))
+    scenario
+        .publish_default_stats(&running, "model-rtt", Active, Some(42))
         .await;
 
-    let candidates = state
-        .candidates_for_target(&make_target(Some("rk-rtt"), "model-rtt"))
-        .await;
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].rtt, expected_rtt);
-    assert!(Arc::ptr_eq(
-        &candidates[0].registration,
-        &running.generation()
-    ));
-}
-
-#[tokio::test]
-async fn coordinated_calibration_decision_keeps_directive_and_routing_gate_consistent() {
-    let state = StargateState::default();
-    let running = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-atomic-decision",
-        "cluster-atomic-decision",
-        "quic://127.0.0.1:1111",
-        Some("rk-atomic-decision"),
-    );
-
-    let assigned = running
-        .cluster_generation()
-        .calibrations
-        .registration_decision(running.identity(), "model-atomic-decision")
-        .await;
-    let (assigned_directive, assigned_routing_gated) = assigned.into_parts();
-    let assigned_directive =
-        assigned_directive.expect("coordinated registration should receive a directive");
-    assert_eq!(assigned_directive.state, CalibrationState::Run as i32);
-    assert!(assigned_routing_gated);
-
-    submit_assigned_calibration(
-        &state,
-        Some("rk-atomic-decision"),
-        "inst-atomic-decision",
-        "cluster-atomic-decision",
-        "model-atomic-decision",
-        &assigned_directive.assignment_token,
-        125.0,
-    )
-    .await;
-
-    let completed = running
-        .cluster_generation()
-        .calibrations
-        .registration_decision(running.identity(), "model-atomic-decision")
-        .await;
-    let (completed_directive, completed_routing_gated) = completed.into_parts();
-    let completed_directive =
-        completed_directive.expect("completed calibration should still return a directive");
-    assert_eq!(completed_directive.state, CalibrationState::Complete as i32);
-    assert!(!completed_routing_gated);
-}
-
-#[tokio::test]
-async fn coordinated_calibration_submission_preserves_transition_results() {
-    let state = StargateState::default();
-    let running = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-submission-results",
-        "cluster-submission-results",
-        "quic://127.0.0.1:1111",
-        Some("rk-submission-results"),
-    );
-    let request = |inference_server_id: &str, assignment_token: &str, measured: f64| {
-        SubmitClusterCalibrationRequest {
-            inference_server_id: inference_server_id.to_string(),
-            cluster_id: "cluster-submission-results".to_string(),
-            model_id: "model-submission-results".to_string(),
-            assignment_token: assignment_token.to_string(),
-            measured_last_mean_input_tps: measured,
-        }
-    };
-
-    let missing = state
-        .submit_cluster_calibration(
-            Some("rk-submission-results".to_string()),
-            &request("inst-submission-results", "missing-token", 125.0),
-        )
-        .await
-        .expect_err("submission without an assignment should fail");
-    assert_eq!(
-        missing.message(),
-        "cluster calibration has no active local assignment"
-    );
-
-    let assigned = running
-        .cluster_generation()
-        .calibrations
-        .registration_decision(running.identity(), "model-submission-results")
-        .await;
-    let (directive, routing_gated) = assigned.into_parts();
-    let assignment_token = directive
-        .expect("coordinated registration should receive an assignment")
-        .assignment_token;
-    assert!(routing_gated);
-
-    let wrong_owner = state
-        .submit_cluster_calibration(
-            Some("rk-submission-results".to_string()),
-            &request("inst-other", &assignment_token, 125.0),
-        )
-        .await
-        .expect_err("a sibling should not own the assignment");
-    assert_eq!(
-        wrong_owner.message(),
-        "cluster calibration submission does not own the local assignment"
-    );
-
-    let completed = request("inst-submission-results", &assignment_token, 125.0);
-    state
-        .submit_cluster_calibration(Some("rk-submission-results".to_string()), &completed)
-        .await
-        .expect("the assignment owner should complete calibration");
-    state
-        .submit_cluster_calibration(Some("rk-submission-results".to_string()), &completed)
-        .await
-        .expect("an exact repeated submission should be idempotent");
-
-    let conflicting = state
-        .submit_cluster_calibration(
-            Some("rk-submission-results".to_string()),
-            &request("inst-submission-results", &assignment_token, 126.0),
-        )
-        .await
-        .expect_err("a conflicting repeated submission should fail");
-    assert_eq!(
-        conflicting.message(),
-        "cluster calibration was already completed by another submission"
-    );
-}
-
-#[tokio::test]
-async fn coordinated_calibration_assigns_one_owner_and_gates_siblings_until_complete() {
-    let state = StargateState::default();
-    let running_a = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-a",
-        "cluster-cal",
-        "quic://127.0.0.1:1111",
-        Some("rk-cal"),
-    );
-    let running_b = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-b",
-        "cluster-cal",
-        "quic://127.0.0.1:2222",
-        Some("rk-cal"),
-    );
-    let target = make_target(Some("rk-cal"), "model-cal");
-
-    let update_a = registration_update(
-        &running_a,
-        "model-cal",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].model_id, "model-cal");
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-    assert!(!directives[0].assignment_token.is_empty());
-    let assignment_token = directives[0].assignment_token.clone();
-
-    let update_b_active_without_calibration = registration_update(
-        &running_b,
-        "model-cal",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &running_b,
-            &update_b_active_without_calibration,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Waiting as i32);
-    assert!(state.candidates_for_target(&target).await.is_empty());
-
-    submit_assigned_calibration(
-        &state,
-        Some("rk-cal"),
-        "inst-a",
-        "cluster-cal",
-        "model-cal",
-        &assignment_token,
-        150.0,
-    )
-    .await;
-    let update_a_complete = registration_update(
-        &running_a,
-        "model-cal",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &running_a,
-            &update_a_complete,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-
-    let update_b_complete = registration_update(
-        &running_b,
-        "model-cal",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 120.0,
-            ..ModelStats::default()
-        },
-    );
-    let directives = state
-        .apply_registration_update(
-            &running_b,
-            &update_b_complete,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(clusters[0].active_backend_count, 2);
-    assert_eq!(clusters[0].stats.last_mean_input_tps, 150.0);
-}
-
-#[tokio::test]
-async fn coordinated_calibration_is_not_summed_with_runtime_reports() {
-    let state = StargateState::default();
-    let running_seed = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-seed",
-        "cluster-capacity-source",
-        "quic://127.0.0.1:1111",
-        Some("rk-capacity-source"),
-    );
-    let running_runtime = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-runtime",
-        "cluster-capacity-source",
-        "quic://127.0.0.1:2222",
-        Some("rk-capacity-source"),
-    );
-    let target = make_target(Some("rk-capacity-source"), "model-capacity-source");
-
-    let seed_update = registration_update(
-        &running_seed,
-        "model-capacity-source",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let assignment = state
-        .apply_registration_update(
-            &running_seed,
-            &seed_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    submit_assigned_calibration(
-        &state,
-        Some("rk-capacity-source"),
-        "inst-seed",
-        "cluster-capacity-source",
-        "model-capacity-source",
-        &assignment[0].assignment_token,
-        150.0,
-    )
-    .await;
-    state
-        .apply_registration_update(
-            &running_seed,
-            &seed_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-
-    let runtime_update = registration_update(
-        &running_runtime,
-        "model-capacity-source",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 120.0,
-            ..ModelStats::default()
-        },
-    );
-    state
-        .apply_registration_update(
-            &running_runtime,
-            &runtime_update,
-            true,
-            Some(Duration::from_millis(6)),
-        )
-        .await;
-
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(
-        clusters[0].stats.last_mean_input_tps, 150.0,
-        "cluster calibration must remain independent from backend-local runtime capacity"
-    );
-}
-
-#[tokio::test]
-async fn coordinated_calibration_remains_cluster_capacity_floor_after_backends_report_runtime() {
-    let state = StargateState::default();
-    let running_owner = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-owner",
-        "cluster-capacity-floor",
-        "quic://127.0.0.1:1111",
-        Some("rk-capacity-floor"),
-    );
-    let running_peer = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-peer",
-        "cluster-capacity-floor",
-        "quic://127.0.0.1:2222",
-        Some("rk-capacity-floor"),
-    );
-    let target = make_target(Some("rk-capacity-floor"), "model-capacity-floor");
-
-    let calibration_update = registration_update(
-        &running_owner,
-        "model-capacity-floor",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let assignment = state
-        .apply_registration_update(
-            &running_owner,
-            &calibration_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    submit_assigned_calibration(
-        &state,
-        Some("rk-capacity-floor"),
-        "inst-owner",
-        "cluster-capacity-floor",
-        "model-capacity-floor",
-        &assignment[0].assignment_token,
-        150.0,
-    )
-    .await;
-    state
-        .apply_registration_update(
-            &running_owner,
-            &calibration_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-
-    let owner_runtime_update = registration_update(
-        &running_owner,
-        "model-capacity-floor",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 50.0,
-            ..ModelStats::default()
-        },
-    );
-    state
-        .apply_registration_update(
-            &running_owner,
-            &owner_runtime_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-
-    let peer_runtime_update = registration_update(
-        &running_peer,
-        "model-capacity-floor",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 40.0,
-            ..ModelStats::default()
-        },
-    );
-    state
-        .apply_registration_update(
-            &running_peer,
-            &peer_runtime_update,
-            true,
-            Some(Duration::from_millis(6)),
-        )
-        .await;
-
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(
-        clusters[0].stats.last_mean_input_tps, 150.0,
-        "a completed cluster calibration remains the floor after only smaller runtime observations are available"
-    );
-}
-
-#[tokio::test]
-async fn coordinated_calibration_reassigns_when_owner_disconnects_before_completion() {
-    let state = StargateState::default();
-    let running_a = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-owner",
-        "cluster-reassign",
-        "quic://127.0.0.1:1111",
-        Some("rk-reassign"),
-    );
-    let running_b = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-next",
-        "cluster-reassign",
-        "quic://127.0.0.1:2222",
-        Some("rk-reassign"),
-    );
-
-    let update_a = registration_update(
-        &running_a,
-        "model-reassign",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-
-    state.end_registration(running_a).await;
-
-    let update_b = registration_update(
-        &running_b,
-        "model-reassign",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-}
-
-#[tokio::test]
-async fn coordinated_calibration_accepts_only_owner_submission() {
-    let state = StargateState::default();
-    let running = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-precalibrated",
-        "cluster-precalibrated",
-        "quic://127.0.0.1:1111",
-        Some("rk-precalibrated"),
-    );
-    let target = make_target(Some("rk-precalibrated"), "model-precalibrated");
-
-    let update = registration_update(
-        &running,
-        "model-precalibrated",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let assignment = state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(assignment[0].state, CalibrationState::Run as i32);
-    submit_assigned_calibration(
-        &state,
-        Some("rk-precalibrated"),
-        "inst-precalibrated",
-        "cluster-precalibrated",
-        "model-precalibrated",
-        &assignment[0].assignment_token,
-        123.0,
-    )
-    .await;
-    assert!(
-        state
-            .cluster_candidates_for_target(&target)
-            .await
-            .is_empty(),
-        "capacity submission alone must not assert backend activity or connectivity"
-    );
-    let directives = state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
-
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(clusters[0].stats.last_mean_input_tps, 123.0);
-}
-
-#[tokio::test]
-async fn normal_registration_cannot_complete_another_pylons_assignment() {
-    let state = StargateState::default();
-    let running_sibling = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-sibling",
-        "cluster-fanout",
-        "quic://127.0.0.1:2222",
-        Some("rk-fanout"),
-    );
-    let running_owner = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-owner",
-        "cluster-fanout",
-        "quic://127.0.0.1:1111",
-        Some("rk-fanout"),
-    );
-    let target = make_target(Some("rk-fanout"), "model-fanout");
-
-    let sibling_update = registration_update(
-        &running_sibling,
-        "model-fanout",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &running_sibling,
-            &sibling_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-    let assignment_token = directives[0].assignment_token.clone();
-    assert!(
-        state
-            .cluster_candidates_for_target(&target)
-            .await
-            .is_empty(),
-        "a RUN assignment must not trigger routing before the result RPC"
-    );
-
-    let unassigned_update = registration_update(
-        &running_owner,
-        "model-fanout",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &running_owner,
-            &unassigned_update,
-            true,
-            Some(Duration::from_millis(6)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Waiting as i32);
-    assert!(
-        state
-            .cluster_candidates_for_target(&target)
-            .await
-            .is_empty(),
-        "normal registration stats from a non-owner must not complete cluster calibration"
-    );
-
-    submit_assigned_calibration(
-        &state,
-        Some("rk-fanout"),
-        "inst-sibling",
-        "cluster-fanout",
-        "model-fanout",
-        &assignment_token,
-        150.0,
-    )
-    .await;
-    let directives = state
-        .apply_registration_update(
-            &running_owner,
-            &unassigned_update,
-            true,
-            Some(Duration::from_millis(6)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(clusters[0].stats.last_mean_input_tps, 150.0);
-}
-
-#[tokio::test]
-async fn runtime_last_mean_input_tps_without_complete_state_does_not_complete_calibration() {
-    let state = StargateState::default();
-    let running = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-runtime-only",
-        "cluster-runtime-only",
-        "quic://127.0.0.1:1111",
-        Some("rk-runtime-only"),
-    );
-    let target = make_target(Some("rk-runtime-only"), "model-runtime-only");
-
-    let update_initial = registration_update(
-        &running,
-        "model-runtime-only",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &running,
-            &update_initial,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-
-    let update_runtime_only = registration_update(
-        &running,
-        "model-runtime-only",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 999.0,
-            ..ModelStats::default()
-        },
-    );
-    let directives = state
-        .apply_registration_update(
-            &running,
-            &update_runtime_only,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-    assert!(
-        state
-            .cluster_candidates_for_target(&target)
-            .await
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn coordinated_calibration_reassigns_when_owner_removes_model_before_completion() {
-    let state = StargateState::default();
-    let running_a = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-owner",
-        "cluster-remove-model",
-        "quic://127.0.0.1:1111",
-        Some("rk-remove-model"),
-    );
-    let running_b = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-next",
-        "cluster-remove-model",
-        "quic://127.0.0.1:2222",
-        Some("rk-remove-model"),
-    );
-
-    let update_a = registration_update(
-        &running_a,
-        "model-remove",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-
-    let update_b = registration_update(
-        &running_b,
-        "model-remove",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Waiting as i32);
-
-    let remove_model_update = empty_registration_update(&running_a);
-    let directives = state
-        .apply_registration_update(
-            &running_a,
-            &remove_model_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert!(directives.is_empty());
-
-    let directives = state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-}
-
-#[tokio::test]
-async fn coordinated_calibration_does_not_complete_from_waiting_backend_stats() {
-    let state = StargateState::default();
-    let running_a = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-owner",
-        "cluster-waiting-stats",
-        "quic://127.0.0.1:1111",
-        Some("rk-waiting-stats"),
-    );
-    let running_b = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-waiting",
-        "cluster-waiting-stats",
-        "quic://127.0.0.1:2222",
-        Some("rk-waiting-stats"),
-    );
-
-    let update_a = registration_update(
-        &running_a,
-        "model-waiting-stats",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-
-    let update_b_active_with_capacity = registration_update(
-        &running_b,
-        "model-waiting-stats",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 999.0,
-            ..ModelStats::default()
-        },
-    );
-    let directives = state
-        .apply_registration_update(
-            &running_b,
-            &update_b_active_with_capacity,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Waiting as i32);
-
-    let remove_model_update = empty_registration_update(&running_a);
-    state
-        .apply_registration_update(
-            &running_a,
-            &remove_model_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-
-    let directives = state
-        .apply_registration_update(
-            &running_b,
-            &update_b_active_with_capacity,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-}
-
-#[tokio::test]
-async fn completed_calibration_survives_model_removal_while_cluster_is_registered() {
-    let state = StargateState::default();
-    let running = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-owner",
-        "cluster-readd-model",
-        "quic://127.0.0.1:1111",
-        Some("rk-readd-model"),
-    );
-
-    let update_initial = registration_update(
-        &running,
-        "model-readd",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &running,
-            &update_initial,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-
-    let update_complete = registration_update(
-        &running,
-        "model-readd",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    submit_assigned_calibration(
-        &state,
-        Some("rk-readd-model"),
-        "inst-owner",
-        "cluster-readd-model",
-        "model-readd",
-        &directives[0].assignment_token,
-        321.0,
-    )
-    .await;
-    let directives = state
-        .apply_registration_update(
-            &running,
-            &update_complete,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-
-    let remove_model_update = empty_registration_update(&running);
-    let directives = state
-        .apply_registration_update(
-            &running,
-            &remove_model_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert!(directives.is_empty());
-
-    let directives = state
-        .apply_registration_update(
-            &running,
-            &update_initial,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-}
-
-#[tokio::test]
-async fn coordinated_calibration_keeps_completed_model_while_peer_still_registered() {
-    let state = StargateState::default();
-    let running_a = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-owner",
-        "cluster-keep-model",
-        "quic://127.0.0.1:1111",
-        Some("rk-keep-model"),
-    );
-    let running_b = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-peer",
-        "cluster-keep-model",
-        "quic://127.0.0.1:2222",
-        Some("rk-keep-model"),
-    );
-
-    let update_a_initial = registration_update(
-        &running_a,
-        "model-keep",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &running_a,
-            &update_a_initial,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-
-    let update_a_complete = registration_update(
-        &running_a,
-        "model-keep",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    submit_assigned_calibration(
-        &state,
-        Some("rk-keep-model"),
-        "inst-owner",
-        "cluster-keep-model",
-        "model-keep",
-        &directives[0].assignment_token,
-        654.0,
-    )
-    .await;
-    let directives = state
-        .apply_registration_update(
-            &running_a,
-            &update_a_complete,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-
-    let update_b = registration_update(
-        &running_b,
-        "model-keep",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-
-    let remove_model_update = empty_registration_update(&running_a);
-    state
-        .apply_registration_update(
-            &running_a,
-            &remove_model_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-
-    let directives = state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Complete as i32);
-}
-
-#[tokio::test]
-async fn final_cluster_disconnect_drops_local_snapshot_and_completed_calibration() {
-    let state = StargateState::default();
-    let owner = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-old",
-        "cluster-return",
-        "quic://127.0.0.1:1111",
-        Some("rk-return"),
-    );
-    let target = make_target(Some("rk-return"), "model-return");
-    let active_update = registration_update(
-        &owner,
-        "model-return",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let assignment = state
-        .apply_registration_update(&owner, &active_update, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(assignment[0].state, CalibrationState::Run as i32);
-    let first_token = assignment[0].assignment_token.clone();
-    submit_assigned_calibration(
-        &state,
-        Some("rk-return"),
-        "inst-old",
-        "cluster-return",
-        "model-return",
-        &first_token,
-        321.0,
-    )
-    .await;
-    state
-        .apply_registration_update(&owner, &active_update, true, Some(Duration::from_millis(5)))
-        .await;
-    assert_eq!(
-        state.cluster_candidates_for_target(&target).await[0]
-            .stats
-            .last_mean_input_tps,
-        321.0
-    );
-
-    state.end_registration(owner).await;
-    assert!(
-        state
-            .cluster_candidates_for_target(&target)
-            .await
-            .is_empty()
-    );
-
-    let replacement = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-new",
-        "cluster-return",
-        "quic://127.0.0.1:2222",
-        Some("rk-return"),
-    );
-    let replacement_update = registration_update(
-        &replacement,
-        "model-return",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &replacement,
-            &replacement_update,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-    assert_ne!(directives[0].assignment_token, first_token);
-    assert!(
-        state
-            .cluster_candidates_for_target(&target)
-            .await
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn completed_calibration_floor_remains_until_final_local_registration_drops() {
-    let state = StargateState::default();
-    let running_coordinated = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-coordinated",
-        "cluster-clear-capacity",
-        "quic://127.0.0.1:1111",
-        Some("rk-clear-capacity"),
-    );
-    let running_local = running_registration_in_cluster(
-        &state,
-        "inst-local",
-        "cluster-clear-capacity",
-        "quic://127.0.0.1:2222",
-        Some("rk-clear-capacity"),
-    );
-    let target = make_target(Some("rk-clear-capacity"), "model-clear-capacity");
-
-    let update_initial = registration_update(
-        &running_coordinated,
-        "model-clear-capacity",
-        InferenceServerStatus::Inactive as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &running_coordinated,
-            &update_initial,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-    let first_token = directives[0].assignment_token.clone();
-
-    let update_complete = registration_update(
-        &running_coordinated,
-        "model-clear-capacity",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    submit_assigned_calibration(
-        &state,
-        Some("rk-clear-capacity"),
-        "inst-coordinated",
-        "cluster-clear-capacity",
-        "model-clear-capacity",
-        &first_token,
-        777.0,
-    )
-    .await;
-    state
-        .apply_registration_update(
-            &running_coordinated,
-            &update_complete,
-            true,
-            Some(Duration::from_millis(5)),
-        )
-        .await;
-
-    let update_local = registration_update(
-        &running_local,
-        "model-clear-capacity",
-        InferenceServerStatus::Active as i32,
-        ModelStats {
-            last_mean_input_tps: 100.0,
-            ..ModelStats::default()
-        },
-    );
-    state
-        .apply_registration_update(
-            &running_local,
-            &update_local,
-            true,
-            Some(Duration::from_millis(6)),
-        )
-        .await;
-
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(clusters[0].stats.last_mean_input_tps, 777.0);
-
-    let remove_model_update = empty_registration_update(&running_coordinated);
-    state
-        .apply_registration_update(
-            &running_coordinated,
-            &remove_model_update,
-            true,
-            Some(Duration::from_millis(7)),
-        )
-        .await;
-
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(clusters[0].active_backend_count, 1);
-    assert_eq!(clusters[0].stats.last_mean_input_tps, 777.0);
-
-    state.end_registration(running_coordinated).await;
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(clusters[0].stats.last_mean_input_tps, 777.0);
-
-    state.end_registration(running_local).await;
-    assert!(
-        state
-            .cluster_candidates_for_target(&target)
-            .await
-            .is_empty()
-    );
-
-    let replacement = running_coordinated_registration_in_cluster(
-        &state,
-        "inst-replacement",
-        "cluster-clear-capacity",
-        "quic://127.0.0.1:3333",
-        Some("rk-clear-capacity"),
-    );
-    let replacement_update = registration_update(
-        &replacement,
-        "model-clear-capacity",
-        InferenceServerStatus::Active as i32,
-        ModelStats::default(),
-    );
-    let directives = state
-        .apply_registration_update(
-            &replacement,
-            &replacement_update,
-            true,
-            Some(Duration::from_millis(8)),
-        )
-        .await;
-    assert_eq!(directives.len(), 1);
-    assert_eq!(directives[0].state, CalibrationState::Run as i32);
-    assert_ne!(directives[0].assignment_token, first_token);
+    let candidate = scenario.only_candidate("model-rtt").await;
+    assert_eq!(candidate.rtt, expected_rtt);
+    assert!(Arc::ptr_eq(&candidate.registration, &running.generation()));
 }
 
 #[tokio::test]
 async fn reservation_updates_local_snapshot_until_next_registration_update() {
-    let state = StargateState::default();
-    let running = running_registration(&state, "inst-res", "quic://127.0.0.1:8888", Some("rk-res"));
-    let target = make_target(Some("rk-res"), "model-res");
-    let update = InferenceServerRegistration {
-        inference_server_id: "inst-res".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:8888".to_string(),
-        models: HashMap::from([(
-            "model-res".to_string(),
-            InferenceServerModelRegistration {
-                stats: Some(ModelStats {
-                    last_mean_input_tps: 100.0,
-                    max_engine_concurrency: 8,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(4, 5)]),
-                    ..ModelStats::default()
-                }),
-                status: InferenceServerStatus::Active.into(),
-            },
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
+    let scenario = RegistrationScenario::new(Some("rk-res"));
+    let running = scenario.start("inst-res", 8888);
+    let mut stats = priority_stats(100.0, [(4, 5)]);
+    stats.max_engine_concurrency = 8;
+    let update = scenario.update(&running, "model-res", Active, stats);
 
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
-    let selected_cluster = selected_cluster_for_target(&state, &target).await;
+    scenario.publish_connected(&running, &update).await;
+    let selected_cluster = scenario.selected_cluster("model-res").await;
     {
         let _successful_attempt_reservation = selected_cluster
             .reserve_backend(&running.generation(), 37, 4)
             .expect("active backend should accept reservation");
     }
 
-    let candidates = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(candidates[0].stats.num_running_queries, 1);
-    assert_eq!(candidates[0].stats.queue_size, 1);
-    assert_eq!(candidates[0].stats.total_query_input_size, 37);
-    assert_eq!(candidates[0].stats.queued_input_size, 37);
-    assert_eq!(
-        candidates[0]
-            .stats
-            .queue_time_estimate_ms_by_priority
-            .get(&4),
-        Some(&375)
-    );
+    let candidates = scenario.clusters("model-res").await;
+    assert_queue_stats(&candidates[0].stats, 1, 1, 37, 37, 4, 375);
 
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
+    scenario.publish_connected(&running, &update).await;
 
-    let candidates = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(candidates[0].stats.num_running_queries, 0);
-    assert_eq!(candidates[0].stats.queue_size, 0);
-    assert_eq!(candidates[0].stats.total_query_input_size, 0);
-    assert_eq!(candidates[0].stats.queued_input_size, 0);
-    assert_eq!(
-        candidates[0]
-            .stats
-            .queue_time_estimate_ms_by_priority
-            .get(&4),
-        Some(&5)
-    );
+    let candidates = scenario.clusters("model-res").await;
+    assert_queue_stats(&candidates[0].stats, 0, 0, 0, 0, 4, 5);
 
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters[0].stats.num_running_queries, 0);
-    assert_eq!(clusters[0].stats.queue_size, 0);
-    assert_eq!(clusters[0].stats.total_query_input_size, 0);
-    assert_eq!(clusters[0].stats.queued_input_size, 0);
-    assert_eq!(
-        clusters[0].stats.queue_time_estimate_ms_by_priority.get(&4),
-        Some(&5)
-    );
+    let clusters = scenario.clusters("model-res").await;
+    assert_queue_stats(&clusters[0].stats, 0, 0, 0, 0, 4, 5);
 }
 
 #[tokio::test]
 async fn released_reservation_restores_local_snapshot_before_registration_update() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
-        "inst-release",
-        "quic://127.0.0.1:8888",
-        Some("rk-release"),
+    let scenario = RegistrationScenario::new(Some("rk-release"));
+    let running = scenario.start("inst-release", 8888);
+    let update = scenario.update(
+        &running,
+        "model-release",
+        Active,
+        priority_stats(100.0, [(4, 5)]),
     );
-    let target = make_target(Some("rk-release"), "model-release");
-    let update = InferenceServerRegistration {
-        inference_server_id: "inst-release".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:8888".to_string(),
-        models: HashMap::from([(
-            "model-release".to_string(),
-            InferenceServerModelRegistration {
-                stats: Some(ModelStats {
-                    last_mean_input_tps: 100.0,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(4, 5)]),
-                    ..ModelStats::default()
-                }),
-                status: InferenceServerStatus::Active.into(),
-            },
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
 
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
-    let selected_cluster = selected_cluster_for_target(&state, &target).await;
+    scenario.publish_connected(&running, &update).await;
+    let selected_cluster = scenario.selected_cluster("model-release").await;
     let reservation = selected_cluster
         .reserve_backend(&running.generation(), 37, 4)
         .expect("active backend should accept reservation");
 
     reservation.release();
 
-    let candidates = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(candidates[0].stats.num_running_queries, 0);
-    assert_eq!(candidates[0].stats.total_query_input_size, 0);
-    assert_eq!(
-        candidates[0]
-            .stats
-            .queue_time_estimate_ms_by_priority
-            .get(&4),
-        Some(&5)
-    );
+    let candidates = scenario.clusters("model-release").await;
+    assert_queue_stats(&candidates[0].stats, 0, 0, 0, 0, 4, 5);
 
     let consumed_by_heartbeat = selected_cluster
         .reserve_backend(&running.generation(), 10, 4)
         .expect("active backend should accept reservation");
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
+    scenario.publish_connected(&running, &update).await;
     let still_pending = selected_cluster
         .reserve_backend(&running.generation(), 20, 4)
         .expect("active backend should accept reservation");
 
     consumed_by_heartbeat.release();
-    let candidates = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(candidates[0].stats.num_running_queries, 1);
-    assert_eq!(candidates[0].stats.total_query_input_size, 20);
-    assert_eq!(
-        candidates[0]
-            .stats
-            .queue_time_estimate_ms_by_priority
-            .get(&4),
-        Some(&205)
-    );
+    let candidates = scenario.clusters("model-release").await;
+    assert_queue_stats(&candidates[0].stats, 1, 1, 20, 20, 4, 205);
 
     still_pending.release();
-    let candidates = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(candidates[0].stats.num_running_queries, 0);
-    assert_eq!(candidates[0].stats.total_query_input_size, 0);
-    assert_eq!(
-        candidates[0]
-            .stats
-            .queue_time_estimate_ms_by_priority
-            .get(&4),
-        Some(&5)
-    );
+    let candidates = scenario.clusters("model-release").await;
+    assert_queue_stats(&candidates[0].stats, 0, 0, 0, 0, 4, 5);
 }
 
 #[tokio::test]
 async fn shared_cluster_reservation_updates_cluster_snapshot_even_when_other_backend_is_latest() {
-    let state = StargateState::default();
-    let running_a = running_registration_in_cluster(
-        &state,
-        "inst-a",
-        "cluster-reserved",
-        "quic://127.0.0.1:1111",
-        Some("rk-reserved"),
+    let scenario = RegistrationScenario::new(Some("rk-reserved"));
+    let running_a = scenario.start_in("inst-a", "cluster-reserved", 1111);
+    let running_b = scenario.start_in("inst-b", "cluster-reserved", 2222);
+
+    let update_a = scenario.update(
+        &running_a,
+        "model-reserved",
+        Active,
+        ModelStats {
+            output_tps: 0.0,
+            last_mean_input_tps: 100.0,
+            max_output_tps: 50.0,
+            queue_size: 0,
+            queued_input_size: 0,
+            kv_cache_capacity_tokens: 1000,
+            kv_cache_used_tokens: 100,
+            kv_cache_free_tokens: 900,
+            num_running_queries: 3,
+            max_engine_concurrency: 8,
+            total_query_input_size: 30,
+            queue_time_estimate_ms_by_priority: HashMap::from([(4, 10)]),
+            ..ModelStats::default()
+        },
     );
-    let running_b = running_registration_in_cluster(
-        &state,
-        "inst-b",
-        "cluster-reserved",
-        "quic://127.0.0.1:2222",
-        Some("rk-reserved"),
+    let update_b = scenario.update(
+        &running_b,
+        "model-reserved",
+        Active,
+        ModelStats {
+            output_tps: 0.0,
+            last_mean_input_tps: 100.0,
+            max_output_tps: 60.0,
+            queue_size: 0,
+            queued_input_size: 0,
+            kv_cache_capacity_tokens: 2000,
+            kv_cache_used_tokens: 500,
+            kv_cache_free_tokens: 1500,
+            num_running_queries: 7,
+            max_engine_concurrency: 9,
+            total_query_input_size: 70,
+            queue_time_estimate_ms_by_priority: HashMap::from([(4, 5)]),
+            ..ModelStats::default()
+        },
     );
-    let target = make_target(Some("rk-reserved"), "model-reserved");
 
-    let update_a = InferenceServerRegistration {
-        inference_server_id: "inst-a".to_string(),
-        cluster_id: "cluster-reserved".to_string(),
-        inference_server_url: "quic://127.0.0.1:1111".to_string(),
-        models: HashMap::from([(
-            "model-reserved".to_string(),
-            model_registration_with_stats(
-                InferenceServerStatus::Active as i32,
-                ModelStats {
-                    output_tps: 0.0,
-                    last_mean_input_tps: 100.0,
-                    max_output_tps: 50.0,
-                    queue_size: 0,
-                    queued_input_size: 0,
-                    kv_cache_capacity_tokens: 1000,
-                    kv_cache_used_tokens: 100,
-                    kv_cache_free_tokens: 900,
-                    num_running_queries: 3,
-                    max_engine_concurrency: 8,
-                    total_query_input_size: 30,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(4, 10)]),
-                    ..ModelStats::default()
-                },
-            ),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-    let update_b = InferenceServerRegistration {
-        inference_server_id: "inst-b".to_string(),
-        cluster_id: "cluster-reserved".to_string(),
-        inference_server_url: "quic://127.0.0.1:2222".to_string(),
-        models: HashMap::from([(
-            "model-reserved".to_string(),
-            model_registration_with_stats(
-                InferenceServerStatus::Active as i32,
-                ModelStats {
-                    output_tps: 0.0,
-                    last_mean_input_tps: 100.0,
-                    max_output_tps: 60.0,
-                    queue_size: 0,
-                    queued_input_size: 0,
-                    kv_cache_capacity_tokens: 2000,
-                    kv_cache_used_tokens: 500,
-                    kv_cache_free_tokens: 1500,
-                    num_running_queries: 7,
-                    max_engine_concurrency: 9,
-                    total_query_input_size: 70,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(4, 5)]),
-                    ..ModelStats::default()
-                },
-            ),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
+    scenario.publish_connected(&running_a, &update_a).await;
+    scenario.publish_connected(&running_b, &update_b).await;
 
-    state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(5)))
-        .await;
-    state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-
-    let selected_cluster = selected_cluster_for_target(&state, &target).await;
+    let selected_cluster = scenario.selected_cluster("model-reserved").await;
     let _reservation = selected_cluster.reserve_backend(&running_a.generation(), 37, 4);
 
-    state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
+    scenario.publish_connected(&running_b, &update_b).await;
 
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    let cluster = &clusters[0];
-    assert_eq!(cluster.stats.queue_size, 1);
-    assert_eq!(cluster.stats.queued_input_size, 37);
-    assert_eq!(cluster.stats.num_running_queries, 8);
-    assert_eq!(cluster.stats.total_query_input_size, 107);
+    let cluster = scenario.only_cluster("model-reserved").await;
     // Reservation delta uses summed backend input capacity:
     // existing 5ms + ceil(37 tokens / 200 input TPS * 1000) = 190ms.
-    assert_eq!(
-        cluster.stats.queue_time_estimate_ms_by_priority.get(&4),
-        Some(&190)
-    );
+    assert_queue_stats(&cluster.stats, 8, 1, 107, 37, 4, 190);
 }
 
 #[tokio::test]
 async fn reservation_inserts_request_priority_and_preserves_more_urgent_bucket() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
+    assert_reserved_priority_map(
+        "rk-priority-res",
         "inst-priority-res",
-        "quic://127.0.0.1:8888",
-        Some("rk-priority-res"),
-    );
-    let target = make_target(Some("rk-priority-res"), "model-priority-res");
-    let update = InferenceServerRegistration {
-        inference_server_id: "inst-priority-res".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:8888".to_string(),
-        models: HashMap::from([(
-            "model-priority-res".to_string(),
-            InferenceServerModelRegistration {
-                stats: Some(ModelStats {
-                    last_mean_input_tps: 100.0,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(2, 5)]),
-                    ..ModelStats::default()
-                }),
-                status: InferenceServerStatus::Active.into(),
-            },
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
-    let selected_cluster = selected_cluster_for_target(&state, &target).await;
-    let _reservation = selected_cluster.reserve_backend(&running.generation(), 10, 3);
-
-    let candidates = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(
-        candidates[0]
-            .stats
-            .queue_time_estimate_ms_by_priority
-            .get(&2),
-        Some(&5)
-    );
-    assert_eq!(
-        candidates[0]
-            .stats
-            .queue_time_estimate_ms_by_priority
-            .get(&3),
-        Some(&105)
-    );
+        "model-priority-res",
+        [(2, 5)],
+        3,
+        [(2, 5), (3, 105)],
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn reservation_updates_lower_urgency_cumulative_priority_buckets() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
+    assert_reserved_priority_map(
+        "rk-priority-cumulative",
         "inst-priority-cumulative",
-        "quic://127.0.0.1:8888",
-        Some("rk-priority-cumulative"),
-    );
-    let target = make_target(Some("rk-priority-cumulative"), "model-priority-cumulative");
-    let update = InferenceServerRegistration {
-        inference_server_id: "inst-priority-cumulative".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:8888".to_string(),
-        models: HashMap::from([(
-            "model-priority-cumulative".to_string(),
-            InferenceServerModelRegistration {
-                stats: Some(ModelStats {
-                    last_mean_input_tps: 100.0,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(1, 10), (4, 40)]),
-                    ..ModelStats::default()
-                }),
-                status: InferenceServerStatus::Active.into(),
-            },
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
-    let selected_cluster = selected_cluster_for_target(&state, &target).await;
-    let _reservation = selected_cluster.reserve_backend(&running.generation(), 10, 2);
-
-    let candidates = state.cluster_candidates_for_target(&target).await;
-    let priority_estimates = &candidates[0].stats.queue_time_estimate_ms_by_priority;
-    assert_eq!(priority_estimates.get(&1), Some(&10));
-    assert_eq!(priority_estimates.get(&2), Some(&110));
-    assert_eq!(priority_estimates.get(&4), Some(&140));
+        "model-priority-cumulative",
+        [(1, 10), (4, 40)],
+        2,
+        [(1, 10), (2, 110), (4, 140)],
+    )
+    .await;
 }
 
 #[test]
 fn reservation_updates_existing_request_priority_and_lower_urgency_buckets() {
-    let mut stats = ModelStats {
-        last_mean_input_tps: 100.0,
-        queue_time_estimate_ms_by_priority: HashMap::from([(1, 10), (2, 100), (4, 400)]),
-        ..ModelStats::default()
-    };
+    let mut stats = priority_stats(100.0, [(1, 10), (2, 100), (4, 400)]);
 
     update_reserved_priority_queue_time(&mut stats, 10, 2);
 
-    let priority_estimates = &stats.queue_time_estimate_ms_by_priority;
-    assert_eq!(priority_estimates.get(&1), Some(&10));
-    assert_eq!(priority_estimates.get(&2), Some(&200));
-    assert_eq!(priority_estimates.get(&4), Some(&500));
+    assert_eq!(
+        stats.queue_time_estimate_ms_by_priority,
+        HashMap::from([(1, 10), (2, 200), (4, 500)])
+    );
 }
 
 #[test]
 fn reservation_saturates_priority_queue_estimates() {
-    let mut stats = ModelStats {
-        last_mean_input_tps: 1.0,
-        queue_time_estimate_ms_by_priority: HashMap::from([(0, u64::MAX - 1), (2, u64::MAX - 2)]),
-        ..ModelStats::default()
-    };
+    let mut stats = priority_stats(1.0, [(0, u64::MAX - 1), (2, u64::MAX - 2)]);
 
     update_reserved_priority_queue_time(&mut stats, 10, 0);
 
-    let priority_estimates = &stats.queue_time_estimate_ms_by_priority;
-    assert_eq!(priority_estimates.get(&0), Some(&u64::MAX));
-    assert_eq!(priority_estimates.get(&2), Some(&u64::MAX));
+    assert_eq!(
+        stats.queue_time_estimate_ms_by_priority,
+        HashMap::from([(0, u64::MAX), (2, u64::MAX)])
+    );
 }
 
 #[tokio::test]
 async fn reservation_clears_priority_map_when_delta_cannot_be_computed() {
-    let mut stats = ModelStats {
-        last_mean_input_tps: 0.0,
-        queue_time_estimate_ms_by_priority: HashMap::from([(1, 10), (4, 40)]),
-        ..ModelStats::default()
-    };
+    let mut stats = priority_stats(0.0, [(1, 10), (4, 40)]);
 
     update_reserved_priority_queue_time(&mut stats, 10, 2);
 
@@ -2469,47 +1054,21 @@ async fn reservation_clears_priority_map_when_delta_cannot_be_computed() {
 
 #[test]
 fn queue_time_estimate_helper_uses_sparse_priority_and_aggregate_fallback() {
-    let priority_stats = ModelStats {
-        last_mean_input_tps: 100.0,
-        queued_input_size: 25,
-        queue_time_estimate_ms_by_priority: HashMap::from([(1, 10), (4, 40)]),
-        ..ModelStats::default()
-    };
-    assert_eq!(
-        crate::queue_estimate::queue_time_estimate_ms_for_priority(&priority_stats, 3),
-        Some(10)
-    );
-
-    let aggregate_stats = ModelStats {
-        last_mean_input_tps: 100.0,
-        queued_input_size: 25,
-        ..ModelStats::default()
-    };
-    assert_eq!(
-        crate::queue_estimate::queue_time_estimate_ms_for_priority(&aggregate_stats, 3),
-        Some(250)
-    );
-
-    let invalid_capacity_stats = ModelStats {
-        last_mean_input_tps: 0.0,
-        queued_input_size: 25,
-        ..ModelStats::default()
-    };
-    assert_eq!(
-        crate::queue_estimate::queue_time_estimate_ms_for_priority(&invalid_capacity_stats, 3),
-        None
-    );
+    for (stats, expected) in [
+        (queued_stats(100.0, [(1, 10), (4, 40)]), Some(10)),
+        (queued_stats(100.0, []), Some(250)),
+        (queued_stats(0.0, []), None),
+    ] {
+        assert_eq!(
+            crate::queue_estimate::queue_time_estimate_ms_for_priority(&stats, 3),
+            expected
+        );
+    }
 }
 
 #[test]
 fn queue_time_estimate_helper_treats_lower_priority_only_work_as_known_zero() {
-    let stats = ModelStats {
-        last_mean_input_tps: 100.0,
-        queued_input_size: 25,
-        queue_time_estimate_ms_by_priority: HashMap::from([(4, 250)]),
-        ..ModelStats::default()
-    };
-
+    let stats = queued_stats(100.0, [(4, 250)]);
     assert_eq!(
         crate::queue_estimate::queue_time_estimate_ms_for_priority(&stats, 0),
         Some(0)
@@ -2518,160 +1077,53 @@ fn queue_time_estimate_helper_treats_lower_priority_only_work_as_known_zero() {
 
 #[tokio::test]
 async fn reservation_inserts_high_priority_estimate_when_only_lower_priority_work_exists() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
+    assert_reserved_priority_map(
+        "rk-priority-clear",
         "inst-priority-clear",
-        "quic://127.0.0.1:8888",
-        Some("rk-priority-clear"),
-    );
-    let target = make_target(Some("rk-priority-clear"), "model-priority-clear");
-    let update = InferenceServerRegistration {
-        inference_server_id: "inst-priority-clear".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:8888".to_string(),
-        models: HashMap::from([(
-            "model-priority-clear".to_string(),
-            InferenceServerModelRegistration {
-                stats: Some(ModelStats {
-                    last_mean_input_tps: 100.0,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(4, 5)]),
-                    ..ModelStats::default()
-                }),
-                status: InferenceServerStatus::Active as i32,
-            },
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(5)))
-        .await;
-    let selected_cluster = selected_cluster_for_target(&state, &target).await;
-    let _reservation = selected_cluster.reserve_backend(&running.generation(), 10, 0);
-
-    let candidates = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(
-        candidates[0].stats.queue_time_estimate_ms_by_priority,
-        HashMap::from([(0, 100), (4, 105)])
-    );
+        "model-priority-clear",
+        [(4, 5)],
+        0,
+        [(0, 100), (4, 105)],
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn inactive_registration_is_not_routable() {
-    let state = StargateState::default();
-    let running = running_registration(
-        &state,
-        "inst-inactive",
-        "quic://127.0.0.1:9999",
-        Some("rk-in"),
-    );
-    let update = InferenceServerRegistration {
-        inference_server_id: "inst-inactive".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:9999".to_string(),
-        models: HashMap::from([(
-            "model-r".to_string(),
-            model_registration(InferenceServerStatus::Inactive as i32),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-
-    state
-        .apply_registration_update(&running, &update, true, Some(Duration::from_millis(7)))
+    let scenario = RegistrationScenario::new(Some("rk-in"));
+    let running = scenario.start("inst-inactive", 9999);
+    scenario
+        .publish_default_stats(&running, "model-r", Inactive, Some(7))
         .await;
-    assert!(
-        state
-            .candidates_for_target(&make_target(Some("rk-in"), "model-r"))
-            .await
-            .is_empty()
-    );
+    assert!(scenario.candidates("model-r").await.is_empty());
 }
 
 #[tokio::test]
 async fn list_active_models_reports_only_routable_models() {
-    let state = StargateState::default();
-    let active = running_registration(
-        &state,
-        "inst-active",
-        "quic://127.0.0.1:1111",
-        Some("rk-list"),
-    );
-    let active_without_rtt = running_registration(
-        &state,
-        "inst-no-rtt",
-        "quic://127.0.0.1:2222",
-        Some("rk-list"),
-    );
-    let inactive = running_registration(
-        &state,
-        "inst-inactive-list",
-        "quic://127.0.0.1:3333",
-        Some("rk-list"),
-    );
+    let scenario = RegistrationScenario::new(Some("rk-list"));
+    let active = scenario.start("inst-active", 1111);
+    let active_without_rtt = scenario.start("inst-no-rtt", 2222);
+    let inactive = scenario.start("inst-inactive-list", 3333);
 
-    state
-        .apply_registration_update(
-            &active,
-            &InferenceServerRegistration {
-                inference_server_id: "inst-active".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: "quic://127.0.0.1:1111".to_string(),
-                models: HashMap::from([(
-                    "model-listed".to_string(),
-                    model_registration(InferenceServerStatus::Active as i32),
-                )]),
-                reverse_tunnel: false,
-                coordinated_calibration: false,
-            },
-            true,
-            Some(Duration::from_millis(7)),
-        )
+    scenario
+        .publish_default_stats(&active, "model-listed", Active, Some(7))
         .await;
-    state
-        .apply_registration_update(
-            &active_without_rtt,
-            &InferenceServerRegistration {
-                inference_server_id: "inst-no-rtt".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: "quic://127.0.0.1:2222".to_string(),
-                models: HashMap::from([(
-                    "model-not-ready".to_string(),
-                    model_registration(InferenceServerStatus::Active as i32),
-                )]),
-                reverse_tunnel: false,
-                coordinated_calibration: false,
-            },
-            true,
-            None,
-        )
+    scenario
+        .publish_default_stats(&active_without_rtt, "model-not-ready", Active, None)
         .await;
-    state
-        .apply_registration_update(
-            &inactive,
-            &InferenceServerRegistration {
-                inference_server_id: "inst-inactive-list".to_string(),
-                cluster_id: String::new(),
-                inference_server_url: "quic://127.0.0.1:3333".to_string(),
-                models: HashMap::from([(
-                    "model-inactive".to_string(),
-                    model_registration(InferenceServerStatus::Inactive as i32),
-                )]),
-                reverse_tunnel: false,
-                coordinated_calibration: false,
-            },
-            true,
-            Some(Duration::from_millis(7)),
-        )
+    scenario
+        .publish_default_stats(&inactive, "model-inactive", Inactive, Some(7))
         .await;
 
-    let models = state.list_active_models(Some("rk-list"), &[]).await;
+    let models = scenario
+        .state
+        .list_active_models(Some("rk-list"), &[])
+        .await;
     assert_eq!(models.len(), 1);
     assert_eq!(models[0], "model-listed");
 
-    let filtered = state
+    let filtered = scenario
+        .state
         .list_active_models(Some("rk-list"), &["model-not-ready".to_string()])
         .await;
     assert!(filtered.is_empty(), "got: {filtered:?}");
@@ -2701,12 +1153,12 @@ async fn list_active_models_ignores_empty_target_generations() {
 #[test]
 #[should_panic(expected = "routed snapshot inference-server ID must match exact registration")]
 fn routed_cluster_rejects_snapshot_identity_mismatch() {
-    let mut backend = routed_backend(
+    let mut backend = backend!(
         "cluster-snapshot-identity",
         "backend-snapshot-identity",
         1.0,
         10.0,
-        Duration::from_millis(10),
+        10
     );
     let cluster_state = RoutedClusterState::new(backend.registration.cluster_generation.clone());
     backend.inference_server_id = "different-exported-id".to_string();
@@ -2716,20 +1168,10 @@ fn routed_cluster_rejects_snapshot_identity_mismatch() {
 
 #[test]
 fn cluster_generation_publishes_matching_sorted_backend_and_aggregate_views() {
-    let backend_b = routed_backend(
-        "cluster-generation",
-        "backend-b",
-        2.0,
-        20.0,
-        Duration::from_millis(20),
-    );
-    let backend_a = routed_backend_in_cluster_generation(
-        backend_b.registration.cluster_generation.clone(),
-        "cluster-generation",
-        "backend-a",
-        1.0,
-        10.0,
-        Duration::from_millis(10),
+    let backend_b = backend!("cluster-generation", "backend-b", 2.0, 20.0, 20);
+    let backend_a = backend!(
+        backend_b.registration.cluster_generation.clone() =>
+        "cluster-generation", "backend-a", 1.0, 10.0, 10
     );
     let cluster_state = RoutedClusterState::new(backend_b.registration.cluster_generation.clone());
 
@@ -2745,17 +1187,17 @@ fn cluster_generation_publishes_matching_sorted_backend_and_aggregate_views() {
         vec!["backend-a", "backend-b"]
     );
     let snapshot = cluster_state
-        .routing_snapshot(None)
+        .routing_snapshot()
         .expect("published backends should have one matching aggregate");
     assert_eq!(snapshot.active_backend_count, backends.len());
     assert_eq!(snapshot.stats.output_tps, 3.0);
     assert_eq!(snapshot.stats.last_mean_input_tps, 30.0);
-    assert_eq!(snapshot.rtt, Duration::from_millis(10));
+    assert_eq!(snapshot.rtt, Duration::from_millis(15));
 
     cluster_state.remove_backend(&backend_a.registration);
     let backends = cluster_state.backend_snapshot_values();
     let snapshot = cluster_state
-        .routing_snapshot(None)
+        .routing_snapshot()
         .expect("remaining backend should keep the cluster routable");
     assert_eq!(backends.len(), 1);
     assert_eq!(backends[0].inference_server_id, "backend-b");
@@ -2764,43 +1206,240 @@ fn cluster_generation_publishes_matching_sorted_backend_and_aggregate_views() {
     assert_eq!(snapshot.rtt, Duration::from_millis(20));
 
     cluster_state.remove_backend(&backend_b.registration);
-    assert!(cluster_state.routing_snapshot(None).is_none());
+    assert!(cluster_state.routing_snapshot().is_none());
     assert!(cluster_state.select_backend(&HashSet::new()).is_none());
+}
+
+#[test]
+fn cluster_snapshot_rtt_tracks_backend_heartbeat_and_removal() {
+    let backend_a = backend!("cluster-rtt-lifecycle", "backend-a", 1.0, 10.0, 8);
+    let cluster_state = RoutedClusterState::new(backend_a.registration.cluster_generation.clone());
+    let backend_a_registration = backend_a.registration.clone();
+    assert_eq!(
+        cluster_state.upsert_backend(Arc::new(backend_a)),
+        ClusterBackendUpsert::Inserted
+    );
+    assert_eq!(
+        cluster_state
+            .routing_snapshot()
+            .expect("one active backend should publish a cluster snapshot")
+            .rtt,
+        Duration::from_millis(8)
+    );
+
+    let backend_b = backend!(
+        backend_a_registration.cluster_generation.clone() =>
+        "cluster-rtt-lifecycle", "backend-b", 2.0, 20.0, 5
+    );
+    let backend_b_registration = backend_b.registration.clone();
+    assert_eq!(
+        cluster_state.upsert_backend(Arc::new(backend_b)),
+        ClusterBackendUpsert::Inserted
+    );
+    assert_eq!(
+        cluster_state
+            .routing_snapshot()
+            .expect("two active backends should publish a cluster snapshot")
+            .rtt,
+        Duration::from_micros(6_500)
+    );
+
+    let backend_b_heartbeat = RoutedInferenceServerSnapshot::new(
+        backend_b_registration.clone(),
+        ModelStats::default(),
+        Duration::from_millis(20),
+        Instant::now(),
+        Active,
+    );
+    assert_eq!(
+        cluster_state.upsert_backend(Arc::new(backend_b_heartbeat)),
+        ClusterBackendUpsert::Replaced
+    );
+    let snapshot = cluster_state
+        .routing_snapshot()
+        .expect("a heartbeat replacement should refresh the cluster snapshot");
+    assert_eq!(snapshot.active_backend_count, 2);
+    assert_eq!(snapshot.rtt, Duration::from_millis(14));
+
+    cluster_state.remove_backend(&backend_b_registration);
+    let snapshot = cluster_state
+        .routing_snapshot()
+        .expect("the remaining active backend should keep the cluster routable");
+    assert_eq!(snapshot.active_backend_count, 1);
+    assert_eq!(snapshot.rtt, Duration::from_millis(8));
+}
+
+#[test]
+fn cluster_snapshot_rtt_preserves_single_backend_zero() {
+    let backend = routed_backend(
+        None,
+        "cluster-rtt-zero",
+        "backend-zero",
+        1.0,
+        10.0,
+        Duration::ZERO,
+    );
+    let cluster_state = RoutedClusterState::new(backend.registration.cluster_generation.clone());
+
+    cluster_state.upsert_backend(Arc::new(backend));
+
+    let snapshot = cluster_state
+        .routing_snapshot()
+        .expect("a zero-RTT backend should remain a valid singleton cluster");
+    assert_eq!(snapshot.active_backend_count, 1);
+    assert_eq!(snapshot.rtt, Duration::ZERO);
+}
+
+#[test]
+fn cluster_snapshot_rtt_truncates_fractional_nanoseconds() {
+    let backend_a = routed_backend(
+        None,
+        "cluster-rtt-fractional",
+        "backend-a",
+        1.0,
+        10.0,
+        Duration::from_nanos(1),
+    );
+    let backend_b = routed_backend(
+        Some(backend_a.registration.cluster_generation.clone()),
+        "cluster-rtt-fractional",
+        "backend-b",
+        1.0,
+        10.0,
+        Duration::from_nanos(4),
+    );
+    let cluster_state = RoutedClusterState::new(backend_a.registration.cluster_generation.clone());
+
+    cluster_state.upsert_backend(Arc::new(backend_a));
+    cluster_state.upsert_backend(Arc::new(backend_b));
+
+    assert_eq!(
+        cluster_state
+            .routing_snapshot()
+            .expect("two active backends should publish a truncated mean")
+            .rtt,
+        Duration::from_nanos(2)
+    );
+}
+
+#[test]
+fn cluster_snapshot_rtt_averages_three_active_backends() {
+    let backend_a = backend!("cluster-rtt-three", "backend-a", 1.0, 10.0, 2);
+    let cluster_generation = backend_a.registration.cluster_generation.clone();
+    let backend_b = backend!(
+        cluster_generation.clone() =>
+        "cluster-rtt-three", "backend-b", 1.0, 10.0, 5
+    );
+    let backend_c = backend!(
+        cluster_generation.clone() =>
+        "cluster-rtt-three", "backend-c", 1.0, 10.0, 11
+    );
+    let cluster_state = RoutedClusterState::new(cluster_generation);
+
+    cluster_state.upsert_backend(Arc::new(backend_c));
+    cluster_state.upsert_backend(Arc::new(backend_a));
+    cluster_state.upsert_backend(Arc::new(backend_b));
+
+    let snapshot = cluster_state
+        .routing_snapshot()
+        .expect("three active backends should publish one cluster mean");
+    assert_eq!(snapshot.active_backend_count, 3);
+    assert_eq!(snapshot.rtt, Duration::from_millis(6));
+}
+
+#[test]
+fn cluster_snapshot_rtt_mean_avoids_overflow_and_truncates_fractional_nanoseconds() {
+    let backend_a = routed_backend(
+        None,
+        "cluster-rtt-overflow",
+        "backend-a",
+        1.0,
+        10.0,
+        Duration::MAX,
+    );
+    let backend_b = routed_backend(
+        Some(backend_a.registration.cluster_generation.clone()),
+        "cluster-rtt-overflow",
+        "backend-b",
+        1.0,
+        10.0,
+        Duration::MAX - Duration::from_nanos(3),
+    );
+    let cluster_state = RoutedClusterState::new(backend_a.registration.cluster_generation.clone());
+
+    cluster_state.upsert_backend(Arc::new(backend_a));
+    cluster_state.upsert_backend(Arc::new(backend_b));
+
+    assert_eq!(
+        cluster_state
+            .routing_snapshot()
+            .expect("maximum-duration backends should still aggregate")
+            .rtt,
+        Duration::MAX - Duration::from_nanos(2)
+    );
+}
+
+#[test]
+fn cluster_snapshot_rtt_mean_handles_three_near_max_durations() {
+    let backend_a = routed_backend(
+        None,
+        "cluster-rtt-near-max",
+        "backend-a",
+        1.0,
+        10.0,
+        Duration::MAX,
+    );
+    let cluster_generation = backend_a.registration.cluster_generation.clone();
+    let backend_b = routed_backend(
+        Some(cluster_generation.clone()),
+        "cluster-rtt-near-max",
+        "backend-b",
+        1.0,
+        10.0,
+        Duration::MAX - Duration::from_nanos(1),
+    );
+    let backend_c = routed_backend(
+        Some(cluster_generation.clone()),
+        "cluster-rtt-near-max",
+        "backend-c",
+        1.0,
+        10.0,
+        Duration::MAX - Duration::from_nanos(2),
+    );
+    let cluster_state = RoutedClusterState::new(cluster_generation);
+
+    cluster_state.upsert_backend(Arc::new(backend_a));
+    cluster_state.upsert_backend(Arc::new(backend_b));
+    cluster_state.upsert_backend(Arc::new(backend_c));
+
+    assert_eq!(
+        cluster_state
+            .routing_snapshot()
+            .expect("near-maximum RTTs should aggregate without overflow")
+            .rtt,
+        Duration::MAX - Duration::from_nanos(1)
+    );
 }
 
 #[test]
 fn cluster_generation_derives_cluster_source_from_stored_backends() {
     let observed_at = Instant::now();
-    let mut backend_a = routed_backend(
-        "cluster-derived-source",
-        "backend-a",
-        1.0,
-        100.0,
-        Duration::from_millis(10),
-    );
+    let mut backend_a = backend!("cluster-derived-source", "backend-a", 1.0, 100.0, 10);
     backend_a.stats.max_output_tps = 10.0;
     backend_a.snapshot_updated_at = observed_at;
     let cluster_state = Arc::new(RoutedClusterState::new(
         backend_a.registration.cluster_generation.clone(),
     ));
     let backend_a_registration = backend_a.registration.clone();
-    let mut backend_c = routed_backend_in_cluster_generation(
-        backend_a.registration.cluster_generation.clone(),
-        "cluster-derived-source",
-        "backend-c",
-        3.0,
-        100.0,
-        Duration::from_millis(30),
+    let mut backend_c = backend!(
+        backend_a.registration.cluster_generation.clone() =>
+        "cluster-derived-source", "backend-c", 3.0, 100.0, 30
     );
     backend_c.stats.max_output_tps = 30.0;
     backend_c.snapshot_updated_at = observed_at + Duration::from_millis(1);
-    let mut backend_b = routed_backend_in_cluster_generation(
-        backend_a.registration.cluster_generation.clone(),
-        "cluster-derived-source",
-        "backend-b",
-        2.0,
-        100.0,
-        Duration::from_millis(20),
+    let mut backend_b = backend!(
+        backend_a.registration.cluster_generation.clone() =>
+        "cluster-derived-source", "backend-b", 2.0, 100.0, 20
     );
     backend_b.stats.max_output_tps = 20.0;
     backend_b.snapshot_updated_at = observed_at + Duration::from_millis(2);
@@ -2814,7 +1453,7 @@ fn cluster_generation_derives_cluster_source_from_stored_backends() {
         .expect("stored backend should accept reservation");
 
     let snapshot = cluster_state
-        .routing_snapshot(None)
+        .routing_snapshot()
         .expect("latest backend should publish the cluster-scoped source");
     assert_eq!(snapshot.stats.max_output_tps, 20.0);
     assert_eq!(snapshot.stats.queue_size, 1);
@@ -2822,14 +1461,14 @@ fn cluster_generation_derives_cluster_source_from_stored_backends() {
     backend_b.stats.max_output_tps = 25.0;
     cluster_state.upsert_backend(Arc::new(backend_b));
     let snapshot = cluster_state
-        .routing_snapshot(None)
+        .routing_snapshot()
         .expect("source heartbeat should retain another backend's reservation");
     assert_eq!(snapshot.stats.max_output_tps, 25.0);
     assert_eq!(snapshot.stats.queue_size, 1);
 
     cluster_state.remove_backend(&backend_b_registration);
     let snapshot = cluster_state
-        .routing_snapshot(None)
+        .routing_snapshot()
         .expect("source removal should derive a surviving source");
     assert_eq!(snapshot.active_backend_count, 2);
     assert_eq!(snapshot.stats.max_output_tps, 30.0);
@@ -2838,12 +1477,12 @@ fn cluster_generation_derives_cluster_source_from_stored_backends() {
 
 #[test]
 fn replaced_backend_registration_cannot_reserve_same_id_successor() {
-    let old = routed_backend(
+    let old = backend!(
         "cluster-exact-registration",
         "backend-same-id",
         1.0,
         100.0,
-        Duration::from_millis(10),
+        10
     );
     let cluster_generation = old.registration.cluster_generation.clone();
     let stale_registration = old.registration.clone();
@@ -2853,13 +1492,8 @@ fn replaced_backend_registration_cannot_reserve_same_id_successor() {
         ClusterBackendUpsert::Inserted
     );
 
-    let replacement = routed_backend_in_cluster_generation(
-        cluster_generation,
-        "cluster-exact-registration",
-        "backend-same-id",
-        2.0,
-        100.0,
-        Duration::from_millis(5),
+    let replacement = backend!(
+        cluster_generation => "cluster-exact-registration", "backend-same-id", 2.0, 100.0, 5
     );
     let replacement_registration = replacement.registration.clone();
     assert_eq!(
@@ -2883,13 +1517,7 @@ fn replaced_backend_registration_cannot_reserve_same_id_successor() {
 
 #[test]
 fn reservation_release_only_cancels_exact_pending_reservation() {
-    let old_backend = routed_backend(
-        "cluster-exact-release",
-        "backend-same-id",
-        1.0,
-        100.0,
-        Duration::from_millis(10),
-    );
+    let old_backend = backend!("cluster-exact-release", "backend-same-id", 1.0, 100.0, 10);
     let old_registration = old_backend.registration.clone();
     let old_cluster = Arc::new(RoutedClusterState::new(
         old_registration.cluster_generation.clone(),
@@ -2899,13 +1527,7 @@ fn reservation_release_only_cancels_exact_pending_reservation() {
         .reserve_backend(&old_registration, 10, 0)
         .expect("old cluster should accept reservation");
 
-    let replacement_backend = routed_backend(
-        "cluster-exact-release",
-        "backend-same-id",
-        2.0,
-        100.0,
-        Duration::from_millis(5),
-    );
+    let replacement_backend = backend!("cluster-exact-release", "backend-same-id", 2.0, 100.0, 5);
     let replacement_registration = replacement_backend.registration.clone();
     let replacement_cluster = Arc::new(RoutedClusterState::new(
         replacement_registration.cluster_generation.clone(),
@@ -2919,7 +1541,7 @@ fn reservation_release_only_cancels_exact_pending_reservation() {
 
     assert_eq!(
         old_cluster
-            .routing_snapshot(None)
+            .routing_snapshot()
             .expect("old cluster should retain its backend")
             .stats
             .queue_size,
@@ -2927,7 +1549,7 @@ fn reservation_release_only_cancels_exact_pending_reservation() {
     );
     assert_eq!(
         replacement_cluster
-            .routing_snapshot(None)
+            .routing_snapshot()
             .expect("replacement cluster should retain its backend")
             .stats
             .queue_size,
@@ -2938,12 +1560,12 @@ fn reservation_release_only_cancels_exact_pending_reservation() {
 
 #[test]
 fn reservation_release_does_not_wait_for_cluster_generation_lock() {
-    let backend = routed_backend(
+    let backend = backend!(
         "cluster-lock-independent-release",
         "backend-lock-independent-release",
         1.0,
         100.0,
-        Duration::from_millis(10),
+        10
     );
     let registration = backend.registration.clone();
     let cluster = Arc::new(RoutedClusterState::new(
@@ -2985,7 +1607,7 @@ fn reservation_release_does_not_wait_for_cluster_generation_lock() {
     );
     assert_eq!(
         cluster
-            .routing_snapshot(None)
+            .routing_snapshot()
             .expect("cluster should retain its backend")
             .stats
             .queue_size,
@@ -2994,63 +1616,15 @@ fn reservation_release_does_not_wait_for_cluster_generation_lock() {
 }
 
 #[test]
-fn cluster_generation_applies_current_calibration_without_storing_it() {
-    let backend = routed_backend(
-        "cluster-calibration-generation",
-        "backend-a",
-        1.0,
-        10.0,
-        Duration::from_millis(10),
-    );
-    let cluster_state = RoutedClusterState::new(backend.registration.cluster_generation.clone());
-    cluster_state.upsert_backend(Arc::new(backend.clone()));
-
-    assert_eq!(
-        cluster_state
-            .routing_snapshot(Some(100.0))
-            .expect("cluster should be routable")
-            .stats
-            .last_mean_input_tps,
-        100.0
-    );
-    assert_eq!(
-        cluster_state
-            .routing_snapshot(Some(5.0))
-            .expect("cluster should be routable")
-            .stats
-            .last_mean_input_tps,
-        10.0
-    );
-    assert_eq!(
-        cluster_state
-            .routing_snapshot(None)
-            .expect("cluster should be routable")
-            .stats
-            .last_mean_input_tps,
-        10.0
-    );
-}
-
-#[test]
 fn cluster_generation_round_robin_uses_stored_order_and_filtered_sequence() {
-    let backend_b = routed_backend(
-        "cluster-round-robin-generation",
-        "backend-b",
-        1.0,
-        10.0,
-        Duration::from_millis(10),
-    );
+    let backend_b = backend!("cluster-round-robin-generation", "backend-b", 1.0, 10.0, 10);
     let cluster_generation = backend_b.registration.cluster_generation.clone();
     let cluster_state = RoutedClusterState::new(cluster_generation.clone());
     cluster_state.upsert_backend(Arc::new(backend_b));
     for inference_server_id in ["backend-a", "backend-c"] {
-        let backend = routed_backend_in_cluster_generation(
-            cluster_generation.clone(),
-            "cluster-round-robin-generation",
-            inference_server_id,
-            1.0,
-            10.0,
-            Duration::from_millis(10),
+        let backend = backend!(
+            cluster_generation.clone() =>
+            "cluster-round-robin-generation", inference_server_id, 1.0, 10.0, 10
         );
         cluster_state.upsert_backend(Arc::new(backend.clone()));
     }
@@ -3086,12 +1660,12 @@ fn cluster_generation_round_robin_uses_stored_order_and_filtered_sequence() {
 
 #[test]
 fn backend_selection_shares_published_snapshot_until_republication() {
-    let backend = routed_backend(
+    let backend = backend!(
         "cluster-shared-backend-snapshot",
         "backend-shared-snapshot",
         1.0,
         10.0,
-        Duration::from_millis(10),
+        10
     );
     let registration = backend.registration.clone();
     let cluster_state = RoutedClusterState::new(registration.cluster_generation.clone());
@@ -3122,7 +1696,7 @@ fn backend_selection_shares_published_snapshot_until_republication() {
         },
         Duration::from_millis(10),
         Instant::now(),
-        InferenceServerStatus::Active,
+        Active,
     ));
     cluster_state.upsert_backend(republished_publication.clone());
     let republished = cluster_state
@@ -3139,72 +1713,42 @@ fn backend_selection_shares_published_snapshot_until_republication() {
 }
 
 #[test]
-fn cluster_backend_aggregate_dedupes_sources_and_uses_fastest_rtt() {
+fn cluster_backend_aggregate_dedupes_sources_and_averages_rtt() {
     let observed_at = Instant::now();
 
-    let backend_a = RoutedInferenceServerSnapshot {
-        registration: test_registration_generation(RegistrationIdentity {
-            inference_server_id: "backend-a".to_string(),
-            cluster_id: "cluster-aggregate".to_string(),
-            inference_server_url: "quic://127.0.0.1:1111".to_string(),
-            routing_key: None,
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-        }),
-        cluster_id: "cluster-aggregate".to_string(),
-        inference_server_id: "backend-a".to_string(),
-        inference_server_url: "quic://127.0.0.1:1111".to_string(),
-        stats: ModelStats {
-            output_tps: 1.5,
-            last_mean_input_tps: 10.0,
-            queue_size: 2,
-            queued_input_size: 20,
-            input_processing_queries: 1,
-            output_generation_queries: 3,
-            stats_observed_at_unix_ms: 10,
-            stats_capabilities: vec!["cap-a".to_string(), "shared".to_string()],
-            stats_sources: vec!["source-a".to_string(), "shared".to_string()],
-            ..ModelStats::default()
-        },
-        rtt: Duration::from_millis(20),
-        snapshot_updated_at: observed_at,
-        status: InferenceServerStatus::Active,
-        reverse_tunnel: false,
+    let mut backend_a = backend!("cluster-aggregate", "backend-a", 1.5, 10.0, 20);
+    backend_a.stats = ModelStats {
+        output_tps: 1.5,
+        last_mean_input_tps: 10.0,
+        queue_size: 2,
+        queued_input_size: 20,
+        input_processing_queries: 1,
+        output_generation_queries: 3,
+        stats_observed_at_unix_ms: 10,
+        stats_capabilities: vec!["cap-a".to_string(), "shared".to_string()],
+        stats_sources: vec!["source-a".to_string(), "shared".to_string()],
+        ..ModelStats::default()
     };
+    backend_a.snapshot_updated_at = observed_at;
     let cluster_state = RoutedClusterState::new(backend_a.registration.cluster_generation.clone());
     cluster_state.upsert_backend(Arc::new(backend_a.clone()));
-    let backend_b = routed_backend_snapshot_in_cluster_generation(
-        RoutedInferenceServerSnapshot {
-            registration: test_registration_generation(RegistrationIdentity {
-                inference_server_id: "backend-b".to_string(),
-                cluster_id: "cluster-aggregate".to_string(),
-                inference_server_url: "quic://127.0.0.1:2222".to_string(),
-                routing_key: None,
-                reverse_tunnel: false,
-                coordinated_calibration: false,
-            }),
-            cluster_id: "cluster-aggregate".to_string(),
-            inference_server_id: "backend-b".to_string(),
-            inference_server_url: "quic://127.0.0.1:2222".to_string(),
-            stats: ModelStats {
-                output_tps: 2.5,
-                last_mean_input_tps: 30.0,
-                queue_size: 4,
-                queued_input_size: 40,
-                input_processing_queries: 5,
-                output_generation_queries: 7,
-                stats_observed_at_unix_ms: 25,
-                stats_capabilities: vec!["shared".to_string(), "cap-b".to_string()],
-                stats_sources: vec!["shared".to_string(), "source-b".to_string()],
-                ..ModelStats::default()
-            },
-            rtt: Duration::from_millis(5),
-            snapshot_updated_at: observed_at,
-            status: InferenceServerStatus::Active,
-            reverse_tunnel: false,
-        },
-        backend_a.registration.cluster_generation.clone(),
+    let mut backend_b = backend!(
+        backend_a.registration.cluster_generation.clone() =>
+        "cluster-aggregate", "backend-b", 2.5, 30.0, 5
     );
+    backend_b.stats = ModelStats {
+        output_tps: 2.5,
+        last_mean_input_tps: 30.0,
+        queue_size: 4,
+        queued_input_size: 40,
+        input_processing_queries: 5,
+        output_generation_queries: 7,
+        stats_observed_at_unix_ms: 25,
+        stats_capabilities: vec!["shared".to_string(), "cap-b".to_string()],
+        stats_sources: vec!["shared".to_string(), "source-b".to_string()],
+        ..ModelStats::default()
+    };
+    backend_b.snapshot_updated_at = observed_at;
     cluster_state.upsert_backend(Arc::new(backend_b.clone()));
 
     let (stats, rtt, active_backend_count) = cluster_state
@@ -3212,14 +1756,16 @@ fn cluster_backend_aggregate_dedupes_sources_and_uses_fastest_rtt() {
         .expect("two live backends should aggregate");
 
     assert_eq!(active_backend_count, 2);
-    assert_eq!(rtt, Duration::from_millis(5));
-    assert_eq!(stats.output_tps, 4.0);
-    assert_eq!(stats.last_mean_input_tps, 40.0);
-    assert_eq!(stats.queue_size, 6);
-    assert_eq!(stats.queued_input_size, 60);
-    assert_eq!(stats.input_processing_queries, 6);
-    assert_eq!(stats.output_generation_queries, 10);
-    assert_eq!(stats.stats_observed_at_unix_ms, 25);
+    assert_eq!(rtt, Duration::from_micros(12_500));
+    assert_stats!(stats,
+        output_tps: 4.0,
+        last_mean_input_tps: 40.0,
+        queue_size: 6,
+        queued_input_size: 60,
+        input_processing_queries: 6,
+        output_generation_queries: 10,
+        stats_observed_at_unix_ms: 25,
+    );
     let mut capabilities = stats.stats_capabilities.clone();
     capabilities.sort();
     assert_eq!(capabilities, vec!["cap-a", "cap-b", "shared"]);
@@ -3233,81 +1779,53 @@ fn cluster_backend_aggregate_dedupes_sources_and_uses_fastest_rtt() {
 
 #[tokio::test]
 async fn list_active_models_filters_by_routing_key() {
-    let state = StargateState::default();
-    let running_a = running_registration(
-        &state,
-        "inst-list-rk-a",
-        "quic://127.0.0.1:1111",
-        Some("rk-a"),
-    );
-    let running_b = running_registration(
-        &state,
-        "inst-list-rk-b",
-        "quic://127.0.0.1:2222",
-        Some("rk-b"),
-    );
+    let scenario = RegistrationScenario::new(None);
+    let running_a = scenario.start_keyed("inst-list-rk-a", 1111, "rk-a");
+    let running_b = scenario.start_keyed("inst-list-rk-b", 2222, "rk-b");
 
-    let update_a = InferenceServerRegistration {
-        inference_server_id: "inst-list-rk-a".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:1111".to_string(),
-        models: HashMap::from([
-            (
-                "z-list-model".to_string(),
-                model_registration(InferenceServerStatus::Active as i32),
-            ),
-            (
-                "shared-list-model".to_string(),
-                model_registration(InferenceServerStatus::Active as i32),
-            ),
-            (
-                "a-list-model".to_string(),
-                model_registration(InferenceServerStatus::Active as i32),
-            ),
-        ]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-    let update_b = InferenceServerRegistration {
-        inference_server_id: "inst-list-rk-b".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:2222".to_string(),
-        models: HashMap::from([(
-            "shared-list-model".to_string(),
-            model_registration(InferenceServerStatus::Active as i32),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
+    let mut update_a = scenario.update_default_stats(&running_a, "z-list-model", Active);
+    for model in ["shared-list-model", "a-list-model"] {
+        update_a.models.insert(
+            model.to_string(),
+            InferenceServerModelRegistration {
+                stats: Some(ModelStats::default()),
+                status: Active as i32,
+            },
+        );
+    }
+    let update_b = scenario.update_default_stats(&running_b, "shared-list-model", Active);
 
-    state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(5)))
-        .await;
-    state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-    let unscoped = state.list_active_models(None, &[]).await;
+    scenario.publish_connected(&running_a, &update_a).await;
+    scenario.publish_connected(&running_b, &update_b).await;
+    let unscoped = scenario.state.list_active_models(None, &[]).await;
     assert!(
         unscoped.is_empty(),
         "unscoped ListModels must not include keyed registrations: {unscoped:?}"
     );
 
-    let models_a = state.list_active_models(Some("rk-a"), &[]).await;
+    let all_scoped = scenario.state.list_active_models_for_debug().await;
+    assert_eq!(
+        all_scoped,
+        vec!["a-list-model", "shared-list-model", "z-list-model"]
+    );
+
+    let models_a = scenario.state.list_active_models(Some("rk-a"), &[]).await;
     assert_eq!(
         models_a,
         vec!["a-list-model", "shared-list-model", "z-list-model"]
     );
 
-    let models_b = state.list_active_models(Some("rk-b"), &[]).await;
+    let models_b = scenario.state.list_active_models(Some("rk-b"), &[]).await;
     assert_eq!(models_b, vec!["shared-list-model"]);
 
-    let wrong_key = state.list_active_models(Some("rk-c"), &[]).await;
+    let wrong_key = scenario.state.list_active_models(Some("rk-c"), &[]).await;
     assert!(
         wrong_key.is_empty(),
         "ListModels must not leak models across routing keys: {wrong_key:?}"
     );
 
-    let filtered = state
+    let filtered = scenario
+        .state
         .list_active_models(
             Some("rk-a"),
             &[
@@ -3322,10 +1840,9 @@ async fn list_active_models_filters_by_routing_key() {
 
 #[tokio::test]
 async fn list_active_models_reads_authoritative_routing_generations() {
-    let state = StargateState::default();
-    let target = make_target(None, "model-list-authoritative");
-    let running = running_registration_in_cluster(
-        &state,
+    let scenario = RegistrationScenario::new(None);
+    let target = scenario.target("model-list-authoritative");
+    let running = scenario.start_at(
         "backend-list-authoritative",
         "cluster-list-authoritative",
         "quic://127.0.0.1:2222",
@@ -3337,91 +1854,70 @@ async fn list_active_models_reads_authoritative_routing_generations() {
         ModelStats::default(),
         Duration::from_millis(5),
         Instant::now(),
-        InferenceServerStatus::Active,
+        Active,
     );
 
-    state
+    scenario
+        .state
         .routing
         .upsert_inference_server_target(&target, snapshot)
         .await;
 
-    let candidate = state
+    let candidate = scenario
+        .state
         .candidates_for_target(&target)
         .await
         .into_iter()
         .next()
         .expect("directly published snapshot should be routable");
     assert!(Arc::ptr_eq(&candidate.registration, &registration));
-    assert_eq!(candidate.cluster_id, registration.identity.cluster_id);
     assert_eq!(
-        candidate.inference_server_id,
-        registration.identity.inference_server_id
-    );
-    assert_eq!(
-        candidate.inference_server_url,
-        registration.identity.inference_server_url
-    );
-    assert_eq!(
-        candidate.reverse_tunnel,
-        registration.identity.reverse_tunnel
+        (
+            &candidate.cluster_id,
+            &candidate.inference_server_id,
+            &candidate.inference_server_url,
+            candidate.reverse_tunnel,
+        ),
+        (
+            &registration.identity.cluster_id,
+            &registration.identity.inference_server_id,
+            &registration.identity.inference_server_url,
+            registration.identity.reverse_tunnel,
+        )
     );
 
-    let listed = state.list_active_models(None, &[]).await;
+    let listed = scenario.state.list_active_models(None, &[]).await;
     assert_eq!(listed.len(), 1, "got: {listed:?}");
     assert_eq!(listed[0], "model-list-authoritative");
 
-    state
+    scenario
+        .state
         .routing
         .remove_inference_server_from_target(&registration, &target)
         .await;
-    let after_removal = state.list_active_models(None, &[]).await;
+    let after_removal = scenario.state.list_active_models(None, &[]).await;
     assert!(
         after_removal.is_empty(),
         "removed model should disappear from authoritative discovery immediately: {after_removal:?}"
     );
-    state.end_registration(running).await;
+    scenario.state.end_registration(running).await;
 }
 
 #[tokio::test]
 async fn different_routing_keys_isolate_candidates() {
-    let state = StargateState::default();
-    let running_a = running_registration(&state, "inst-a", "quic://127.0.0.1:1111", Some("rk-a"));
-    let running_b = running_registration(&state, "inst-b", "quic://127.0.0.1:2222", Some("rk-b"));
+    let scenario = RegistrationScenario::new(None);
+    let running_a = scenario.start_keyed("inst-a", 1111, "rk-a");
+    let running_b = scenario.start_keyed("inst-b", 2222, "rk-b");
 
-    let update_a = InferenceServerRegistration {
-        inference_server_id: "inst-a".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:1111".to_string(),
-        models: HashMap::from([(
-            "shared-model".to_string(),
-            model_registration(InferenceServerStatus::Active as i32),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-    let update_b = InferenceServerRegistration {
-        inference_server_id: "inst-b".to_string(),
-        cluster_id: String::new(),
-        inference_server_url: "quic://127.0.0.1:2222".to_string(),
-        models: HashMap::from([(
-            "shared-model".to_string(),
-            model_registration(InferenceServerStatus::Active as i32),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
+    scenario.activate(&running_a, "shared-model").await;
+    scenario.activate(&running_b, "shared-model").await;
 
-    state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(5)))
-        .await;
-    state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-
-    let candidates_a = state
+    let candidates_a = scenario
+        .state
         .candidates_for_target(&make_target(Some("rk-a"), "shared-model"))
         .await;
-    let candidates_b = state
+    let candidates_b = scenario
+        .state
         .candidates_for_target(&make_target(Some("rk-b"), "shared-model"))
         .await;
     assert_eq!(candidates_a.len(), 1);
@@ -3433,13 +1929,7 @@ async fn different_routing_keys_isolate_candidates() {
 #[test]
 fn routing_target_membership_follows_selected_snapshot_registration() {
     let target_state = RoutingTargetState::default();
-    let selected_snapshot = routed_backend(
-        "cluster-selected",
-        "backend-selected",
-        1.0,
-        10.0,
-        Duration::from_millis(10),
-    );
+    let selected_snapshot = backend!("cluster-selected", "backend-selected", 1.0, 10.0, 10);
     target_state
         .upsert_backend(Arc::new(selected_snapshot.clone()))
         .expect("active routing target should accept backend");
@@ -3469,20 +1959,8 @@ fn routing_target_membership_follows_selected_snapshot_registration() {
 #[test]
 fn routing_target_generation_tracks_backend_membership_without_heartbeat_double_count() {
     let target_state = RoutingTargetState::default();
-    let backend_a = routed_backend(
-        "cluster-a",
-        "backend-a",
-        1.0,
-        10.0,
-        Duration::from_millis(10),
-    );
-    let backend_b = routed_backend(
-        "cluster-b",
-        "backend-b",
-        2.0,
-        20.0,
-        Duration::from_millis(20),
-    );
+    let backend_a = backend!("cluster-a", "backend-a", 1.0, 10.0, 10);
+    let backend_b = backend!("cluster-b", "backend-b", 2.0, 20.0, 20);
     let backend_a_registration = backend_a.registration.clone();
     let backend_b_registration = backend_b.registration.clone();
 
@@ -3519,23 +1997,23 @@ fn routing_target_generation_tracks_backend_membership_without_heartbeat_double_
 
 #[tokio::test]
 async fn routing_target_generation_recreates_reachable_state_after_retirement() {
-    let state = StargateState::default();
-    let target = make_target(Some("rk-retired"), "model-retired");
-    let retired = state.routing.target_state_or_insert(&target).await;
+    let scenario = RegistrationScenario::new(Some("rk-retired"));
+    let target = scenario.target("model-retired");
+    let retired = scenario.state.routing.target_state_or_insert(&target).await;
 
     assert!(
-        state
+        scenario
+            .state
             .routing
-            .targets
             .remove_if_empty(&target, retired.clone())
             .await
     );
-    let rejected_publication = Arc::new(routed_backend(
+    let rejected_publication = Arc::new(backend!(
         "cluster-retired",
         "backend-retired",
         1.0,
         10.0,
-        Duration::from_millis(10),
+        10
     ));
     let rejected = retired
         .upsert_backend(rejected_publication.clone())
@@ -3545,14 +2023,14 @@ async fn routing_target_generation_recreates_reachable_state_after_retirement() 
         "retired-target retry should retain the exact immutable publication"
     );
 
-    let running = running_registration_in_cluster(
-        &state,
+    let running = scenario.start_at(
         "backend-current",
         "cluster-current",
         "quic://backend-current",
-        Some("rk-retired"),
+        scenario.routing_key.clone(),
     );
-    state
+    scenario
+        .state
         .routing
         .upsert_inference_server_target(
             &target,
@@ -3561,19 +2039,20 @@ async fn routing_target_generation_recreates_reachable_state_after_retirement() 
                 ModelStats::default(),
                 Duration::from_millis(5),
                 Instant::now(),
-                InferenceServerStatus::Active,
+                Active,
             ),
         )
         .await;
 
-    let current = state
+    let current = scenario
+        .state
         .routing
         .target_state(&target)
         .await
         .expect("normal upsert should publish a replacement target generation");
     assert!(!Arc::ptr_eq(&retired, &current));
-    assert_eq!(state.candidates_for_target(&target).await.len(), 1);
-    state.end_registration(running).await;
+    assert_eq!(scenario.candidates("model-retired").await.len(), 1);
+    scenario.state.end_registration(running).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3601,7 +2080,7 @@ async fn routing_target_recreation_starts_fresh_load_balancer_state() {
             stats: ModelStats::default(),
             rtt: Duration::from_millis(1),
             snapshot_updated_at: Instant::now(),
-            status: InferenceServerStatus::Active,
+            status: Active,
             active_backend_count: 1,
         },
         RoutedClusterSnapshot {
@@ -3609,7 +2088,7 @@ async fn routing_target_recreation_starts_fresh_load_balancer_state() {
             stats: ModelStats::default(),
             rtt: Duration::from_millis(1),
             snapshot_updated_at: Instant::now(),
-            status: InferenceServerStatus::Active,
+            status: Active,
             active_backend_count: 1,
         },
     ];
@@ -3623,7 +2102,6 @@ async fn routing_target_recreation_starts_fresh_load_balancer_state() {
         .expect("first generation should advance its sequence");
     state
         .routing
-        .targets
         .remove_if_empty(&target, first_generation.clone())
         .await;
     let replacement = state.routing.target_state_or_insert(&target).await;
@@ -3650,7 +2128,6 @@ async fn routing_target_snapshot_retains_removed_generation_until_selection_fini
 
     state
         .routing
-        .targets
         .remove_if_empty(&target, target_state.clone())
         .await;
     assert!(state.routing.target_state(&target).await.is_none());
@@ -3665,275 +2142,156 @@ async fn routing_target_snapshot_retains_removed_generation_until_selection_fini
 
 #[tokio::test]
 async fn shared_cluster_registration_exposes_one_aggregated_cluster_candidate() {
-    let state = StargateState::default();
-    let running_a = running_registration_in_cluster(
-        &state,
-        "inst-a",
-        "cluster-shared",
-        "quic://127.0.0.1:1111",
-        Some("rk-a"),
-    );
-    let running_b = running_registration_in_cluster(
-        &state,
-        "inst-b",
-        "cluster-shared",
-        "quic://127.0.0.1:2222",
-        Some("rk-a"),
-    );
+    let (scenario, _running_a, _running_b) =
+        published_shared_cluster(shared_backend_a_stats(), shared_backend_b_stats(), 10).await;
 
-    let update_a = InferenceServerRegistration {
-        inference_server_id: "inst-a".to_string(),
-        cluster_id: "cluster-shared".to_string(),
-        inference_server_url: "quic://127.0.0.1:1111".to_string(),
-        models: HashMap::from([(
-            "shared-model".to_string(),
-            model_registration_with_stats(
-                InferenceServerStatus::Active as i32,
-                ModelStats {
-                    output_tps: 2.0,
-                    last_mean_input_tps: 100.0,
-                    max_output_tps: 50.0,
-                    queue_size: 1,
-                    queued_input_size: 100,
-                    input_processing_queries: 1,
-                    output_generation_queries: 2,
-                    stats_observed_at_unix_ms: 1000,
-                    stats_capabilities: vec!["request.output.chunk_usage".to_string()],
-                    stats_sources: vec!["chunk_usage".to_string()],
-                    kv_cache_capacity_tokens: 1000,
-                    kv_cache_used_tokens: 100,
-                    kv_cache_free_tokens: 900,
-                    num_running_queries: 11,
-                    max_engine_concurrency: 111,
-                    total_query_input_size: 1111,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(1, 111)]),
-                },
-            ),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-    let update_b = InferenceServerRegistration {
-        inference_server_id: "inst-b".to_string(),
-        cluster_id: "cluster-shared".to_string(),
-        inference_server_url: "quic://127.0.0.1:2222".to_string(),
-        models: HashMap::from([(
-            "shared-model".to_string(),
-            model_registration_with_stats(
-                InferenceServerStatus::Active as i32,
-                ModelStats {
-                    output_tps: 5.0,
-                    last_mean_input_tps: 120.0,
-                    max_output_tps: 60.0,
-                    queue_size: 2,
-                    queued_input_size: 200,
-                    input_processing_queries: 3,
-                    output_generation_queries: 4,
-                    stats_observed_at_unix_ms: 2000,
-                    stats_capabilities: vec![
-                        "request.output.chunk_usage".to_string(),
-                        "machine.kv_cache.http".to_string(),
-                    ],
-                    stats_sources: vec!["chunk_usage".to_string(), "kv_cache_stats".to_string()],
-                    kv_cache_capacity_tokens: 2000,
-                    kv_cache_used_tokens: 500,
-                    kv_cache_free_tokens: 1500,
-                    num_running_queries: 7,
-                    max_engine_concurrency: 77,
-                    total_query_input_size: 777,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(1, 222), (2, 333)]),
-                },
-            ),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-
-    state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(10)))
-        .await;
-    state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
-
-    let target = make_target(Some("rk-a"), "shared-model");
-    let backend_candidates = state.candidates_for_target(&target).await;
+    let backend_candidates = scenario.candidates("shared-model").await;
     assert_eq!(backend_candidates.len(), 2);
 
-    let clusters = state.cluster_candidates_for_target(&target).await;
-    assert_eq!(clusters.len(), 1);
-    let cluster = &clusters[0];
+    let cluster = scenario.only_cluster("shared-model").await;
     assert_eq!(cluster.cluster_id, "cluster-shared");
     assert_eq!(cluster.active_backend_count, 2);
-    assert_eq!(cluster.stats.last_mean_input_tps, 220.0);
-    assert_eq!(cluster.stats.output_tps, 7.0);
-    assert_eq!(cluster.stats.queue_size, 3);
-    assert_eq!(cluster.stats.queued_input_size, 300);
-    assert_eq!(cluster.stats.input_processing_queries, 4);
-    assert_eq!(cluster.stats.output_generation_queries, 6);
-    assert_eq!(cluster.stats.stats_observed_at_unix_ms, 2000);
-    assert_eq!(
-        cluster.stats.stats_capabilities,
-        vec![
+    assert_stats!(cluster.stats,
+        last_mean_input_tps: 220.0,
+        output_tps: 7.0,
+        queue_size: 3,
+        queued_input_size: 300,
+        input_processing_queries: 4,
+        output_generation_queries: 6,
+        stats_observed_at_unix_ms: 2000,
+        stats_capabilities: vec![
             "request.output.chunk_usage".to_string(),
             "machine.kv_cache.http".to_string(),
-        ]
+        ],
+        stats_sources: vec!["chunk_usage".to_string(), "kv_cache_stats".to_string()],
+        max_output_tps: 60.0,
+        kv_cache_capacity_tokens: 2000,
+        kv_cache_used_tokens: 500,
+        kv_cache_free_tokens: 1500,
+        num_running_queries: 7,
+        max_engine_concurrency: 77,
+        total_query_input_size: 777,
+        queue_time_estimate_ms_by_priority: HashMap::from([(1, 222), (2, 333)]),
     );
-    assert_eq!(
-        cluster.stats.stats_sources,
-        vec!["chunk_usage".to_string(), "kv_cache_stats".to_string()]
-    );
-    assert_eq!(cluster.stats.max_output_tps, 60.0);
-    assert_eq!(cluster.stats.kv_cache_capacity_tokens, 2000);
-    assert_eq!(cluster.stats.kv_cache_used_tokens, 500);
-    assert_eq!(cluster.stats.kv_cache_free_tokens, 1500);
-    assert_eq!(cluster.stats.num_running_queries, 7);
-    assert_eq!(cluster.stats.max_engine_concurrency, 77);
-    assert_eq!(cluster.stats.total_query_input_size, 777);
-    assert_eq!(
-        cluster.stats.queue_time_estimate_ms_by_priority,
-        HashMap::from([(1, 222), (2, 333)])
-    );
-    assert_eq!(cluster.rtt, Duration::from_millis(5));
+    assert_eq!(cluster.rtt, Duration::from_micros(7_500));
 }
 
 #[tokio::test]
 async fn shared_cluster_recomputes_cluster_stats_when_source_backend_is_removed() {
-    let state = StargateState::default();
-    let running_a = running_registration_in_cluster(
-        &state,
-        "inst-a",
-        "cluster-shared",
-        "quic://127.0.0.1:1111",
-        Some("rk-a"),
-    );
-    let running_b = running_registration_in_cluster(
-        &state,
-        "inst-b",
-        "cluster-shared",
-        "quic://127.0.0.1:2222",
-        Some("rk-a"),
-    );
+    let (scenario, _running_a, running_b) =
+        published_shared_cluster(shared_backend_a_stats(), shared_backend_b_stats(), 10).await;
 
-    let update_a = InferenceServerRegistration {
-        inference_server_id: "inst-a".to_string(),
-        cluster_id: "cluster-shared".to_string(),
-        inference_server_url: "quic://127.0.0.1:1111".to_string(),
-        models: HashMap::from([(
-            "shared-model".to_string(),
-            model_registration_with_stats(
-                InferenceServerStatus::Active as i32,
-                ModelStats {
-                    last_mean_input_tps: 100.0,
-                    max_output_tps: 50.0,
-                    kv_cache_capacity_tokens: 1000,
-                    kv_cache_used_tokens: 100,
-                    kv_cache_free_tokens: 900,
-                    num_running_queries: 11,
-                    max_engine_concurrency: 111,
-                    total_query_input_size: 1111,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(1, 111)]),
-                    ..ModelStats::default()
-                },
-            ),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
-    let update_b = InferenceServerRegistration {
-        inference_server_id: "inst-b".to_string(),
-        cluster_id: "cluster-shared".to_string(),
-        inference_server_url: "quic://127.0.0.1:2222".to_string(),
-        models: HashMap::from([(
-            "shared-model".to_string(),
-            model_registration_with_stats(
-                InferenceServerStatus::Active as i32,
-                ModelStats {
-                    last_mean_input_tps: 120.0,
-                    max_output_tps: 60.0,
-                    kv_cache_capacity_tokens: 2000,
-                    kv_cache_used_tokens: 500,
-                    kv_cache_free_tokens: 1500,
-                    num_running_queries: 7,
-                    max_engine_concurrency: 77,
-                    total_query_input_size: 777,
-                    queue_time_estimate_ms_by_priority: HashMap::from([(1, 222), (2, 333)]),
-                    ..ModelStats::default()
-                },
-            ),
-        )]),
-        reverse_tunnel: false,
-        coordinated_calibration: false,
-    };
+    let before_removal = scenario.only_cluster("shared-model").await;
+    assert_eq!(before_removal.active_backend_count, 2);
+    assert_eq!(before_removal.rtt, Duration::from_micros(7_500));
 
-    state
-        .apply_registration_update(&running_a, &update_a, true, Some(Duration::from_millis(10)))
-        .await;
-    state
-        .apply_registration_update(&running_b, &update_b, true, Some(Duration::from_millis(5)))
-        .await;
+    scenario.state.end_registration(running_b).await;
 
-    state.end_registration(running_b).await;
-
-    let clusters = state
-        .cluster_candidates_for_target(&make_target(Some("rk-a"), "shared-model"))
-        .await;
-    assert_eq!(clusters.len(), 1);
-    let cluster = &clusters[0];
+    let cluster = scenario.only_cluster("shared-model").await;
     assert_eq!(cluster.active_backend_count, 1);
-    assert_eq!(cluster.stats.last_mean_input_tps, 100.0);
-    assert_eq!(cluster.stats.max_output_tps, 50.0);
-    assert_eq!(cluster.stats.kv_cache_capacity_tokens, 1000);
-    assert_eq!(cluster.stats.kv_cache_used_tokens, 100);
-    assert_eq!(cluster.stats.kv_cache_free_tokens, 900);
-    assert_eq!(cluster.stats.num_running_queries, 11);
-    assert_eq!(cluster.stats.max_engine_concurrency, 111);
-    assert_eq!(cluster.stats.total_query_input_size, 1111);
+    assert_stats!(cluster.stats,
+        last_mean_input_tps: 100.0,
+        max_output_tps: 50.0,
+        kv_cache_capacity_tokens: 1000,
+        kv_cache_used_tokens: 100,
+        kv_cache_free_tokens: 900,
+        num_running_queries: 11,
+        max_engine_concurrency: 111,
+        total_query_input_size: 1111,
+        queue_time_estimate_ms_by_priority: HashMap::from([(1, 111)]),
+    );
+    assert_eq!(cluster.rtt, Duration::from_millis(10));
+}
+
+#[tokio::test]
+async fn registered_backend_rtt_means_drive_cluster_load_balancer_selection() {
+    let scenario = RegistrationScenario::new(Some("rk-rtt-routing"));
+    let model_id = "model-rtt-routing";
+    let outlier_fast = scenario.start_in("outlier-fast", "cluster-outlier", 1111);
+    let outlier_slow = scenario.start_in("outlier-slow", "cluster-outlier", 2222);
+    let steady_a = scenario.start_in("steady-a", "cluster-steady", 3333);
+    let steady_b = scenario.start_in("steady-b", "cluster-steady", 4444);
+
+    scenario
+        .publish_default_stats(&outlier_fast, model_id, Active, Some(1))
+        .await;
+    scenario
+        .publish_default_stats(&outlier_slow, model_id, Active, Some(101))
+        .await;
+    scenario
+        .publish_default_stats(&steady_a, model_id, Active, Some(20))
+        .await;
+    scenario
+        .publish_default_stats(&steady_b, model_id, Active, Some(20))
+        .await;
+
+    let target = scenario.target(model_id);
+    let target_snapshot = scenario
+        .state
+        .routing_target_snapshot(&target)
+        .await
+        .expect("registered backends should publish a routable target snapshot");
+    let outlier = target_snapshot
+        .clusters()
+        .iter()
+        .find(|cluster| cluster.cluster_id == "cluster-outlier")
+        .expect("outlier cluster should be published");
+    let steady = target_snapshot
+        .clusters()
+        .iter()
+        .find(|cluster| cluster.cluster_id == "cluster-steady")
+        .expect("steady cluster should be published");
+    assert_eq!(outlier.rtt, Duration::from_millis(51));
+    assert_eq!(steady.rtt, Duration::from_millis(20));
+
+    let algorithm_config = LoadBalancerAlgorithmConfig {
+        settings: LoadBalancerAlgorithmSettings::GroqMultiregion(GroqMultiregionAlgorithmConfig {
+            // Keep the slower TTFT bucket locked regardless of scheduler delay in the test.
+            ttft_bucket_size_ms: Some(0),
+            next_bucket_unlock_factor: Some(1_000_000.0),
+            n: Some(2),
+            ..GroqMultiregionAlgorithmConfig::default()
+        }),
+        ..LoadBalancerAlgorithmConfig::default()
+    };
+    let router = LoadBalancerRouter::from_config(&LoadBalancerConfig {
+        default: LoadBalancerAlgorithm::PowerOfTwo,
+        request_algorithms: HashMap::new(),
+        models: HashMap::from([(
+            model_id.to_string(),
+            LoadBalancerModelConfig::Detailed(Box::new(algorithm_config)),
+        )]),
+    })
+    .expect("Groq multiregion router should initialize");
+    let request = LoadBalancerRequest {
+        routing_target: &target,
+        cache_affinity_key: None,
+        input_tokens: None,
+        priority: 0,
+        received_at: Instant::now(),
+        request_slo: None,
+        excluded_cluster_ids: None,
+    };
+    let choice = router
+        .choose_candidate(
+            target_snapshot.load_balancers(),
+            &request,
+            target_snapshot.clusters(),
+        )
+        .expect("one registered cluster should be selected");
+
     assert_eq!(
-        cluster.stats.queue_time_estimate_ms_by_priority,
-        HashMap::from([(1, 111)])
+        target_snapshot.clusters()[choice.candidate_index].cluster_id,
+        "cluster-steady"
     );
 }
 
 #[tokio::test]
 async fn shared_cluster_selects_active_backends_round_robin() {
-    let state = StargateState::default();
-    let running_a = running_registration_in_cluster(
-        &state,
-        "inst-a",
-        "cluster-shared",
-        "quic://127.0.0.1:1111",
-        Some("rk-a"),
-    );
-    let running_b = running_registration_in_cluster(
-        &state,
-        "inst-b",
-        "cluster-shared",
-        "quic://127.0.0.1:2222",
-        Some("rk-a"),
-    );
-    for (running, inst, url) in [
-        (&running_a, "inst-a", "quic://127.0.0.1:1111"),
-        (&running_b, "inst-b", "quic://127.0.0.1:2222"),
-    ] {
-        let update = InferenceServerRegistration {
-            inference_server_id: inst.to_string(),
-            cluster_id: "cluster-shared".to_string(),
-            inference_server_url: url.to_string(),
-            models: HashMap::from([(
-                "shared-model".to_string(),
-                model_registration(InferenceServerStatus::Active as i32),
-            )]),
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-        };
-        state
-            .apply_registration_update(running, &update, true, Some(Duration::from_millis(5)))
-            .await;
-    }
+    let (scenario, _running_a, _running_b) =
+        published_shared_cluster(ModelStats::default(), ModelStats::default(), 5).await;
 
-    let target = make_target(Some("rk-a"), "shared-model");
-    let selected_cluster = selected_cluster_for_target(&state, &target).await;
+    let selected_cluster = scenario.selected_cluster("shared-model").await;
     let first = selected_cluster
         .select_backend(&HashSet::new())
         .expect("first backend should be selected");

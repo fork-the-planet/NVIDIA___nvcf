@@ -83,13 +83,12 @@ func TestRenderManifestDeploymentResources(t *testing.T) {
 	}
 
 	wantLines := []string{
-		"| Type | Component Name | Full Path |",
-		"| Image | llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.3.0` |",
-		"| Image | llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.2.0` |",
-		"See [self-hosted-example-dashboards](./example-dashboards.md) for deployment instructions.",
-		"| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.5.0` |",
-		"| Resource | nvcf-compute-plane-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:0.5.0` |",
-		"| Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |",
+		"| Artifact | Version | Required | Description | Distribution | Source code |",
+		"| `llm-api-gateway` | `0.3.0` | Optional |",
+		"| `llm-request-router` | `0.2.0` | Optional |",
+		"| `nvcf-self-managed-stack` | `0.5.0` |",
+		"| `nvcf-compute-plane-stack` | `0.5.0` |",
+		"| `nvcf-cli` | `0.0.30` |",
 	}
 	for _, want := range wantLines {
 		if !strings.Contains(got, want) {
@@ -110,36 +109,43 @@ func TestRenderManifestHandlesNewNVCAAndNVCTImageAndHelmArtifacts(t *testing.T) 
 		Artifact{Name: "nvct-service-oss", Type: ArtifactTypeImage, Registry: "staging", Version: "1.2.11"},
 		Artifact{Name: "helm-nvcf-nvct-api", Type: ArtifactTypeChart, Registry: "staging", Version: "1.4.2"},
 	)
+	catalog.Manifest.Entries = append(catalog.Manifest.Entries,
+		ManifestEntry{ArtifactID: "nvca", Plane: ManifestPlaneCompute, Kind: ManifestKindServiceImage, Requirement: ManifestRequired, Description: "Registers GPU clusters."},
+		ManifestEntry{ArtifactID: "nvca-operator", Plane: ManifestPlaneCompute, Kind: ManifestKindServiceImage, Requirement: ManifestRequired, Description: "Reconciles compute resources."},
+		ManifestEntry{ArtifactID: "helm-nvca-operator", Plane: ManifestPlaneCompute, Kind: ManifestKindChart, Requirement: ManifestRequired, Description: "Deploys the NVCA operator."},
+		ManifestEntry{ArtifactID: "nvct-service-oss", Plane: ManifestPlaneControl, Kind: ManifestKindServiceImage, Requirement: ManifestRequired, Description: "Provides tenant operations."},
+		ManifestEntry{ArtifactID: "helm-nvcf-nvct-api", Plane: ManifestPlaneControl, Kind: ManifestKindChart, Requirement: ManifestRequired, Description: "Deploys the tenant API."},
+	)
 
 	got, err := Render("manifest-artifact-registry-paths", catalog)
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
 	}
 
-	gpuWorkload := sectionBetween(t, got, "#### GPU Workload Components", "#### Supporting Components")
+	computeServices := sectionBetween(t, got, "### Compute plane services and images", "### EA-only CVE-impacted artifacts")
 	for _, want := range []string{
-		"| Image | nvca | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvca:3.0.0-rc.13` |",
-		"| Image | nvca-operator | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvca-operator:3.0.0-rc.13` |",
-		"| Chart (OCI) | helm-nvca-operator | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvca-operator:1.11.1` |",
+		"| `nvca` | `3.0.0-rc.13` | Required |",
+		"| `nvca-operator` | `3.0.0-rc.13` | Required |",
 	} {
-		if !strings.Contains(gpuWorkload, want) {
-			t.Fatalf("GPU workload section missing %q:\n%s", want, gpuWorkload)
+		if !strings.Contains(computeServices, want) {
+			t.Fatalf("compute services section missing %q:\n%s", want, computeServices)
 		}
 	}
+	computeCharts := sectionBetween(t, got, "### Compute plane Helm charts", "### Compute plane services and images")
+	if !strings.Contains(computeCharts, "| `helm-nvca-operator` | `1.11.1` | Required |") {
+		t.Fatalf("compute charts section missing NVCA chart:\n%s", computeCharts)
+	}
 
-	controlPlane := sectionBetween(t, got, "#### Control Plane Components", "#### GPU Workload Components")
+	controlPlane := sectionBetween(t, got, "### Control plane Helm charts", "### Compute plane Helm charts")
 	for _, want := range []string{
-		"| Image | nvct-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvct-service-oss:1.2.11` |",
-		"| Chart (OCI) | helm-nvcf-nvct-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-nvct-api:1.4.2` |",
+		"| `nvct-service-oss` | `1.2.11` | Required |",
+		"| `helm-nvcf-nvct-api` | `1.4.2` | Required |",
 	} {
 		if !strings.Contains(controlPlane, want) {
 			t.Fatalf("control plane section missing %q:\n%s", want, controlPlane)
 		}
 	}
 
-	if other, ok := optionalSectionBetween(got, "#### Other Published Components", "#### Deployment Resources"); ok && strings.Contains(other, "nvct") {
-		t.Fatalf("NVCT artifacts should not render in the fallback section:\n%s", other)
-	}
 	if strings.Contains(got, "helm-nvct-api") {
 		t.Fatalf("rendered manifest contains obsolete helm-nvct-api chart name:\n%s", got)
 	}
@@ -166,6 +172,11 @@ func TestRenderManifestUsesVerifiedPublicLocations(t *testing.T) {
 		{Name: "helm-nvcf-grpc-proxy", Version: "1.6.7", Registry: "public-helm", ChartFormat: ChartFormatHTTP},
 		{Name: "helm-nvcf-nats", Version: "0.7.1", Registry: "public-helm", ChartFormat: ChartFormatHTTP},
 	}
+	catalog.Manifest.Entries = append(catalog.Manifest.Entries,
+		ManifestEntry{ArtifactID: "nvcf-grpc-proxy", Plane: ManifestPlaneControl, Kind: ManifestKindServiceImage, Requirement: ManifestRequired, Description: "Proxies gRPC traffic."},
+		ManifestEntry{ArtifactID: "helm-nvcf-grpc-proxy", Plane: ManifestPlaneControl, Kind: ManifestKindChart, Requirement: ManifestRequired, Description: "Deploys the gRPC proxy."},
+		ManifestEntry{ArtifactID: "helm-nvcf-nats", Plane: ManifestPlaneControl, Kind: ManifestKindChart, Requirement: ManifestRequired, Description: "Deploys NATS."},
+	)
 
 	got, err := Render("manifest-artifact-registry-paths", catalog)
 	if err != nil {
@@ -173,9 +184,9 @@ func TestRenderManifestUsesVerifiedPublicLocations(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"| Image | nvcf-grpc-proxy | `nvcr.io/nvidia/nvcf/nvcf-grpc-proxy:1.29.1` |",
-		"| Chart (HTTP) | helm-nvcf-grpc-proxy | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-grpc-proxy:1.6.7` |",
-		"| Chart (OCI) | helm-nvcf-nats | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-nats:0.6.1` |",
+		"`nvcr.io/nvidia/nvcf/nvcf-grpc-proxy:1.29.1`",
+		"`https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-grpc-proxy:1.6.7`",
+		"`nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-nats:0.6.1`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("rendered table missing %q:\n%s", want, got)
@@ -846,6 +857,13 @@ func testCatalog() *Catalog {
 			{Name: "llm-api-gateway", Type: ArtifactTypeImage, Registry: "staging", Version: "0.3.0"},
 			{Name: "llm-request-router", Type: ArtifactTypeImage, Registry: "staging", RepositoryName: "stargate", Version: "0.2.0"},
 		},
+		Manifest: ManifestMetadata{Entries: []ManifestEntry{
+			{ArtifactID: "nvcf-self-managed-stack", Plane: ManifestPlaneShared, Kind: ManifestKindResource, Description: "Control-plane deployment bundle."},
+			{ArtifactID: "nvcf-compute-plane-stack", Plane: ManifestPlaneShared, Kind: ManifestKindResource, Description: "Compute-plane deployment bundle."},
+			{ArtifactID: "nvcf-cli", Plane: ManifestPlaneShared, Kind: ManifestKindResource, Description: "NVCF command-line interface."},
+			{ArtifactID: "llm-api-gateway", Plane: ManifestPlaneControl, Kind: ManifestKindServiceImage, Requirement: ManifestOptional, Description: "Routes LLM API requests."},
+			{ArtifactID: "llm-request-router", Plane: ManifestPlaneControl, Kind: ManifestKindServiceImage, Requirement: ManifestOptional, Description: "Routes LLM worker requests."},
+		}},
 	}
 }
 

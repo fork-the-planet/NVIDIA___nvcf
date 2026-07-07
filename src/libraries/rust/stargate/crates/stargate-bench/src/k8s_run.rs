@@ -21,10 +21,7 @@ use anyhow::Context;
 
 use crate::config::{BenchmarkConfig, DegradationActionConfig, DegradationActionKind};
 use crate::driver::{DriveConfig, RequestResult, drive_manifest, load_manifest};
-use crate::k8s::{
-    BenchmarkK8sRun, apply as apply_k8s, collect_logs, delete as delete_k8s, delete_backend_pod,
-    prepare_benchmark_k8s_run, scale_backend, stargate_metrics_endpoints, wait_ready,
-};
+use crate::k8s::{BenchmarkK8sRun, Kubectl, prepare_benchmark_k8s_run};
 use crate::manifest::{Manifest, ManifestRequest, write_manifest_json};
 use crate::metadata::{
     BenchmarkTier, DriverMode, ReliabilityMode, collect_run_metadata, write_run_metadata,
@@ -38,191 +35,33 @@ use crate::score::{
 const COLLECTOR_SCRAPE_SETTLE_DELAY: Duration = Duration::from_millis(1_100);
 const K8S_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum K8sLogCollection {
-    Collect,
-    Skip,
-}
+struct K8sRunArtifacts<'a>(&'a Path);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum K8sResourceDisposition {
-    Delete,
-    KeepFailed,
-}
+impl K8sRunArtifacts<'_> {
+    fn path(&self, filename: &str) -> PathBuf {
+        self.0.join(filename)
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct K8sRunFinalization {
-    logs: K8sLogCollection,
-    resources: K8sResourceDisposition,
-}
-
-impl K8sRunFinalization {
-    fn for_result(run_failed: bool, keep_resources_on_failure: bool) -> Self {
-        let logs = if run_failed || keep_resources_on_failure {
-            K8sLogCollection::Collect
-        } else {
-            K8sLogCollection::Skip
-        };
-        let resources = if run_failed && keep_resources_on_failure {
-            K8sResourceDisposition::KeepFailed
-        } else {
-            K8sResourceDisposition::Delete
-        };
-        Self { logs, resources }
+    fn write(&self, filename: &str, content: impl AsRef<[u8]>) -> anyhow::Result<()> {
+        let path = self.path(filename);
+        std::fs::write(&path, content)
+            .with_context(|| format!("failed to write {}", path.display()))
     }
 }
 
-#[derive(Debug, Clone)]
-struct K8sRunArtifacts {
-    collector_baseline_metrics: PathBuf,
-    requests: PathBuf,
-    stargate_metrics: PathBuf,
-    collector_metrics: PathBuf,
-    summary: PathBuf,
-}
-
-impl K8sRunArtifacts {
-    fn for_run_dir(run_dir: &Path) -> Self {
-        Self {
-            collector_baseline_metrics: run_dir.join("collector-baseline-metrics.prom"),
-            requests: run_dir.join("requests.jsonl"),
-            stargate_metrics: run_dir.join("metrics.prom"),
-            collector_metrics: run_dir.join("collector-metrics.prom"),
-            summary: run_dir.join("summary.json"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct K8sReplayPlan {
-    manifest: Manifest,
-    routing_probe_request: ManifestRequest,
-}
-
-impl K8sReplayPlan {
-    fn load(manifest_path: &Path) -> anyhow::Result<Self> {
-        let manifest = load_manifest(manifest_path)?;
-        let routing_probe_request = manifest.requests.first().cloned().ok_or_else(|| {
-            anyhow::anyhow!("benchmark manifest must contain at least one request")
-        })?;
-        Ok(Self {
-            manifest,
-            routing_probe_request,
-        })
-    }
+fn load_k8s_replay(manifest_path: &Path) -> anyhow::Result<(Manifest, ManifestRequest)> {
+    let manifest = load_manifest(manifest_path)?;
+    let probe = manifest
+        .requests
+        .first()
+        .cloned()
+        .context("benchmark manifest must contain at least one request")?;
+    Ok((manifest, probe))
 }
 
 struct K8sCollectorBaseline {
     metrics: String,
     request_totals: ScrapedRequestTotals,
-}
-
-#[derive(Debug, Clone)]
-struct K8sReadinessGate {
-    health_url: String,
-    metrics_endpoints: Vec<String>,
-    routing_url: String,
-    model: String,
-    expected_backend_count: usize,
-    routing_probe_request: ManifestRequest,
-    timeout: Duration,
-}
-
-impl K8sReadinessGate {
-    fn for_run(
-        run: &crate::k8s::BenchmarkK8sRun,
-        backend_count: usize,
-        replay_plan: &K8sReplayPlan,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            health_url: format!("{}/healthz", run.stargate_http_endpoint),
-            metrics_endpoints: stargate_metrics_endpoints(run)?,
-            routing_url: format!("{}/v1/chat/completions", run.stargate_http_endpoint),
-            model: replay_plan.manifest.model.clone(),
-            expected_backend_count: backend_count,
-            routing_probe_request: replay_plan.routing_probe_request.clone(),
-            timeout: K8S_READINESS_TIMEOUT,
-        })
-    }
-
-    fn wait(&self, runtime: &tokio::runtime::Runtime) -> anyhow::Result<()> {
-        runtime.block_on(self.wait_async())
-    }
-
-    async fn wait_async(&self) -> anyhow::Result<()> {
-        wait_for_http_ok(&self.health_url, self.timeout).await?;
-        wait_for_active_backend_counts(
-            &self.metrics_endpoints,
-            &self.model,
-            self.routing_probe_request.routing_key.as_deref(),
-            self.expected_backend_count,
-            self.timeout,
-        )
-        .await?;
-        wait_for_routing(
-            &self.routing_url,
-            &self.model,
-            &self.routing_probe_request,
-            self.timeout,
-        )
-        .await
-    }
-}
-
-struct K8sSingleRun<'a> {
-    benchmark_run: &'a BenchmarkK8sRun,
-    concurrency_limit: usize,
-    backend_count: usize,
-    topology: &'a RoutingTopology,
-    degradation_actions: &'a [DegradationActionConfig],
-}
-
-impl<'a> K8sSingleRun<'a> {
-    fn new(
-        run: &'a BenchmarkK8sRun,
-        concurrency_limit: usize,
-        backend_count: usize,
-        topology: &'a RoutingTopology,
-        degradation_actions: &'a [DegradationActionConfig],
-    ) -> Self {
-        Self {
-            benchmark_run: run,
-            concurrency_limit,
-            backend_count,
-            topology,
-            degradation_actions,
-        }
-    }
-
-    fn execute(&self) -> anyhow::Result<RunSummary> {
-        wait_ready(self.benchmark_run, self.backend_count)?;
-        let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-        let replay_plan = K8sReplayPlan::load(&self.benchmark_run.manifest_path)?;
-        let artifacts = K8sRunArtifacts::for_run_dir(&self.benchmark_run.run_dir);
-        wait_for_k8s_probe_readiness(
-            &runtime,
-            self.benchmark_run,
-            self.backend_count,
-            &replay_plan,
-        )?;
-        let baseline = capture_collector_baseline(&runtime, self.benchmark_run, &artifacts)?;
-        let results = drive_k8s_replay(
-            &runtime,
-            self.benchmark_run,
-            replay_plan.manifest,
-            self.concurrency_limit,
-            self.degradation_actions,
-            &artifacts,
-        )?;
-        write_k8s_run_summary(
-            &runtime,
-            self.benchmark_run,
-            self.topology,
-            &results,
-            baseline,
-            &artifacts,
-        )
-    }
 }
 
 pub fn run_k8s_benchmark(
@@ -237,226 +76,133 @@ pub fn run_k8s_benchmark(
         reliability_mode,
         DriverMode::ExternalNodePort,
     );
-    K8sBenchmarkCommand::from_metadata(
+    run_k8s_benchmark_with_context(
         config,
         manifest,
         output_dir,
         keep_resources_on_failure,
         metadata,
+        ensure_k8s_context,
     )
-    .run_to_completion()
 }
 
-struct K8sBenchmarkCommand {
+fn run_k8s_benchmark_with_context(
     config: BenchmarkConfig,
     manifest: Manifest,
     output_dir: PathBuf,
     keep_resources_on_failure: bool,
     metadata: crate::metadata::RunMetadata,
-}
-
-impl K8sBenchmarkCommand {
-    fn from_metadata(
-        config: BenchmarkConfig,
-        manifest: Manifest,
-        output_dir: PathBuf,
-        keep_resources_on_failure: bool,
-        metadata: crate::metadata::RunMetadata,
-    ) -> Self {
-        Self {
-            config,
-            manifest,
-            output_dir,
-            keep_resources_on_failure,
-            metadata,
-        }
-    }
-
-    fn run_to_completion(&self) -> anyhow::Result<()> {
-        self.run_with_context_check(ensure_k8s_context)
-    }
-
-    fn run_with_context_check(
-        &self,
-        ensure_context: impl FnOnce() -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        self.prepare_to_run(ensure_context)?;
-        let report_entries = self.run_algorithms()?;
-        self.write_report(&report_entries)?;
-        println!("completed {} algorithm runs", report_entries.len());
-        Ok(())
-    }
-
-    fn prepare_to_run(
-        &self,
-        ensure_context: impl FnOnce() -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        self.create_output_dir()?;
-        self.write_metadata()?;
-        self.ensure_preflight()?;
-        ensure_context()?;
-        self.write_manifest()?;
-        self.print_run_header();
-        Ok(())
-    }
-
-    fn create_output_dir(&self) -> anyhow::Result<()> {
-        std::fs::create_dir_all(&self.output_dir)
-            .with_context(|| format!("failed to create output dir {}", self.output_dir.display()))
-    }
-
-    fn write_metadata(&self) -> anyhow::Result<()> {
-        write_run_metadata(&self.metadata_path(), &self.metadata)
-    }
-
-    fn ensure_preflight(&self) -> anyhow::Result<()> {
-        if self.metadata.preflight.should_fail {
-            anyhow::bail!(
-                "strict reliability preflight failed with {} failure(s); inspect {}",
-                self.metadata.preflight.failure_count,
-                self.metadata_path().display()
-            );
-        }
-        Ok(())
-    }
-
-    fn write_manifest(&self) -> anyhow::Result<()> {
-        write_manifest_json(&self.manifest_path(), &self.manifest)
-    }
-
-    fn print_run_header(&self) {
-        println!(
-            "running benchmark '{}' with {} request(s), {} backend(s), {} stargate(s)",
-            self.config.name,
-            self.config.request_count,
-            self.config.backends.count,
-            self.config.stargates.count
-        );
-        println!("output directory: {}", self.output_dir.display());
-        println!(
-            "algorithms: {}",
-            self.config
-                .algorithms
-                .iter()
-                .map(|algorithm| algorithm.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+    ensure_context: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
+    let metadata_path = output_dir.join("run-metadata.json");
+    write_run_metadata(&metadata_path, &metadata)?;
+    if metadata.preflight.should_fail {
+        anyhow::bail!(
+            "strict reliability preflight failed with {} failure(s); inspect {}",
+            metadata.preflight.failure_count,
+            metadata_path.display()
         );
     }
-
-    fn run_algorithms(&self) -> anyhow::Result<Vec<ReportEntry>> {
-        let mut report_entries = Vec::with_capacity(self.config.algorithms.len());
-        let topology = topology_for(&self.config.backends);
-        for (run_index, algorithm) in self.config.algorithms.iter().enumerate() {
-            println!(
-                "starting algorithm {}/{}: {}",
-                run_index + 1,
-                self.config.algorithms.len(),
-                algorithm.name
-            );
-            let run = prepare_benchmark_k8s_run(
-                &self.config,
-                algorithm,
-                &self.manifest_path(),
-                &self.output_dir,
-                run_index,
-            )?;
-            apply_k8s(&run)?;
-            let run_result = run_single_k8s(
-                &run,
-                self.manifest.max_concurrency,
-                self.config.backends.count,
-                &topology,
-                &self.config.degradation.actions,
-            );
-            finalize_k8s_run(&run, run_result.is_err(), self.keep_resources_on_failure);
-            let summary = run_result?;
-            println!(
-                "finished {}: success_rate={:.3}, avg_ttlt_ms={:.1}, run_dir={}",
-                run.algorithm_name,
-                summary.success_rate,
-                summary.avg_ttlt_ms,
-                run.run_dir.display()
-            );
-            report_entries.push(ReportEntry {
-                algorithm_name: run.algorithm_name.clone(),
-                pylon_queue_admission: algorithm.pylon_queue_admission.clone(),
-                summary,
-            });
-        }
-        Ok(report_entries)
-    }
-
-    fn write_report(&self, report_entries: &[ReportEntry]) -> anyhow::Result<()> {
-        write_benchmark_report_artifacts(
-            &self.output_dir,
-            &ReportContext::from_config(&self.config),
-            report_entries,
-        )?;
-        Ok(())
-    }
-
-    fn metadata_path(&self) -> PathBuf {
-        self.output_dir.join("run-metadata.json")
-    }
-
-    fn manifest_path(&self) -> PathBuf {
-        self.output_dir.join("manifest.json")
-    }
-}
-
-fn finalize_k8s_run(run: &BenchmarkK8sRun, run_failed: bool, keep_resources_on_failure: bool) {
-    let finalization = K8sRunFinalization::for_result(run_failed, keep_resources_on_failure);
-    finalize_k8s_run_with_actions(
-        &run.algorithm_name,
-        finalization,
-        || collect_logs(run),
-        || delete_k8s(run),
+    ensure_context()?;
+    let manifest_path = output_dir.join("manifest.json");
+    write_manifest_json(&manifest_path, &manifest)?;
+    println!(
+        "running benchmark '{}' with {} request(s), {} backend(s), {} stargate(s)",
+        config.name, config.request_count, config.backends.count, config.stargates.count
     );
+    println!("output directory: {}", output_dir.display());
+    println!(
+        "algorithms: {}",
+        config
+            .algorithms
+            .iter()
+            .map(|algorithm| algorithm.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut report_entries = Vec::with_capacity(config.algorithms.len());
+    let topology = topology_for(&config.backends);
+    for (run_index, algorithm) in config.algorithms.iter().enumerate() {
+        println!(
+            "starting algorithm {}/{}: {}",
+            run_index + 1,
+            config.algorithms.len(),
+            algorithm.name
+        );
+        let run =
+            prepare_benchmark_k8s_run(&config, algorithm, &manifest_path, &output_dir, run_index)?;
+        Kubectl::default().apply(&run)?;
+        let run_result = run_single_k8s(
+            &run,
+            manifest.max_concurrency,
+            config.backends.count,
+            &topology,
+            &config.degradation.actions,
+        );
+        finalize_k8s_run_with_actions(
+            &run.algorithm_name,
+            run_result.is_err(),
+            keep_resources_on_failure,
+            || Kubectl::default().collect_logs(&run),
+            || Kubectl::default().delete(&run),
+        );
+        let summary = run_result?;
+        println!(
+            "finished {}: success_rate={:.3}, avg_ttlt_ms={:.1}, run_dir={}",
+            run.algorithm_name,
+            summary.success_rate,
+            summary.avg_ttlt_ms,
+            run.run_dir.display()
+        );
+        report_entries.push(ReportEntry {
+            algorithm_name: run.algorithm_name.clone(),
+            pylon_queue_admission: algorithm.pylon_queue_admission.clone(),
+            summary,
+        });
+    }
+    write_benchmark_report_artifacts(
+        &output_dir,
+        &ReportContext::from_config(&config),
+        &report_entries,
+    )?;
+    println!("completed {} algorithm runs", report_entries.len());
+    Ok(())
 }
 
 fn finalize_k8s_run_with_actions(
     algorithm_name: &str,
-    finalization: K8sRunFinalization,
+    run_failed: bool,
+    keep_resources_on_failure: bool,
     mut collect_logs_action: impl FnMut() -> anyhow::Result<()>,
     mut delete_resources_action: impl FnMut() -> anyhow::Result<()>,
 ) {
-    match finalization.logs {
-        K8sLogCollection::Collect => {
-            if let Err(error) = collect_logs_action() {
-                eprintln!(
-                    "warning: failed to collect k8s benchmark logs for {algorithm_name}: {error}"
-                );
-            }
-        }
-        K8sLogCollection::Skip => {}
+    if (run_failed || keep_resources_on_failure)
+        && let Err(error) = collect_logs_action()
+    {
+        eprintln!("warning: failed to collect k8s benchmark logs for {algorithm_name}: {error}");
     }
 
-    match finalization.resources {
-        K8sResourceDisposition::KeepFailed => {
-            eprintln!("keeping k8s benchmark resources for failed run {algorithm_name}");
-        }
-        K8sResourceDisposition::Delete => {
-            if let Err(error) = delete_resources_action() {
-                eprintln!(
-                    "warning: failed to delete k8s benchmark resources for {algorithm_name}: {error}"
-                );
-            }
-        }
+    if run_failed && keep_resources_on_failure {
+        eprintln!("keeping k8s benchmark resources for failed run {algorithm_name}");
+    } else if let Err(error) = delete_resources_action() {
+        eprintln!(
+            "warning: failed to delete k8s benchmark resources for {algorithm_name}: {error}"
+        );
     }
 }
 
 fn ensure_k8s_context() -> anyhow::Result<()> {
     let output = ProcessCommand::new("kubectl")
-        .arg("config")
-        .arg("current-context")
+        .args(["config", "current-context"])
         .output()
         .context("failed to query current kubectl context")?;
-    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim().is_empty() {
-        anyhow::bail!(
-            "no active kubectl context; configure access to a Kubernetes cluster before running Kubernetes benchmarks"
-        );
-    }
+    anyhow::ensure!(
+        output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "no active kubectl context; configure access to a Kubernetes cluster before running Kubernetes benchmarks"
+    );
     Ok(())
 }
 
@@ -467,53 +213,95 @@ fn run_single_k8s(
     topology: &RoutingTopology,
     degradation_actions: &[DegradationActionConfig],
 ) -> anyhow::Result<RunSummary> {
-    K8sSingleRun::new(
-        run,
-        concurrency_limit,
-        backend_count,
-        topology,
-        degradation_actions,
-    )
-    .execute()
+    Kubectl::default()
+        .wait_ready(run, backend_count)
+        .and_then(|()| {
+            execute_k8s_replay(
+                run,
+                concurrency_limit,
+                backend_count,
+                topology,
+                degradation_actions,
+            )
+        })
 }
 
-fn wait_for_k8s_probe_readiness(
-    runtime: &tokio::runtime::Runtime,
-    run: &crate::k8s::BenchmarkK8sRun,
+fn execute_k8s_replay(
+    run: &BenchmarkK8sRun,
+    concurrency_limit: usize,
     backend_count: usize,
-    replay_plan: &K8sReplayPlan,
+    topology: &RoutingTopology,
+    degradation_actions: &[DegradationActionConfig],
+) -> anyhow::Result<RunSummary> {
+    let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    let (manifest, routing_probe) = load_k8s_replay(&run.manifest_path)?;
+    let metrics_endpoints = Kubectl::default().stargate_metrics_endpoints(run)?;
+    runtime.block_on(wait_for_k8s_readiness(
+        &format!("{}/healthz", run.stargate_http_endpoint),
+        &metrics_endpoints,
+        &format!("{}/v1/chat/completions", run.stargate_http_endpoint),
+        &manifest.model,
+        backend_count,
+        &routing_probe,
+        K8S_READINESS_TIMEOUT,
+    ))?;
+    let artifacts = K8sRunArtifacts(&run.run_dir);
+    let baseline = capture_collector_baseline(&runtime, run, &artifacts)?;
+    let results = drive_k8s_replay(
+        &runtime,
+        run,
+        manifest,
+        concurrency_limit,
+        degradation_actions,
+        &artifacts,
+    )?;
+    write_k8s_run_summary(&runtime, run, topology, &results, baseline, &artifacts)
+}
+
+async fn wait_for_k8s_readiness(
+    health_url: &str,
+    metrics_endpoints: &[String],
+    routing_url: &str,
+    model: &str,
+    expected_backend_count: usize,
+    routing_probe: &ManifestRequest,
+    timeout: Duration,
 ) -> anyhow::Result<()> {
-    K8sReadinessGate::for_run(run, backend_count, replay_plan)?.wait(runtime)
+    wait_for_http_ok(health_url, timeout).await?;
+    wait_for_active_backend_counts(
+        metrics_endpoints,
+        model,
+        routing_probe.routing_key.as_deref(),
+        expected_backend_count,
+        timeout,
+    )
+    .await?;
+    wait_for_routing(routing_url, model, routing_probe, timeout).await
 }
 
 fn capture_collector_baseline(
     runtime: &tokio::runtime::Runtime,
-    run: &crate::k8s::BenchmarkK8sRun,
+    run: &BenchmarkK8sRun,
     artifacts: &K8sRunArtifacts,
 ) -> anyhow::Result<K8sCollectorBaseline> {
-    let collector_baseline = runtime.block_on(wait_for_scraped_benchmark_metrics(
+    let metrics = runtime.block_on(wait_for_collector_metrics(
         &run.collector_metrics_endpoint,
         Duration::from_secs(60),
+        "OTel collector to scrape benchmark metrics",
+        |metrics, _| has_scraped_benchmark_metrics(metrics),
     ))?;
-    let baseline_request_totals = scraped_request_totals(&collector_baseline)
+    let request_totals = scraped_request_totals(&metrics)
         .context("collector baseline did not expose Stargate and Pylon request counters")?;
-    std::fs::write(&artifacts.collector_baseline_metrics, &collector_baseline).with_context(
-        || {
-            format!(
-                "failed to write {}",
-                artifacts.collector_baseline_metrics.display()
-            )
-        },
-    )?;
+    artifacts.write("collector-baseline-metrics.prom", &metrics)?;
     Ok(K8sCollectorBaseline {
-        metrics: collector_baseline,
-        request_totals: baseline_request_totals,
+        metrics,
+        request_totals,
     })
 }
 
 fn drive_k8s_replay(
     runtime: &tokio::runtime::Runtime,
-    run: &crate::k8s::BenchmarkK8sRun,
+    run: &BenchmarkK8sRun,
     manifest: Manifest,
     concurrency_limit: usize,
     degradation_actions: &[DegradationActionConfig],
@@ -524,18 +312,20 @@ fn drive_k8s_replay(
     let results = runtime.block_on(drive_manifest(
         DriveConfig {
             endpoint: format!("{}/v1/chat/completions", run.stargate_http_endpoint),
-            output_path: artifacts.requests.clone(),
+            output_path: artifacts.path("requests.jsonl"),
             concurrency_limit,
         },
         manifest,
     ));
-    join_degradation_actions(degradation_handles);
+    for handle in degradation_handles {
+        let _ = handle.join();
+    }
     results
 }
 
 fn write_k8s_run_summary(
     runtime: &tokio::runtime::Runtime,
-    run: &crate::k8s::BenchmarkK8sRun,
+    run: &BenchmarkK8sRun,
     topology: &RoutingTopology,
     results: &[RequestResult],
     collector_baseline: K8sCollectorBaseline,
@@ -545,19 +335,24 @@ fn write_k8s_run_summary(
     let mut summary = summarize_with_topology(results, topology);
 
     if let Ok(metrics) = runtime.block_on(fetch_text(&run.stargate_metrics_endpoint)) {
-        std::fs::write(&artifacts.stargate_metrics, metrics)
-            .with_context(|| format!("failed to write {}", artifacts.stargate_metrics.display()))?;
+        artifacts.write("metrics.prom", metrics)?;
     }
 
-    let collector_metrics = runtime.block_on(wait_for_post_replay_scraped_benchmark_metrics(
+    let collector_metrics = runtime.block_on(wait_for_collector_metrics(
         &run.collector_metrics_endpoint,
-        collector_baseline.request_totals,
-        results.len(),
-        successful_request_count,
         Duration::from_secs(60),
+        "post-replay OTel collector metrics",
+        |metrics, elapsed| {
+            elapsed >= COLLECTOR_SCRAPE_SETTLE_DELAY
+                && has_post_replay_scraped_benchmark_metrics(
+                    metrics,
+                    collector_baseline.request_totals,
+                    results.len(),
+                    successful_request_count,
+                )
+        },
     ))?;
-    std::fs::write(&artifacts.collector_metrics, &collector_metrics)
-        .with_context(|| format!("failed to write {}", artifacts.collector_metrics.display()))?;
+    artifacts.write("collector-metrics.prom", &collector_metrics)?;
     summary.queue_admission_summary = queue_admission_summary_delta_from_prometheus(
         &collector_baseline.metrics,
         &collector_metrics,
@@ -566,23 +361,23 @@ fn write_k8s_run_summary(
         &collector_baseline.metrics,
         &collector_metrics,
     );
-    let summary_bytes =
-        serde_json::to_vec_pretty(&summary).context("failed to serialize run summary")?;
-    std::fs::write(&artifacts.summary, summary_bytes)
-        .with_context(|| format!("failed to write {}", artifacts.summary.display()))?;
+    artifacts.write(
+        "summary.json",
+        serde_json::to_vec_pretty(&summary).context("failed to serialize run summary")?,
+    )?;
 
     Ok(summary)
 }
 
 fn start_degradation_actions(
-    run: &crate::k8s::BenchmarkK8sRun,
+    run: &BenchmarkK8sRun,
     requests: &[ManifestRequest],
     actions: &[DegradationActionConfig],
 ) -> Vec<std::thread::JoinHandle<()>> {
     actions
         .iter()
+        .cloned()
         .map(|action| {
-            let action = action.clone();
             let run = run.clone();
             let delay = requests
                 .get(action.at_request)
@@ -592,10 +387,10 @@ fn start_degradation_actions(
                 std::thread::sleep(delay);
                 let result = match action.action {
                     DegradationActionKind::DeleteBackendPod => {
-                        delete_backend_pod(&run, action.backend_index)
+                        Kubectl::default().delete_backend_pod(&run, action.backend_index)
                     }
                     DegradationActionKind::ScaleBackend { replicas } => {
-                        scale_backend(&run, action.backend_index, replicas)
+                        Kubectl::default().scale_backend(&run, action.backend_index, replicas)
                     }
                 };
                 if let Err(error) = result {
@@ -607,12 +402,6 @@ fn start_degradation_actions(
             })
         })
         .collect()
-}
-
-fn join_degradation_actions(handles: Vec<std::thread::JoinHandle<()>>) {
-    for handle in handles {
-        let _ = handle.join();
-    }
 }
 
 async fn wait_for_http_ok(url: &str, timeout: Duration) -> anyhow::Result<()> {
@@ -632,71 +421,32 @@ async fn wait_for_http_ok(url: &str, timeout: Duration) -> anyhow::Result<()> {
 }
 
 async fn fetch_text(url: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::new();
-    let response = client
-        .get(url)
-        .send()
+    reqwest::get(url)
         .await
-        .with_context(|| format!("failed to fetch {}", url))?;
-    response
+        .with_context(|| format!("failed to fetch {}", url))?
         .text()
         .await
         .with_context(|| format!("failed to read response body from {}", url))
 }
 
-async fn wait_for_scraped_benchmark_metrics(
-    collector_metrics_endpoint: &str,
+async fn wait_for_collector_metrics(
+    endpoint: &str,
     timeout: Duration,
+    description: &str,
+    ready: impl Fn(&str, Duration) -> bool,
 ) -> anyhow::Result<String> {
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
     let mut last_metrics_len = 0usize;
     loop {
-        if let Ok(metrics) = fetch_text(collector_metrics_endpoint).await {
+        if let Ok(metrics) = fetch_text(endpoint).await {
             last_metrics_len = metrics.len();
-            if has_scraped_benchmark_metrics(&metrics) {
+            if ready(&metrics, started.elapsed()) {
                 return Ok(metrics);
             }
         }
-        if Instant::now() >= deadline {
+        if started.elapsed() >= timeout {
             anyhow::bail!(
-                "timed out waiting for OTel collector to scrape benchmark metrics from {} (last_response_bytes={})",
-                collector_metrics_endpoint,
-                last_metrics_len
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
-async fn wait_for_post_replay_scraped_benchmark_metrics(
-    collector_metrics_endpoint: &str,
-    baseline: ScrapedRequestTotals,
-    replay_request_count: usize,
-    replay_success_count: usize,
-    timeout: Duration,
-) -> anyhow::Result<String> {
-    let started_at = Instant::now();
-    let deadline = started_at + timeout;
-    let mut last_metrics_len = 0usize;
-    loop {
-        if let Ok(metrics) = fetch_text(collector_metrics_endpoint).await {
-            last_metrics_len = metrics.len();
-            if started_at.elapsed() >= COLLECTOR_SCRAPE_SETTLE_DELAY
-                && has_post_replay_scraped_benchmark_metrics(
-                    &metrics,
-                    baseline,
-                    replay_request_count,
-                    replay_success_count,
-                )
-            {
-                return Ok(metrics);
-            }
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "timed out waiting for post-replay OTel collector metrics from {} (last_response_bytes={})",
-                collector_metrics_endpoint,
-                last_metrics_len
+                "timed out waiting for {description} from {endpoint} (last_response_bytes={last_metrics_len})"
             );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -704,13 +454,7 @@ async fn wait_for_post_replay_scraped_benchmark_metrics(
 }
 
 pub(crate) fn has_scraped_benchmark_metrics(metrics: &str) -> bool {
-    has_any_metric(
-        metrics,
-        &["stargate_requests_total", "stargate_requests_total_total"],
-    ) && has_any_metric(
-        metrics,
-        &["pylon_requests_total", "pylon_requests_total_total"],
-    )
+    scraped_request_totals(metrics).is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -720,19 +464,15 @@ pub(crate) struct ScrapedRequestTotals {
 }
 
 pub(crate) fn scraped_request_totals(metrics: &str) -> Option<ScrapedRequestTotals> {
-    if !has_scraped_benchmark_metrics(metrics) {
-        return None;
-    }
-    Some(ScrapedRequestTotals {
-        stargate: metric_total(
-            metrics,
-            &["stargate_requests_total", "stargate_requests_total_total"],
-        ),
-        pylon: metric_total(
-            metrics,
-            &["pylon_requests_total", "pylon_requests_total_total"],
-        ),
-    })
+    let (has_stargate, stargate) = metric_total(
+        metrics,
+        &["stargate_requests_total", "stargate_requests_total_total"],
+    );
+    let (has_pylon, pylon) = metric_total(
+        metrics,
+        &["pylon_requests_total", "pylon_requests_total_total"],
+    );
+    (has_stargate && has_pylon).then_some(ScrapedRequestTotals { stargate, pylon })
 }
 
 pub(crate) fn has_post_replay_scraped_benchmark_metrics(
@@ -741,36 +481,33 @@ pub(crate) fn has_post_replay_scraped_benchmark_metrics(
     replay_request_count: usize,
     replay_success_count: usize,
 ) -> bool {
-    let Some(current) = scraped_request_totals(metrics) else {
-        return false;
-    };
-    current.stargate >= baseline.stargate + replay_request_count as f64
-        && current.pylon >= baseline.pylon + replay_success_count as f64
-}
-
-fn metric_total(metrics: &str, names: &[&str]) -> f64 {
-    metrics
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let series = fields.next()?;
-            if !names
-                .iter()
-                .any(|name| series.starts_with(&format!("{name}{{")) || series == *name)
-            {
-                return None;
-            }
-            fields.next()?.parse::<f64>().ok()
-        })
-        .sum()
-}
-
-fn has_any_metric(metrics: &str, names: &[&str]) -> bool {
-    metrics.lines().any(|line| {
-        names.iter().any(|name| {
-            line.starts_with(&format!("{name}{{")) || line.starts_with(&format!("{name} "))
-        })
+    scraped_request_totals(metrics).is_some_and(|current| {
+        current.stargate >= baseline.stargate + replay_request_count as f64
+            && current.pylon >= baseline.pylon + replay_success_count as f64
     })
+}
+
+fn metric_total(metrics: &str, names: &[&str]) -> (bool, f64) {
+    let mut found = false;
+    let mut total = 0.0;
+    for line in metrics.lines() {
+        found |= names.iter().any(|name| {
+            line.strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('{') || rest.starts_with(' '))
+        });
+        let mut fields = line.split_whitespace();
+        let Some(series) = fields.next() else {
+            continue;
+        };
+        let name = series.split_once('{').map_or(series, |(name, _)| name);
+        if names.contains(&name) {
+            total += fields
+                .next()
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or_default();
+        }
+    }
+    (found, total)
 }
 
 async fn wait_for_active_backend_counts(
@@ -785,10 +522,10 @@ async fn wait_for_active_backend_counts(
     loop {
         last_counts.clear();
         for metrics_endpoint in metrics_endpoints {
-            let count = match fetch_text(metrics_endpoint).await {
-                Ok(metrics) => active_backend_count(&metrics, model, routing_key),
-                Err(_) => None,
-            };
+            let count = fetch_text(metrics_endpoint)
+                .await
+                .ok()
+                .and_then(|metrics| active_backend_count(&metrics, model, routing_key));
             last_counts.push(count);
         }
         if active_backend_counts_ready(&last_counts, expected_count) {
@@ -820,25 +557,23 @@ pub(crate) fn active_backend_count(
     routing_key: Option<&str>,
 ) -> Option<usize> {
     metrics.lines().find_map(|line| {
-        if !line.starts_with("stargate_active_inference_servers{") {
-            return None;
-        }
+        line.strip_prefix("stargate_active_inference_servers{")?;
         let (metric, value) = line.rsplit_once(' ')?;
-        let metric_model = prometheus_label_value(metric, "model")?;
-        let metric_routing_key = prometheus_label_value(metric, "routing_key").unwrap_or("");
-        if metric_model != model || metric_routing_key != routing_key.unwrap_or("") {
-            return None;
-        }
-        value.parse::<f64>().ok().map(|value| value as usize)
+        let matches = prometheus_label_value(metric, "model")? == model
+            && prometheus_label_value(metric, "routing_key").unwrap_or("")
+                == routing_key.unwrap_or("");
+        matches
+            .then_some(value)?
+            .parse()
+            .ok()
+            .map(|value: f64| value as usize)
     })
 }
 
 fn prometheus_label_value<'a>(metric: &'a str, label: &str) -> Option<&'a str> {
     let needle = format!(r#"{label}=""#);
-    let start = metric.find(&needle)? + needle.len();
-    let rest = &metric[start..];
-    let end = rest.find('"')?;
-    Some(&rest[..end])
+    let (_, rest) = metric.split_once(&needle)?;
+    Some(rest.split_once('"')?.0)
 }
 
 async fn wait_for_routing(
@@ -866,7 +601,7 @@ async fn wait_for_routing(
                 "x-request-id",
                 format!("benchmark-ready-probe-{}", request.request_index),
             )
-            .header("x-input-tokens", "1")
+            .header("x-input-tokens", "15")
             .header("x-output-tokens", "1");
         if let Some(routing_key) = &request.routing_key {
             builder = builder.header("x-routing-key", routing_key);
@@ -908,70 +643,27 @@ pub(crate) fn routing_probe_cache_affinity_key(request: &ManifestRequest) -> Opt
 mod tests {
     use std::cell::RefCell;
     use std::path::Path;
-    use std::sync::mpsc;
 
     use super::*;
-    use crate::config::{
-        AlgorithmConfig, ArrivalPatternConfig, BackendConfig, BackendProfile, RegistrationConfig,
-        ScenarioMetadata, ServiceTimeConfig, StargateConfig, TokenDistributionConfig,
-        TrafficPatternConfig, UniformTrafficConfig,
-    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn k8s_run_finalization_policy_matches_existing_cleanup_truth_table() {
-        assert_eq!(
-            K8sRunFinalization::for_result(true, false),
-            K8sRunFinalization {
-                logs: K8sLogCollection::Collect,
-                resources: K8sResourceDisposition::Delete,
-            }
-        );
-        assert_eq!(
-            K8sRunFinalization::for_result(true, true),
-            K8sRunFinalization {
-                logs: K8sLogCollection::Collect,
-                resources: K8sResourceDisposition::KeepFailed,
-            }
-        );
-        assert_eq!(
-            K8sRunFinalization::for_result(false, true),
-            K8sRunFinalization {
-                logs: K8sLogCollection::Collect,
-                resources: K8sResourceDisposition::Delete,
-            }
-        );
-        assert_eq!(
-            K8sRunFinalization::for_result(false, false),
-            K8sRunFinalization {
-                logs: K8sLogCollection::Skip,
-                resources: K8sResourceDisposition::Delete,
-            }
-        );
+        for (failed, keep, expected) in [
+            (true, false, &["logs", "delete"][..]),
+            (true, true, &["logs"][..]),
+            (false, true, &["logs", "delete"][..]),
+            (false, false, &["delete"][..]),
+        ] {
+            assert_eq!(recorded_finalization_actions(failed, keep), expected);
+        }
     }
 
     #[test]
     fn k8s_run_finalization_executes_selected_cleanup_actions() {
         assert_eq!(
-            recorded_finalization_actions(K8sRunFinalization {
-                logs: K8sLogCollection::Collect,
-                resources: K8sResourceDisposition::Delete,
-            }),
-            vec!["logs", "delete"]
-        );
-        assert_eq!(
-            recorded_finalization_actions(K8sRunFinalization {
-                logs: K8sLogCollection::Collect,
-                resources: K8sResourceDisposition::KeepFailed,
-            }),
-            vec!["logs"]
-        );
-        assert_eq!(
-            recorded_finalization_actions(K8sRunFinalization {
-                logs: K8sLogCollection::Skip,
-                resources: K8sResourceDisposition::Delete,
-            }),
-            vec!["delete"]
+            recorded_finalization_actions(true, false),
+            ["logs", "delete"]
         );
     }
 
@@ -981,10 +673,8 @@ mod tests {
 
         finalize_k8s_run_with_actions(
             "power-of-two",
-            K8sRunFinalization {
-                logs: K8sLogCollection::Collect,
-                resources: K8sResourceDisposition::Delete,
-            },
+            true,
+            false,
             || {
                 actions.borrow_mut().push("logs");
                 Err(anyhow::anyhow!("log collection failed"))
@@ -995,14 +685,18 @@ mod tests {
             },
         );
 
-        assert_eq!(actions.into_inner(), vec!["logs", "delete"]);
+        assert_eq!(actions.into_inner(), ["logs", "delete"]);
     }
 
-    fn recorded_finalization_actions(finalization: K8sRunFinalization) -> Vec<&'static str> {
+    fn recorded_finalization_actions(
+        run_failed: bool,
+        keep_resources_on_failure: bool,
+    ) -> Vec<&'static str> {
         let actions = RefCell::new(Vec::new());
         finalize_k8s_run_with_actions(
             "power-of-two",
-            finalization,
+            run_failed,
+            keep_resources_on_failure,
             || {
                 actions.borrow_mut().push("logs");
                 Ok(())
@@ -1018,17 +712,15 @@ mod tests {
     #[test]
     fn k8s_benchmark_command_writes_metadata_before_strict_preflight_failure() {
         let tempdir = tempfile::tempdir().expect("tempdir should create");
-        let command = super::K8sBenchmarkCommand::from_metadata(
+        let error = run_k8s_benchmark_with_context(
             benchmark_config_for_test(),
             manifest_with_requests(vec![manifest_request(0, None)]),
             tempdir.path().to_path_buf(),
             false,
-            strict_failing_metadata(),
-        );
-
-        let error = command
-            .run_to_completion()
-            .expect_err("strict preflight should fail before kubectl context checks");
+            test_metadata(true),
+            || panic!("kubectl context must not be checked after failed preflight"),
+        )
+        .expect_err("strict preflight should fail before kubectl context checks");
 
         let metadata_path = tempdir.path().join("run-metadata.json");
         assert!(metadata_path.exists());
@@ -1050,20 +742,22 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir should create");
         let mut config = benchmark_config_for_test();
         config.algorithms.clear();
-        let command = super::K8sBenchmarkCommand::from_metadata(
+        let manifest_path = tempdir.path().join("manifest.json");
+        run_k8s_benchmark_with_context(
             config,
             manifest_with_requests(vec![manifest_request(0, None)]),
             tempdir.path().to_path_buf(),
             false,
-            passing_metadata(),
-        );
-
-        command
-            .run_with_context_check(|| Ok(()))
-            .expect("empty algorithm run should write command artifacts");
+            test_metadata(false),
+            || {
+                assert!(!manifest_path.exists());
+                Ok(())
+            },
+        )
+        .expect("empty algorithm run should write command artifacts");
 
         assert!(tempdir.path().join("run-metadata.json").exists());
-        assert!(tempdir.path().join("manifest.json").exists());
+        assert!(manifest_path.exists());
         let comparison: serde_json::Value = serde_json::from_slice(
             &std::fs::read(tempdir.path().join("comparison.json")).expect("comparison should read"),
         )
@@ -1084,17 +778,12 @@ mod tests {
         )
         .expect("manifest should write");
 
-        let replay_plan = K8sReplayPlan::load(&manifest_path).expect("replay plan should load");
+        let (manifest, routing_probe) =
+            load_k8s_replay(&manifest_path).expect("replay plan should load");
 
-        assert_eq!(replay_plan.manifest.requests.len(), 2);
-        assert_eq!(
-            replay_plan.routing_probe_request.request_id,
-            first_request.request_id
-        );
-        assert_eq!(
-            replay_plan.routing_probe_request.routing_key.as_deref(),
-            Some("tenant-a")
-        );
+        assert_eq!(manifest.requests.len(), 2);
+        assert_eq!(routing_probe.request_id, first_request.request_id);
+        assert_eq!(routing_probe.routing_key.as_deref(), Some("tenant-a"));
     }
 
     #[test]
@@ -1104,7 +793,7 @@ mod tests {
         write_manifest_json(&manifest_path, &manifest_with_requests(Vec::new()))
             .expect("manifest should write");
 
-        let error = K8sReplayPlan::load(&manifest_path)
+        let error = load_k8s_replay(&manifest_path)
             .expect_err("empty manifests should not produce a replay plan");
 
         assert!(
@@ -1119,50 +808,42 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir should create");
         let run_dir = tempdir.path().join("run-power-of-two");
 
-        let artifacts = K8sRunArtifacts::for_run_dir(&run_dir);
+        let artifacts = K8sRunArtifacts(&run_dir);
 
-        assert_eq!(
-            artifacts.collector_baseline_metrics,
-            run_dir.join("collector-baseline-metrics.prom")
-        );
-        assert_eq!(artifacts.requests, run_dir.join("requests.jsonl"));
-        assert_eq!(artifacts.stargate_metrics, run_dir.join("metrics.prom"));
-        assert_eq!(
-            artifacts.collector_metrics,
-            run_dir.join("collector-metrics.prom")
-        );
-        assert_eq!(artifacts.summary, run_dir.join("summary.json"));
+        for filename in [
+            "collector-baseline-metrics.prom",
+            "requests.jsonl",
+            "metrics.prom",
+            "collector-metrics.prom",
+            "summary.json",
+        ] {
+            assert_eq!(artifacts.path(filename), run_dir.join(filename));
+        }
     }
 
     #[test]
     fn k8s_readiness_gate_checks_health_metrics_and_routing_with_local_servers() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime should create");
-        let metrics = r#"
-stargate_active_inference_servers{model="dummy-model",routing_key="tenant-a"} 1
-"#;
-        let (stargate_endpoint, stargate_server) = spawn_fixed_text_server(&runtime, "", 2);
-        let stargate_base = stargate_endpoint
+        let metrics = "\nstargate_active_inference_servers{model=\"dummy-model\",routing_key=\"tenant-a\"} 1\n";
+        let stargate_server = FixedTextServer::spawn(&runtime, "", 2);
+        let stargate_base = stargate_server
+            .endpoint
             .strip_suffix("/metrics")
             .expect("test endpoint should include metrics suffix");
-        let (metrics_endpoint, metrics_server) = spawn_fixed_text_server(&runtime, metrics, 1);
-        let gate = K8sReadinessGate {
-            health_url: format!("{stargate_base}/healthz"),
-            metrics_endpoints: vec![metrics_endpoint],
-            routing_url: format!("{stargate_base}/v1/chat/completions"),
-            model: "dummy-model".to_string(),
-            expected_backend_count: 1,
-            routing_probe_request: manifest_request(7, Some("tenant-a")),
-            timeout: Duration::from_secs(1),
-        };
-
-        gate.wait(&runtime).expect("readiness gate should pass");
-
+        let metrics_server = FixedTextServer::spawn(&runtime, metrics, 1);
         runtime
-            .block_on(stargate_server)
-            .expect("stargate readiness server should finish");
-        runtime
-            .block_on(metrics_server)
-            .expect("metrics readiness server should finish");
+            .block_on(wait_for_k8s_readiness(
+                &format!("{stargate_base}/healthz"),
+                std::slice::from_ref(&metrics_server.endpoint),
+                &format!("{stargate_base}/v1/chat/completions"),
+                "dummy-model",
+                1,
+                &manifest_request(7, Some("tenant-a")),
+                Duration::from_secs(1),
+            ))
+            .expect("readiness gate should pass");
+        stargate_server.finish(&runtime);
+        metrics_server.finish(&runtime);
     }
 
     #[test]
@@ -1172,14 +853,14 @@ stargate_active_inference_servers{model="dummy-model",routing_key="tenant-a"} 1
 stargate_requests_total_total{model="dummy-model",status="ok"} 2
 pylon_requests_total_total{model="dummy-model",status="complete"} 3
 "#;
-        let (collector_endpoint, server) = spawn_fixed_text_server(&runtime, metrics, 1);
+        let server = FixedTextServer::spawn(&runtime, metrics, 1);
         let tempdir = tempfile::tempdir().expect("tempdir should create");
         let run = benchmark_run_for_test(
             tempdir.path(),
             "http://127.0.0.1:9/metrics",
-            &collector_endpoint,
+            &server.endpoint,
         );
-        let artifacts = K8sRunArtifacts::for_run_dir(&run.run_dir);
+        let artifacts = K8sRunArtifacts(&run.run_dir);
 
         let baseline = capture_collector_baseline(&runtime, &run, &artifacts)
             .expect("baseline should capture");
@@ -1191,22 +872,15 @@ pylon_requests_total_total{model="dummy-model",status="complete"} 3
                 pylon: 3.0,
             }
         );
-        assert_eq!(
-            std::fs::read_to_string(&artifacts.collector_baseline_metrics)
-                .expect("baseline artifact should read"),
-            metrics
-        );
-        runtime
-            .block_on(server)
-            .expect("metrics server should finish");
+        assert_file(&artifacts.path("collector-baseline-metrics.prom"), metrics);
+        server.finish(&runtime);
     }
 
     #[test]
     fn k8s_run_summary_writes_post_replay_artifacts_and_metric_deltas() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime should create");
-        let stargate_metrics = r#"
-stargate_active_inference_servers{model="dummy-model",routing_key=""} 1
-"#;
+        let stargate_metrics =
+            "\nstargate_active_inference_servers{model=\"dummy-model\",routing_key=\"\"} 1\n";
         let collector_baseline_metrics = r#"
 stargate_requests_total_total{model="dummy-model",status="ok"} 2
 pylon_requests_total_total{model="dummy-model",status="complete"} 2
@@ -1221,13 +895,15 @@ pylon_queue_admission_decisions_total_total{model_id="dummy-model",result="accep
 stargate_routing_selections_total_total{model="dummy-model",selection="primary"} 6
 stargate_routing_selections_total_total{model="dummy-model",selection="fallback"} 3
 "#;
-        let (stargate_endpoint, stargate_server) =
-            spawn_fixed_text_server(&runtime, stargate_metrics, 1);
-        let (collector_endpoint, collector_stop, collector_server) =
-            spawn_fixed_text_server_until_stop(&runtime, collector_post_metrics);
+        let stargate_server = FixedTextServer::spawn(&runtime, stargate_metrics, 1);
+        let collector_server = FixedTextServer::spawn(&runtime, collector_post_metrics, 0);
         let tempdir = tempfile::tempdir().expect("tempdir should create");
-        let run = benchmark_run_for_test(tempdir.path(), &stargate_endpoint, &collector_endpoint);
-        let artifacts = K8sRunArtifacts::for_run_dir(&run.run_dir);
+        let run = benchmark_run_for_test(
+            tempdir.path(),
+            &stargate_server.endpoint,
+            &collector_server.endpoint,
+        );
+        let artifacts = K8sRunArtifacts(&run.run_dir);
         let config = benchmark_config_for_test();
         let topology = topology_for(&config.backends);
 
@@ -1251,18 +927,13 @@ stargate_routing_selections_total_total{model="dummy-model",selection="fallback"
         assert_eq!(summary.queue_admission_summary.pylon_accepted_count, 3.0);
         assert_eq!(summary.routing_selection_summary.primary_count, 5.0);
         assert_eq!(summary.routing_selection_summary.fallback_count, 2.0);
-        assert_eq!(
-            std::fs::read_to_string(&artifacts.stargate_metrics)
-                .expect("stargate metrics artifact should read"),
-            stargate_metrics
-        );
-        assert_eq!(
-            std::fs::read_to_string(&artifacts.collector_metrics)
-                .expect("collector metrics artifact should read"),
-            collector_post_metrics
+        assert_file(&artifacts.path("metrics.prom"), stargate_metrics);
+        assert_file(
+            &artifacts.path("collector-metrics.prom"),
+            collector_post_metrics,
         );
         let summary_artifact = serde_json::from_slice::<RunSummary>(
-            &std::fs::read(&artifacts.summary).expect("summary artifact should read"),
+            &std::fs::read(artifacts.path("summary.json")).expect("summary artifact should read"),
         )
         .expect("summary artifact should parse");
         assert_eq!(
@@ -1271,15 +942,8 @@ stargate_routing_selections_total_total{model="dummy-model",selection="fallback"
                 .pylon_accepted_count,
             3.0
         );
-        runtime
-            .block_on(stargate_server)
-            .expect("stargate metrics server should finish");
-        collector_stop
-            .send(())
-            .expect("collector metrics server should receive stop signal");
-        runtime
-            .block_on(collector_server)
-            .expect("collector metrics server should finish");
+        stargate_server.finish(&runtime);
+        collector_server.finish(&runtime);
     }
 
     #[test]
@@ -1291,7 +955,7 @@ stargate_routing_selections_total_total{model="dummy-model",selection="fallback"
             "http://127.0.0.1:9/metrics",
             "http://127.0.0.1:9/metrics",
         );
-        let artifacts = K8sRunArtifacts::for_run_dir(&run.run_dir);
+        let artifacts = K8sRunArtifacts(&run.run_dir);
 
         let results = drive_k8s_replay(
             &runtime,
@@ -1304,10 +968,7 @@ stargate_routing_selections_total_total{model="dummy-model",selection="fallback"
         .expect("empty replay should complete without requests");
 
         assert!(results.is_empty());
-        assert_eq!(
-            std::fs::read_to_string(&artifacts.requests).expect("requests artifact should read"),
-            ""
-        );
+        assert_file(&artifacts.path("requests.jsonl"), "");
     }
 
     fn manifest_with_requests(requests: Vec<ManifestRequest>) -> Manifest {
@@ -1328,78 +989,43 @@ stargate_routing_selections_total_total{model="dummy-model",selection="fallback"
     }
 
     fn benchmark_config_for_test() -> BenchmarkConfig {
-        BenchmarkConfig {
-            name: "k8s-command-test".to_string(),
-            metadata: ScenarioMetadata::default(),
-            model: "dummy-model".to_string(),
-            seed: Some(7),
-            request_count: 1,
-            max_concurrency: 1,
-            tunnel_protocol: stargate_protocol::TunnelTransportProtocol::Custom,
-            stargates: StargateConfig { count: 1 },
-            backends: BackendConfig {
-                count: 1,
-                cluster_id_template: None,
-                pylons_per_cluster: 1,
-                profiles: Vec::new(),
-                profile: BackendProfile {
-                    name: "balanced".to_string(),
-                    weight: 1.0,
-                    max_concurrent_requests: None,
-                    kv_cache_capacity_tokens: 0,
-                    service_time_ms: ServiceTimeConfig {
-                        ttft_mean: 150,
-                        ttft_jitter_ms: 10,
-                        decode_tokens_per_s: 50,
-                        decode_jitter_ms: 0,
-                        prefill_tokens_per_s: None,
-                    },
-                    registration: RegistrationConfig {
-                        last_mean_input_tps: 100.0,
-                    },
-                },
-            },
-            traffic_pattern: TrafficPatternConfig::Uniform(UniformTrafficConfig {
-                routing_keys: 1,
-                cache_affinity_keys: 1,
-                input_tokens: TokenDistributionConfig::Constant { value: 100 },
-                output_tokens: TokenDistributionConfig::Constant { value: 20 },
-                arrival: ArrivalPatternConfig::Constant { interval_ms: 10 },
-            }),
-            degradation: crate::config::DegradationConfig::default(),
-            algorithms: vec![AlgorithmConfig {
-                name: "power-of-two".to_string(),
-                config: serde_json::json!({"default": "power-of-two"}),
-                pylon_queue_admission: None,
-            }],
-        }
+        serde_yaml_ng::from_str(
+            r#"
+name: k8s-command-test
+model: dummy-model
+seed: 7
+request_count: 1
+max_concurrency: 1
+backends:
+  count: 1
+  profile:
+    name: balanced
+    service_time_ms: { ttft_mean: 150, ttft_jitter_ms: 10, decode_tokens_per_s: 50 }
+    registration: { last_mean_input_tps: 100.0 }
+traffic_pattern:
+  kind: uniform
+  routing_keys: 1
+  cache_affinity_keys: 1
+  input_tokens: { distribution: constant, value: 100 }
+  output_tokens: { distribution: constant, value: 20 }
+  arrival: { distribution: constant, interval_ms: 10 }
+algorithms:
+  - name: power-of-two
+    config: { default: power-of-two }
+"#,
+        )
+        .expect("benchmark config fixture should parse")
     }
 
-    fn passing_metadata() -> crate::metadata::RunMetadata {
-        metadata_with_preflight(crate::metadata::PreflightReport {
-            checks: Vec::new(),
-            warning_count: 0,
-            failure_count: 0,
-            should_fail: false,
-        })
-    }
-
-    fn strict_failing_metadata() -> crate::metadata::RunMetadata {
-        metadata_with_preflight(crate::metadata::PreflightReport {
-            checks: vec![crate::metadata::PreflightCheck {
+    fn test_metadata(should_fail: bool) -> crate::metadata::RunMetadata {
+        let checks = should_fail
+            .then(|| crate::metadata::PreflightCheck {
                 name: "release-binary".to_string(),
                 level: crate::metadata::PreflightLevel::Failure,
                 message: "debug build".to_string(),
-            }],
-            warning_count: 0,
-            failure_count: 1,
-            should_fail: true,
-        })
-    }
-
-    fn metadata_with_preflight(
-        preflight: crate::metadata::PreflightReport,
-    ) -> crate::metadata::RunMetadata {
+            })
+            .into_iter()
+            .collect();
         crate::metadata::RunMetadata {
             schema_version: 3,
             benchmark_tier: BenchmarkTier::LocalK8sSmoke,
@@ -1413,7 +1039,12 @@ stargate_routing_selections_total_total{model="dummy-model",selection="fallback"
             rust: crate::metadata::RustMetadata::default(),
             host: crate::metadata::HostMetadata::default(),
             kubernetes: crate::metadata::KubernetesMetadata::default(),
-            preflight,
+            preflight: crate::metadata::PreflightReport {
+                checks,
+                warning_count: 0,
+                failure_count: usize::from(should_fail),
+                should_fail,
+            },
             known_limitations: Vec::new(),
         }
     }
@@ -1435,9 +1066,9 @@ stargate_routing_selections_total_total{model="dummy-model",selection="fallback"
         run_dir: &Path,
         stargate_metrics_endpoint: &str,
         collector_metrics_endpoint: &str,
-    ) -> crate::k8s::BenchmarkK8sRun {
+    ) -> BenchmarkK8sRun {
         std::fs::create_dir_all(run_dir).expect("run dir should create");
-        crate::k8s::BenchmarkK8sRun {
+        BenchmarkK8sRun {
             algorithm_name: "power-of-two".to_string(),
             manifest_path: run_dir.join("manifest.json"),
             run_dir: run_dir.to_path_buf(),
@@ -1478,100 +1109,77 @@ stargate_routing_selections_total_total{model="dummy-model",selection="fallback"
         }
     }
 
-    fn spawn_fixed_text_server(
-        runtime: &tokio::runtime::Runtime,
-        body: &'static str,
-        request_count: usize,
-    ) -> (String, tokio::task::JoinHandle<()>) {
-        let (addr_tx, addr_rx) = mpsc::channel();
-        let server = runtime.spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("test metrics server should bind");
-            addr_tx
-                .send(listener.local_addr().expect("local addr should exist"))
-                .expect("server addr should send");
-            for _ in 0..request_count {
-                let (mut socket, _) = listener.accept().await.expect("request should connect");
-                tokio::spawn(async move {
-                    let mut bytes = Vec::new();
-                    let mut buffer = [0u8; 1024];
-                    loop {
-                        let read = socket.read(&mut buffer).await.expect("request should read");
-                        if read == 0 {
-                            break;
-                        }
-                        bytes.extend_from_slice(&buffer[..read]);
-                        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    socket
-                        .write_all(response.as_bytes())
-                        .await
-                        .expect("response should write");
-                });
-            }
-        });
-        let addr = addr_rx.recv().expect("server addr should receive");
-        (format!("http://{addr}/metrics"), server)
+    fn assert_file(path: &Path, expected: &str) {
+        assert_eq!(
+            std::fs::read_to_string(path).expect("artifact should read"),
+            expected
+        );
     }
 
-    fn spawn_fixed_text_server_until_stop(
-        runtime: &tokio::runtime::Runtime,
-        body: &'static str,
-    ) -> (
-        String,
-        tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let (addr_tx, addr_rx) = mpsc::channel();
-        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
-        let server = runtime.spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
+    struct FixedTextServer {
+        endpoint: String,
+        stop: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl FixedTextServer {
+        fn spawn(
+            runtime: &tokio::runtime::Runtime,
+            body: &'static str,
+            request_count: usize,
+        ) -> Self {
+            let listener = runtime
+                .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
                 .expect("test metrics server should bind");
-            addr_tx
-                .send(listener.local_addr().expect("local addr should exist"))
-                .expect("server addr should send");
-            loop {
-                tokio::select! {
-                    _ = &mut stop_rx => break,
-                    accepted = listener.accept() => {
-                        let (mut socket, _) = accepted.expect("request should connect");
-                        tokio::spawn(async move {
-                            let mut bytes = Vec::new();
-                            let mut buffer = [0u8; 1024];
-                            loop {
-                                let read = socket.read(&mut buffer).await.expect("request should read");
-                                if read == 0 {
-                                    break;
-                                }
-                                bytes.extend_from_slice(&buffer[..read]);
-                                if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                                    break;
-                                }
-                            }
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                                body.len(),
-                                body
-                            );
-                            socket
-                                .write_all(response.as_bytes())
-                                .await
-                                .expect("response should write");
-                        });
+            let addr = listener.local_addr().expect("local addr should exist");
+            let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+            let task = runtime.spawn(async move {
+                let mut served = 0;
+                loop {
+                    let accepted = tokio::select! {
+                        _ = &mut stop_rx, if request_count == 0 => break,
+                        accepted = listener.accept() => accepted,
+                    };
+                    let (mut socket, _) = accepted.expect("request should connect");
+                    write_fixed_response(&mut socket, body).await;
+                    served += 1;
+                    if served == request_count {
+                        break;
                     }
                 }
+            });
+            Self {
+                endpoint: format!("http://{addr}/metrics"),
+                stop: stop_tx,
+                task,
             }
-        });
-        let addr = addr_rx.recv().expect("server addr should receive");
-        (format!("http://{addr}/metrics"), stop_tx, server)
+        }
+
+        fn finish(self, runtime: &tokio::runtime::Runtime) {
+            let _ = self.stop.send(());
+            runtime
+                .block_on(self.task)
+                .expect("metrics server should finish");
+        }
+    }
+
+    async fn write_fixed_response(socket: &mut tokio::net::TcpStream, body: &str) {
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut buffer).await.expect("request should read");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("response should write");
     }
 }

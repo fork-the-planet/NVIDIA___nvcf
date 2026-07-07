@@ -22,12 +22,8 @@ use tonic::Status;
 use tracing::warn;
 
 use crate::metrics::StargateMetrics;
-use stargate_proto::pb::{
-    CalibrationState, InferenceServerRegistration, InferenceServerStatus,
-    ModelCalibrationDirective, ModelStats, SubmitClusterCalibrationRequest,
-};
+use stargate_proto::pb::{InferenceServerRegistration, InferenceServerStatus, ModelStats};
 
-mod calibration;
 mod cluster_snapshots;
 mod clusters;
 mod keys;
@@ -48,31 +44,21 @@ pub(crate) use reservations::RoutingReservation;
 #[cfg(test)]
 use snapshots::RoutingTargetState;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StargateState {
     registrations: registration::RegistrationRegistry,
     routing: clusters::RoutingLifecycle,
 }
 
-impl Default for StargateState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl StargateState {
     pub fn new() -> Self {
-        Self::new_inner(None)
+        Self::default()
     }
 
     pub fn new_with_metrics(metrics: Arc<StargateMetrics>) -> Self {
-        Self::new_inner(Some(metrics))
-    }
-
-    fn new_inner(metrics: Option<Arc<StargateMetrics>>) -> Self {
         Self {
             registrations: registration::RegistrationRegistry::default(),
-            routing: clusters::RoutingLifecycle::new(metrics),
+            routing: clusters::RoutingLifecycle::new(Some(metrics)),
         }
     }
 
@@ -90,32 +76,15 @@ impl StargateState {
 
         let registration = ended.registration;
         let model_ids = ended.cleanup_model_ids;
-        registration
-            .cluster_generation
-            .calibrations
-            .release_owned_assignments(&registration.identity, &model_ids)
-            .await;
-        let routing_key = registration.identity.routing_key.clone();
         let targets: HashSet<RoutingTargetKey> = model_ids
             .into_iter()
-            .map(|model_id| RoutingTargetKey {
-                routing_key: routing_key.clone(),
-                model_id,
+            .map(|model_id| {
+                RoutingTargetKey::new(registration.identity.routing_key.clone(), model_id)
             })
             .collect();
         self.routing
             .remove_inference_server_targets(&registration, &targets)
             .await;
-    }
-
-    pub(crate) async fn submit_cluster_calibration(
-        &self,
-        routing_key: Option<String>,
-        request: &SubmitClusterCalibrationRequest,
-    ) -> Result<(), Status> {
-        self.registrations
-            .submit_cluster_calibration(routing_key, request)
-            .await
     }
 
     pub(crate) async fn apply_registration_update(
@@ -124,11 +93,10 @@ impl StargateState {
         update: &InferenceServerRegistration,
         reverse_connected: bool,
         rtt: Option<Duration>,
-    ) -> Vec<ModelCalibrationDirective> {
+    ) {
         let registration = running.generation();
         let identity = &registration.identity;
         let routing_key = &identity.routing_key;
-        let mut calibration_directives = Vec::new();
 
         // Publish the full heartbeat membership before per-target awaits while
         // retaining the cleanup union until every routing mutation commits.
@@ -138,16 +106,8 @@ impl StargateState {
             .begin_advertised_model_update(running, current_models);
         let removed_targets: HashSet<RoutingTargetKey> = removed_models
             .iter()
-            .map(|model_id| RoutingTargetKey {
-                routing_key: routing_key.clone(),
-                model_id: model_id.clone(),
-            })
+            .map(|model_id| RoutingTargetKey::new(routing_key.clone(), model_id))
             .collect();
-        registration
-            .cluster_generation
-            .calibrations
-            .release_owned_assignments(identity, &removed_models)
-            .await;
         self.routing
             .remove_inference_server_targets(&registration, &removed_targets)
             .await;
@@ -155,35 +115,22 @@ impl StargateState {
         for (model_id, model) in &update.models {
             // Identical stats across consecutive updates are expected because
             // heartbeat sends carry full registration snapshots.
-            let target = RoutingTargetKey {
-                routing_key: routing_key.clone(),
-                model_id: model_id.clone(),
-            };
-            let (calibration_directive, calibration_pending) = registration
-                .cluster_generation
-                .calibrations
-                .registration_decision(identity, model_id)
-                .await
-                .into_parts();
-            if let Some(directive) = calibration_directive {
-                calibration_directives.push(directive);
-            }
+            let target = RoutingTargetKey::new(routing_key.clone(), model_id);
             let stats = model.stats.clone().unwrap_or_default();
             let model_status = InferenceServerStatus::try_from(model.status)
                 .unwrap_or(InferenceServerStatus::Unknown);
-            let effective_status =
-                if (identity.reverse_tunnel && !reverse_connected) || calibration_pending {
-                    InferenceServerStatus::Inactive
-                } else if model.stats.is_none() {
-                    warn!(
-                        inference_server_id = %identity.inference_server_id,
-                        model_id = %model_id,
-                        "missing model stats in registration; setting model status to inactive"
-                    );
-                    InferenceServerStatus::Inactive
-                } else {
-                    model_status
-                };
+            let effective_status = if identity.reverse_tunnel && !reverse_connected {
+                InferenceServerStatus::Inactive
+            } else if model.stats.is_none() {
+                warn!(
+                    inference_server_id = %identity.inference_server_id,
+                    model_id = %model_id,
+                    "missing model stats in registration; setting model status to inactive"
+                );
+                InferenceServerStatus::Inactive
+            } else {
+                model_status
+            };
 
             if effective_status == InferenceServerStatus::Active {
                 let Some(current_rtt) = rtt else {
@@ -217,12 +164,9 @@ impl StargateState {
         }
 
         self.registrations.finish_advertised_model_update(running);
-        calibration_directives
     }
 
-    /// Returns all active inference server snapshots for a
-    /// `(routing_key, model_id)` pair. The HTTP proxy calls this to get the
-    /// candidate set that the load balancer chooses from.
+    /// Returns active snapshots for a `(routing_key, model_id)` pair for proxy load balancing.
     pub async fn candidates_for_target(
         &self,
         target: &RoutingTargetKey,
@@ -258,15 +202,11 @@ impl StargateState {
             .await
     }
 
-    /// Looks up the registration for an inference server that declared
-    /// `reverse_tunnel = true` during gRPC registration. Returns `None` if
-    /// the server is not registered or was registered without reverse tunnel
-    /// mode.
-    ///
-    /// Called during the QUIC reverse-tunnel handshake to confirm the
-    /// connecting server was expected and to retrieve the auth-derived
-    /// routing key for comparison against the QUIC handshake's own auth
-    /// result.
+    pub(crate) async fn list_active_models_for_debug(&self) -> Vec<String> {
+        self.routing.list_active_models_for_debug().await
+    }
+
+    /// Looks up a registered reverse-tunnel server during QUIC handshake validation, returning its auth-derived routing key for comparison with handshake auth; returns `None` for missing or direct registrations.
     pub(crate) fn reverse_tunnel_registration(
         &self,
         inference_server_id: &str,

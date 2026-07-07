@@ -46,13 +46,12 @@ pub(super) fn eligible_cluster_candidate_count(
     candidates: &[RoutedClusterSnapshot],
     excluded_cluster_ids: Option<&HashSet<String>>,
 ) -> usize {
-    match excluded_cluster_ids {
-        Some(excluded_cluster_ids) => candidates
+    excluded_cluster_ids.map_or(candidates.len(), |excluded_cluster_ids| {
+        candidates
             .iter()
             .filter(|candidate| !excluded_cluster_ids.contains(&candidate.cluster_id))
-            .count(),
-        None => candidates.len(),
-    }
+            .count()
+    })
 }
 
 pub(super) fn input_work_admission_rejection_reason(
@@ -87,17 +86,11 @@ pub(super) fn input_work_admission_rejection_response(
         "rejecting request before routing due to input-work admission"
     );
 
-    let mut response = Response::new(Body::from(ERROR_INPUT_WORK_LIMIT_EXCEEDED_BODY));
-    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-    response.headers_mut().insert(
-        HeaderName::from_static(HEADER_STARGATE_ERROR_CODE),
-        HeaderValue::from_static(ERROR_INPUT_WORK_LIMIT_EXCEEDED),
-    );
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    response
+    json_error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        ERROR_INPUT_WORK_LIMIT_EXCEEDED,
+        ERROR_INPUT_WORK_LIMIT_EXCEEDED_BODY,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -124,18 +117,16 @@ pub(super) enum NoRoutingFinalization {
 
 pub(super) fn classify_no_routing_choice(inputs: NoRoutingChoiceInputs) -> NoRoutingChoiceAction {
     if inputs.num_candidates > 0 && inputs.eligible_candidate_count > 0 && inputs.retry_allowed {
-        return NoRoutingChoiceAction::RetryRouting;
-    }
-
-    if inputs.num_candidates == 0
+        NoRoutingChoiceAction::RetryRouting
+    } else if inputs.num_candidates == 0
         && !inputs.target_registered
         && inputs.failed_backend_count == 0
         && inputs.failed_cluster_count == 0
     {
-        return NoRoutingChoiceAction::Finalize(NoRoutingFinalization::NoCandidatesNotFound);
+        NoRoutingChoiceAction::Finalize(NoRoutingFinalization::NoCandidatesNotFound)
+    } else {
+        NoRoutingChoiceAction::Finalize(NoRoutingFinalization::ServiceUnavailable)
     }
-
-    NoRoutingChoiceAction::Finalize(NoRoutingFinalization::ServiceUnavailable)
 }
 
 pub(super) struct NoRoutingFinalizationContext<'a> {
@@ -201,11 +192,10 @@ pub(super) fn routing_retry_deadline(
 }
 
 pub(super) async fn sleep_before_routing_retry(deadline: Option<Instant>) {
-    let Some(deadline) = deadline else {
-        return;
-    };
     // The retry deadline may pass between checks; clamp elapsed deadlines to no sleep.
-    let remaining = deadline.saturating_duration_since(Instant::now());
+    let remaining = deadline.map_or(Duration::ZERO, |deadline| {
+        deadline.saturating_duration_since(Instant::now())
+    });
     if remaining.is_zero() {
         return;
     }
@@ -215,11 +205,23 @@ pub(super) async fn sleep_before_routing_retry(deadline: Option<Instant>) {
 }
 
 fn no_eligible_candidates_response() -> Response<Body> {
-    let mut response = Response::new(Body::from(ERROR_NO_ELIGIBLE_CANDIDATES_BODY));
-    *response.status_mut() = StatusCode::NOT_FOUND;
+    json_error_response(
+        StatusCode::NOT_FOUND,
+        ERROR_NO_ELIGIBLE_CANDIDATES,
+        ERROR_NO_ELIGIBLE_CANDIDATES_BODY,
+    )
+}
+
+fn json_error_response(
+    status: StatusCode,
+    error_code: &'static str,
+    body: &'static str,
+) -> Response<Body> {
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
     response.headers_mut().insert(
         HeaderName::from_static(HEADER_STARGATE_ERROR_CODE),
-        HeaderValue::from_static(ERROR_NO_ELIGIBLE_CANDIDATES),
+        HeaderValue::from_static(error_code),
     );
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -261,16 +263,31 @@ mod tests {
         }
     }
 
+    fn routing_target() -> RoutingTargetKey {
+        RoutingTargetKey::new(None, "model-a")
+    }
+
+    fn no_routing_inputs(
+        num_candidates: usize,
+        eligible_candidate_count: usize,
+    ) -> NoRoutingChoiceInputs {
+        NoRoutingChoiceInputs {
+            num_candidates,
+            eligible_candidate_count,
+            target_registered: false,
+            failed_backend_count: 0,
+            failed_cluster_count: 0,
+            retry_allowed: true,
+        }
+    }
+
     #[test]
     fn input_work_admission_rejects_overloaded_pool() {
         let mut candidate = cluster_candidate("cluster-a");
         candidate.stats.queued_input_size = 300;
         candidate.stats.last_mean_input_tps = 100.0;
         let config = LoadBalancerAlgorithmConfig::from(LoadBalancerAlgorithm::PowerOfTwo);
-        let target = RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-a".to_string(),
-        };
+        let target = routing_target();
         let request = input_work_admission_request(&target, 50);
 
         assert_eq!(
@@ -286,10 +303,7 @@ mod tests {
         candidate.stats.queued_input_size = 0;
         candidate.stats.last_mean_input_tps = 100.0;
         let config = LoadBalancerAlgorithmConfig::from(LoadBalancerAlgorithm::PowerOfTwo);
-        let target = RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-a".to_string(),
-        };
+        let target = routing_target();
         let request = input_work_admission_request(&target, 50);
 
         assert_eq!(
@@ -303,10 +317,7 @@ mod tests {
         let mut candidate = cluster_candidate("cluster-a");
         candidate.stats.last_mean_input_tps = 0.0;
         let config = LoadBalancerAlgorithmConfig::from(LoadBalancerAlgorithm::PowerOfTwo);
-        let target = RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-a".to_string(),
-        };
+        let target = routing_target();
         let request = input_work_admission_request(&target, 50);
 
         assert_eq!(
@@ -318,10 +329,7 @@ mod tests {
     #[test]
     fn input_work_admission_for_pulsar_includes_low_free_kv_capacity() {
         let config = LoadBalancerAlgorithmConfig::from(LoadBalancerAlgorithm::Pulsar);
-        let target = RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-a".to_string(),
-        };
+        let target = routing_target();
         let request = input_work_admission_request(&target, 100);
         let mut free_kv = cluster_candidate("free-kv");
         free_kv.stats.queued_input_size = 50;
@@ -346,10 +354,7 @@ mod tests {
     fn input_work_admission_for_pulsar_excludes_low_free_kv_when_considered() {
         let mut config = LoadBalancerAlgorithmConfig::from(LoadBalancerAlgorithm::Pulsar);
         config.request_policy_mut().consider_kv_free_tokens = true;
-        let target = RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-a".to_string(),
-        };
+        let target = routing_target();
         let request = input_work_admission_request(&target, 100);
         let mut low_free_kv = cluster_candidate("low-free-kv");
         low_free_kv.stats.queued_input_size = 0;
@@ -367,35 +372,21 @@ mod tests {
     #[test]
     fn no_routing_choice_retries_only_with_eligible_candidates_and_budget() {
         assert_eq!(
-            classify_no_routing_choice(NoRoutingChoiceInputs {
-                num_candidates: 2,
-                eligible_candidate_count: 1,
-                target_registered: false,
-                failed_backend_count: 0,
-                failed_cluster_count: 0,
-                retry_allowed: true,
-            }),
+            classify_no_routing_choice(no_routing_inputs(2, 1)),
             NoRoutingChoiceAction::RetryRouting
         );
         assert_eq!(
             classify_no_routing_choice(NoRoutingChoiceInputs {
-                num_candidates: 2,
-                eligible_candidate_count: 0,
-                target_registered: false,
                 failed_backend_count: 1,
                 failed_cluster_count: 1,
-                retry_allowed: true,
+                ..no_routing_inputs(2, 0)
             }),
             NoRoutingChoiceAction::Finalize(NoRoutingFinalization::ServiceUnavailable)
         );
         assert_eq!(
             classify_no_routing_choice(NoRoutingChoiceInputs {
-                num_candidates: 2,
-                eligible_candidate_count: 1,
-                target_registered: false,
-                failed_backend_count: 0,
-                failed_cluster_count: 0,
                 retry_allowed: false,
+                ..no_routing_inputs(2, 1)
             }),
             NoRoutingChoiceAction::Finalize(NoRoutingFinalization::ServiceUnavailable)
         );
@@ -404,14 +395,7 @@ mod tests {
     #[test]
     fn no_routing_choice_finalizes_empty_route_as_not_found() {
         assert_eq!(
-            classify_no_routing_choice(NoRoutingChoiceInputs {
-                num_candidates: 0,
-                eligible_candidate_count: 0,
-                target_registered: false,
-                failed_backend_count: 0,
-                failed_cluster_count: 0,
-                retry_allowed: true,
-            }),
+            classify_no_routing_choice(no_routing_inputs(0, 0)),
             NoRoutingChoiceAction::Finalize(NoRoutingFinalization::NoCandidatesNotFound)
         );
     }
@@ -420,12 +404,8 @@ mod tests {
     fn no_routing_choice_finalizes_registered_empty_route_as_unavailable() {
         assert_eq!(
             classify_no_routing_choice(NoRoutingChoiceInputs {
-                num_candidates: 0,
-                eligible_candidate_count: 0,
                 target_registered: true,
-                failed_backend_count: 0,
-                failed_cluster_count: 0,
-                retry_allowed: true,
+                ..no_routing_inputs(0, 0)
             }),
             NoRoutingChoiceAction::Finalize(NoRoutingFinalization::ServiceUnavailable)
         );
@@ -435,12 +415,8 @@ mod tests {
     fn no_routing_choice_finalizes_failed_empty_route_as_unavailable() {
         assert_eq!(
             classify_no_routing_choice(NoRoutingChoiceInputs {
-                num_candidates: 0,
-                eligible_candidate_count: 0,
-                target_registered: false,
                 failed_backend_count: 1,
-                failed_cluster_count: 0,
-                retry_allowed: true,
+                ..no_routing_inputs(0, 0)
             }),
             NoRoutingChoiceAction::Finalize(NoRoutingFinalization::ServiceUnavailable)
         );

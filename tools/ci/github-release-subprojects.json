@@ -16,8 +16,9 @@
       "id": "nvcf-compute-plane-stack",
       "path": "deploy/stacks/nvcf-compute-plane",
       "service_name": "nvcf-compute-plane-stack",
-      "tag_format": "nvcf-compute-plane-stack-v${version}",
-      "version_file": "VERSION"
+      "tag_format": "deploy/stacks/nvcf-compute-plane/v${version}",
+      "version_file": "VERSION",
+      "dev_prerelease": true
     },
     {
       "id": "grpc-proxy",
@@ -115,7 +116,7 @@
       "id": "nvca",
       "path": "src/compute-plane-services/nvca",
       "service_name": "nvca",
-      "tag_format": "nvca-v${version}",
+      "tag_format": "src/compute-plane-services/nvca/v${version}",
       "version_file": "VERSION",
       "dev_prerelease": true
     },

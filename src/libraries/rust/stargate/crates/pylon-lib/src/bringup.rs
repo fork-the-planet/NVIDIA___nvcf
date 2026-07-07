@@ -13,26 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::time::Duration;
-
-use crate::stats::PylonMetrics;
-#[cfg(test)]
-use reqwest::StatusCode;
 
 mod calibration;
 mod lifecycle;
 mod upstream;
 
-pub(crate) use calibration::run_assigned_cluster_calibration;
-#[cfg(test)]
-use calibration::*;
-pub(crate) use lifecycle::start_bringup_supervisor;
-#[cfg(test)]
-use lifecycle::*;
-pub(crate) use upstream::BringupError;
-#[cfg(test)]
-use upstream::*;
+pub use calibration::run_startup_calibration;
+pub use lifecycle::{BringupHandle, start_bringup};
+pub use upstream::BringupError;
 
 const DEFAULT_ACTIVE_CANARY_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_CANARY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,6 +37,11 @@ pub struct BringupConfig {
     pub active_canary_interval: Duration,
     pub canary_timeout: Duration,
     pub canary_max_generation_threshold: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct CalibrationConfig {
+    pub health_timeout: Duration,
     pub calibration_requests: usize,
     pub calibration_prompt_units: usize,
     pub calibration_max_concurrency: usize,
@@ -61,6 +55,14 @@ impl Default for BringupConfig {
             active_canary_interval: DEFAULT_ACTIVE_CANARY_INTERVAL,
             canary_timeout: DEFAULT_CANARY_TIMEOUT,
             canary_max_generation_threshold: DEFAULT_CANARY_MAX_GENERATION_THRESHOLD,
+        }
+    }
+}
+
+impl Default for CalibrationConfig {
+    fn default() -> Self {
+        Self {
+            health_timeout: DEFAULT_CANARY_TIMEOUT,
             calibration_requests: DEFAULT_CALIBRATION_REQUESTS,
             calibration_prompt_units: DEFAULT_CALIBRATION_PROMPT_UNITS,
             calibration_max_concurrency: DEFAULT_CALIBRATION_MAX_CONCURRENCY,
@@ -69,49 +71,44 @@ impl Default for BringupConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModelBringupState {
-    ConnectingUnavailable,
-    Recovering,
-    AdvertisingActive,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct BringupTaskConfig {
     pub upstream_http_base_url: String,
     pub model_id: String,
     pub config: BringupConfig,
-    pub metrics: Option<Arc<PylonMetrics>>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{calibration::*, lifecycle::*, upstream::*};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use axum::Json;
     use axum::Router;
     use axum::extract::State;
+    use axum::http::HeaderMap;
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
+    use reqwest::StatusCode;
     use serde_json::Value;
     use stargate_proto::pb::InferenceServerStatus;
+    use stargate_protocol::tunnel_contract::HEADER_REQUEST_ID;
     use tokio::net::TcpListener;
     use tokio::sync::{Barrier, Mutex, Notify};
     use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
 
     use crate::runtime_state::PylonRuntimeState;
+    use crate::stats::PylonMetrics;
 
-    async fn wait_for_bringup_state(
-        runtime_state: &PylonRuntimeState,
-        expected: ModelBringupState,
-    ) {
+    async fn wait_for_bringup_ready(runtime_state: &PylonRuntimeState, expected: bool) {
         tokio::time::timeout(Duration::from_secs(2), async {
             let mut poll = tokio::time::interval(Duration::from_millis(1));
             loop {
                 poll.tick().await;
-                if runtime_state.model_bringup("test-model") == Some(expected) {
+                if runtime_state.model_bringup_ready("test-model") == Some(expected) {
                     return;
                 }
             }
@@ -129,6 +126,21 @@ mod tests {
         }
     }
 
+    fn test_runtime_state() -> PylonRuntimeState {
+        PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()])
+    }
+
+    fn test_task_config(
+        upstream_http_base_url: String,
+        config: BringupConfig,
+    ) -> BringupTaskConfig {
+        BringupTaskConfig {
+            upstream_http_base_url,
+            model_id: "test-model".to_string(),
+            config,
+        }
+    }
+
     #[test]
     fn detects_prompt_too_long_errors() {
         assert!(is_prompt_too_long(
@@ -139,32 +151,6 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             &Some("prompt too long".to_string())
         ));
-    }
-
-    #[test]
-    fn bringup_lifecycle_state_classifies_actions() {
-        let mut lifecycle = BringupLifecycleState::default();
-        assert_eq!(
-            lifecycle.next_action(),
-            BringupLifecycleAction::AdvertiseInitialActive
-        );
-
-        lifecycle.complete_initial_bringup();
-        assert_eq!(lifecycle, BringupLifecycleState::Active);
-        assert_eq!(
-            lifecycle.next_action(),
-            BringupLifecycleAction::AdvertiseActive
-        );
-
-        lifecycle.require_recovery_canary();
-        assert_eq!(lifecycle, BringupLifecycleState::Recovering);
-        assert_eq!(
-            lifecycle.next_action(),
-            BringupLifecycleAction::RunRecoveryCanary
-        );
-
-        lifecycle.complete_recovery_canary();
-        assert_eq!(lifecycle, BringupLifecycleState::Active);
     }
 
     #[tokio::test]
@@ -179,13 +165,7 @@ mod tests {
     async fn canary_request_detects_runaway_generation() {
         let base_url = spawn_test_server(TestServerState {
             completion_tokens: 7,
-            prompt_too_long_above: None,
-            calibration_barrier: None,
-            completion_delay: None,
-            in_flight: None,
-            max_in_flight: None,
-            canary_failures_remaining: None,
-            health_ok: None,
+            ..TestServerState::default()
         })
         .await;
         let client = reqwest::Client::new();
@@ -200,138 +180,145 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn calibration_reduces_prompt_size_after_prompt_too_long() {
+    async fn pylon_generated_request_ids_include_kind_uuid_and_monotonic_counter() {
+        let request_ids = Arc::new(Mutex::new(Vec::new()));
         let base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: Some(700),
-            calibration_barrier: None,
-            completion_delay: None,
-            in_flight: None,
-            max_in_flight: None,
-            canary_failures_remaining: None,
-            health_ok: None,
+            request_ids: Some(request_ids.clone()),
+            ..TestServerState::default()
         })
         .await;
         let client = reqwest::Client::new();
-        let config = BringupConfig {
-            calibration_requests: 5,
-            calibration_prompt_units: 1536,
-            calibration_timeout: Duration::from_secs(1),
-            ..BringupConfig::default()
-        };
 
-        let observed = run_calibration(&client, &base_url, "test-model", &config)
+        send_canary_request(&client, &base_url, "test-model", Duration::from_secs(1), 7)
             .await
-            .expect("calibration should back off and succeed");
+            .expect("canary request should succeed");
+        send_calibration_batch(
+            &client,
+            &base_url,
+            "test-model",
+            Duration::from_secs(1),
+            CALIBRATION_PROMPT_UNITS_FLOOR,
+            2,
+        )
+        .await
+        .expect("calibration batch should succeed");
+
+        let request_ids = request_ids.lock().await.clone();
+        assert_eq!(request_ids.len(), 3);
+
+        let parsed = request_ids
+            .iter()
+            .map(|request_id| parse_pylon_generated_request_id(request_id))
+            .collect::<Vec<_>>();
+        assert_eq!(parsed[0].kind, "canary");
+        assert!(
+            parsed[1..]
+                .iter()
+                .all(|parsed| parsed.kind == "calibration")
+        );
+        let request_scope = parsed[0].uuid;
+        assert!(
+            parsed
+                .iter()
+                .all(|request_id| request_id.uuid == request_scope)
+        );
+        assert!(parsed.iter().all(|request_id| request_id.counter > 0));
+
+        let canary_counter = parsed[0].counter;
+        let mut calibration_counters = parsed[1..]
+            .iter()
+            .map(|parsed| parsed.counter)
+            .collect::<Vec<_>>();
+        calibration_counters.sort_unstable();
+        calibration_counters.dedup();
+        assert_eq!(calibration_counters.len(), 2);
+        assert!(
+            calibration_counters
+                .iter()
+                .all(|counter| *counter > canary_counter)
+        );
+    }
+
+    #[tokio::test]
+    async fn calibration_reduces_prompt_size_after_prompt_too_long() {
+        let observed = calibrate_after_prompt_backoff(5).await;
         assert!(observed.is_finite());
         assert!(observed > 0.0);
     }
 
     #[tokio::test]
     async fn single_request_calibration_completes_after_prompt_backoff() {
-        let base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: Some(700),
-            calibration_barrier: None,
-            completion_delay: None,
-            in_flight: None,
-            max_in_flight: None,
-            canary_failures_remaining: None,
-            health_ok: None,
-        })
-        .await;
-        let client = reqwest::Client::new();
-        let config = BringupConfig {
-            calibration_requests: 1,
-            calibration_prompt_units: 1536,
-            calibration_timeout: Duration::from_secs(1),
-            ..BringupConfig::default()
-        };
-
-        let observed = run_calibration(&client, &base_url, "test-model", &config)
-            .await
-            .expect("single-request calibration should complete with one valid configured sample");
+        let observed = calibrate_after_prompt_backoff(1).await;
         assert!(observed.is_finite());
         assert!(observed > 0.0);
     }
 
-    #[test]
-    fn calibration_plan_sweeps_tokens_at_increasing_concurrency_levels() {
-        let config = BringupConfig {
-            calibration_requests: 5,
-            calibration_prompt_units: 1024,
-            calibration_max_concurrency: 4,
-            ..BringupConfig::default()
+    async fn calibrate_after_prompt_backoff(calibration_requests: usize) -> f64 {
+        let base_url = spawn_test_server(TestServerState {
+            prompt_too_long_above: Some(700),
+            ..TestServerState::default()
+        })
+        .await;
+        let client = reqwest::Client::new();
+        let config = CalibrationConfig {
+            calibration_requests,
+            calibration_prompt_units: 1536,
+            calibration_timeout: Duration::from_secs(1),
+            ..CalibrationConfig::default()
         };
 
-        let plan = calibration_plan(&config);
+        run_calibration(&client, &base_url, "test-model", &config)
+            .await
+            .expect("calibration should back off and succeed")
+    }
 
-        assert_eq!(calibration_plan_request_count(&plan), 5);
-        assert_eq!(
-            plan,
-            vec![
-                CalibrationBatch {
-                    prompt_units: CALIBRATION_PROMPT_UNITS_FLOOR,
-                    concurrency: 1,
-                },
-                CalibrationBatch {
-                    prompt_units: 1024,
-                    concurrency: 4,
-                },
-            ]
-        );
+    #[test]
+    fn calibration_plan_sweeps_tokens_at_increasing_concurrency_levels() {
+        assert_calibration_plan(5, 4, &[(CALIBRATION_PROMPT_UNITS_FLOOR, 1), (1024, 4)]);
     }
 
     #[test]
     fn calibration_plan_preserves_linear_ramp_when_quadrants_cannot_be_sampled() {
-        let config = BringupConfig {
-            calibration_requests: 3,
-            calibration_prompt_units: 1024,
-            calibration_max_concurrency: 4,
-            ..BringupConfig::default()
-        };
+        assert_calibration_plan(3, 4, &[(CALIBRATION_PROMPT_UNITS_FLOOR, 1), (1024, 2)]);
+    }
 
-        let plan = calibration_plan(&config);
-
-        assert_eq!(calibration_plan_request_count(&plan), 3);
-        assert_eq!(
-            plan,
-            vec![
-                CalibrationBatch {
-                    prompt_units: CALIBRATION_PROMPT_UNITS_FLOOR,
-                    concurrency: 1,
-                },
-                CalibrationBatch {
-                    prompt_units: 1024,
-                    concurrency: 2,
-                },
-            ]
+    #[test]
+    fn serial_calibration_plan_preserves_full_prompt_ramp() {
+        assert_calibration_plan(
+            3,
+            1,
+            &[(CALIBRATION_PROMPT_UNITS_FLOOR, 1), (640, 1), (1024, 1)],
         );
     }
 
     #[test]
     fn single_calibration_request_does_not_expand_to_max_concurrency() {
-        let config = BringupConfig {
-            calibration_requests: 1,
-            calibration_prompt_units: 1024,
-            calibration_max_concurrency: 4,
-            ..BringupConfig::default()
-        };
-
-        let plan = calibration_plan(&config);
-
-        assert_eq!(calibration_plan_request_count(&plan), 1);
-        assert_eq!(
-            plan,
-            vec![CalibrationBatch {
-                prompt_units: 1024,
-                concurrency: 1,
-            }]
-        );
+        assert_calibration_plan(1, 4, &[(1024, 1)]);
     }
 
-    fn calibration_plan_request_count(plan: &[CalibrationBatch]) -> usize {
-        plan.iter().map(|batch| batch.concurrency).sum()
+    fn assert_calibration_plan(
+        calibration_requests: usize,
+        calibration_max_concurrency: usize,
+        expected: &[(usize, usize)],
+    ) {
+        let config = CalibrationConfig {
+            calibration_requests,
+            calibration_prompt_units: 1024,
+            calibration_max_concurrency,
+            ..CalibrationConfig::default()
+        };
+        let plan = calibration_plan(&config);
+
+        assert_eq!(
+            plan.iter().map(|batch| batch.concurrency).sum::<usize>(),
+            calibration_requests
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|batch| (batch.prompt_units, batch.concurrency))
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[tokio::test]
@@ -339,14 +326,10 @@ mod tests {
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
         let base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: None,
             calibration_barrier: Some(Arc::new(Barrier::new(3))),
-            completion_delay: None,
             in_flight: Some(in_flight),
             max_in_flight: Some(max_in_flight.clone()),
-            canary_failures_remaining: None,
-            health_ok: None,
+            ..TestServerState::default()
         })
         .await;
         let client = reqwest::Client::new();
@@ -379,33 +362,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assigned_cluster_calibration_records_duration_metric() {
+    async fn startup_calibration_records_duration_metric() {
         let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: None,
-            calibration_barrier: None,
-            completion_delay: None,
-            in_flight: None,
-            max_in_flight: None,
-            canary_failures_remaining: None,
-            health_ok: None,
-        })
-        .await;
-        let last_mean_input_tps = run_assigned_cluster_calibration(&BringupTaskConfig {
-            upstream_http_base_url: base_url,
-            model_id: "test-model".to_string(),
-            config: BringupConfig {
+        let base_url = spawn_test_server(TestServerState::default()).await;
+        let model_ids = vec!["test-model".to_string()];
+        let calibration = run_startup_calibration(
+            &base_url,
+            &model_ids,
+            &CalibrationConfig {
+                health_timeout: Duration::from_secs(1),
                 calibration_requests: 5,
-                active_canary_interval: Duration::ZERO,
-                canary_timeout: Duration::from_secs(1),
                 calibration_timeout: Duration::from_secs(1),
-                ..BringupConfig::default()
+                ..CalibrationConfig::default()
             },
-            metrics: Some(metrics.clone()),
-        })
+            Some(metrics.clone()),
+        )
         .await
-        .expect("assigned calibration should produce a local measurement");
+        .expect("startup calibration should produce a local measurement");
+        let last_mean_input_tps = calibration["test-model"];
         assert!(last_mean_input_tps > 0.0);
 
         let body = metrics.gather_text().expect("metrics should encode");
@@ -418,33 +392,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assigned_cluster_calibration_does_not_measure_unhealthy_upstream() {
+    async fn startup_calibration_rejects_zero_requests() {
+        let base_url = spawn_test_server(TestServerState::default()).await;
+
+        let error = run_startup_calibration(
+            &base_url,
+            &["test-model".to_string()],
+            &CalibrationConfig {
+                calibration_requests: 0,
+                ..CalibrationConfig::default()
+            },
+            None,
+        )
+        .await
+        .expect_err("zero requests cannot produce a valid input-TPS bootstrap");
+
+        assert!(matches!(
+            error,
+            BringupError::InvalidCalibrationConfig(
+                "calibration_requests must be greater than zero"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_calibration_does_not_measure_unhealthy_upstream() {
         let health_ok = Arc::new(AtomicBool::new(false));
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
         let base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: None,
-            calibration_barrier: None,
-            completion_delay: None,
             in_flight: Some(in_flight),
             max_in_flight: Some(max_in_flight.clone()),
-            canary_failures_remaining: None,
             health_ok: Some(health_ok),
+            ..TestServerState::default()
         })
         .await;
 
-        let error = run_assigned_cluster_calibration(&BringupTaskConfig {
-            upstream_http_base_url: base_url,
-            model_id: "test-model".to_string(),
-            config: BringupConfig {
+        let error = run_startup_calibration(
+            &base_url,
+            &["test-model".to_string()],
+            &CalibrationConfig {
+                health_timeout: Duration::from_secs(1),
                 calibration_requests: 1,
-                canary_timeout: Duration::from_secs(1),
                 calibration_timeout: Duration::from_secs(1),
-                ..BringupConfig::default()
+                ..CalibrationConfig::default()
             },
-            metrics: None,
-        })
+            None,
+        )
         .await
         .expect_err("unhealthy upstream must not be measured for an assignment");
 
@@ -458,138 +452,70 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_canary_runs_after_initial_health_activation() {
-        let canary_requests = Arc::new(AtomicUsize::new(0));
-        let initial_canary_started = Arc::new(Notify::new());
-        let release_initial_canary = Arc::new(Notify::new());
-        let recovery_canary_started = Arc::new(Notify::new());
-        let release_recovery_canary = Arc::new(Notify::new());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server_canary_requests = canary_requests.clone();
-        let server_initial_canary_started = initial_canary_started.clone();
-        let server_release_initial_canary = release_initial_canary.clone();
-        let server_recovery_canary_started = recovery_canary_started.clone();
-        let server_release_recovery_canary = release_recovery_canary.clone();
-        let server = tokio::spawn(async move {
-            let app = Router::new()
-                .route("/health", get(|| async { StatusCode::OK }))
-                .route(
-                    "/v1/chat/completions",
-                    post(move |Json(request): Json<Value>| {
-                        let canary_requests = server_canary_requests.clone();
-                        let initial_canary_started = server_initial_canary_started.clone();
-                        let release_initial_canary = server_release_initial_canary.clone();
-                        let recovery_canary_started = server_recovery_canary_started.clone();
-                        let release_recovery_canary = server_release_recovery_canary.clone();
-                        async move {
-                            let prompt = request
-                                .get("messages")
-                                .and_then(|value| value.as_array())
-                                .and_then(|messages| messages.first())
-                                .and_then(|message| message.get("content"))
-                                .and_then(|value| value.as_str())
-                                .unwrap_or_default();
-                            let completion_tokens = if prompt == "1+1=" {
-                                match canary_requests.fetch_add(1, Ordering::SeqCst) {
-                                    0 => {
-                                        initial_canary_started.notify_one();
-                                        release_initial_canary.notified().await;
-                                        7
-                                    }
-                                    1 => {
-                                        recovery_canary_started.notify_one();
-                                        release_recovery_canary.notified().await;
-                                        1
-                                    }
-                                    _ => 1,
-                                }
-                            } else {
-                                1
-                            };
-                            Json(serde_json::json!({
-                                "usage": {"completion_tokens": completion_tokens}
-                            }))
-                            .into_response()
-                        }
-                    }),
-                );
-            axum::serve(listener, app).await.unwrap();
-        });
-        let runtime_state =
-            PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()]);
+        let canaries = CanarySequence::default();
+        let health_requests = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_test_server(TestServerState {
+            canaries: Some(canaries.clone()),
+            health_requests: Some(health_requests.clone()),
+            ..TestServerState::default()
+        })
+        .await;
+        let runtime_state = test_runtime_state();
+        runtime_state.set_model_bringup_ready("test-model", true);
         let stop = CancellationToken::new();
         let task = tokio::spawn(run_bringup_task(
-            BringupTaskConfig {
-                upstream_http_base_url: format!("http://{addr}"),
-                model_id: "test-model".to_string(),
-                config: BringupConfig {
-                    calibration_requests: 0,
+            test_task_config(
+                base_url,
+                BringupConfig {
                     active_canary_interval: Duration::from_millis(10),
                     canary_timeout: Duration::from_secs(1),
                     canary_max_generation_threshold: 7,
                     ..BringupConfig::default()
                 },
-                metrics: None,
-            },
+            ),
             runtime_state.clone(),
             stop.clone(),
         ));
 
-        wait_for_bringup_notification(&initial_canary_started, "start the initial canary").await;
-        assert_eq!(
-            runtime_state.model_bringup("test-model"),
-            Some(ModelBringupState::AdvertisingActive)
-        );
-        release_initial_canary.notify_one();
+        wait_for_bringup_notification(&canaries.started[0], "start the initial canary").await;
+        assert_eq!(runtime_state.model_bringup_ready("test-model"), Some(true));
+        canaries.release[0].notify_one();
 
-        wait_for_bringup_notification(&recovery_canary_started, "start the recovery canary").await;
+        wait_for_bringup_notification(&canaries.started[1], "start the recovery canary").await;
         assert_eq!(
-            runtime_state.model_bringup("test-model"),
-            Some(ModelBringupState::Recovering)
+            health_requests.load(Ordering::SeqCst),
+            1,
+            "one recovery attempt should perform one health check"
         );
-        release_recovery_canary.notify_one();
+        assert_eq!(runtime_state.model_bringup_ready("test-model"), Some(false));
+        canaries.release[1].notify_one();
 
-        wait_for_bringup_state(&runtime_state, ModelBringupState::AdvertisingActive).await;
+        wait_for_bringup_ready(&runtime_state, true).await;
 
         stop.cancel();
-        let task_result = task.await;
-        server.abort();
-        task_result.unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]
     async fn active_bringup_stops_when_cancelled() {
-        let base_url = spawn_test_server(TestServerState {
-            completion_tokens: 1,
-            prompt_too_long_above: None,
-            calibration_barrier: None,
-            completion_delay: None,
-            in_flight: None,
-            max_in_flight: None,
-            canary_failures_remaining: None,
-            health_ok: None,
-        })
-        .await;
-        let runtime_state =
-            PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()]);
+        let base_url = spawn_test_server(TestServerState::default()).await;
+        let runtime_state = test_runtime_state();
+        runtime_state.set_model_bringup_ready("test-model", true);
         let stop = CancellationToken::new();
         let task = tokio::spawn(run_bringup_task(
-            BringupTaskConfig {
-                upstream_http_base_url: base_url,
-                model_id: "test-model".to_string(),
-                config: BringupConfig {
-                    calibration_requests: 0,
+            test_task_config(
+                base_url,
+                BringupConfig {
                     active_canary_interval: Duration::from_secs(60),
                     canary_timeout: Duration::from_secs(1),
                     ..BringupConfig::default()
                 },
-                metrics: None,
-            },
+            ),
             runtime_state.clone(),
             stop.clone(),
         ));
 
-        wait_for_bringup_state(&runtime_state, ModelBringupState::AdvertisingActive).await;
+        wait_for_bringup_ready(&runtime_state, true).await;
 
         stop.cancel();
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -599,31 +525,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_bringup_is_applied_without_ending_supervisor() {
-        let runtime_state =
-            PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()]);
-        let parent_stop = CancellationToken::new();
-        let supervisor = start_bringup_supervisor(
-            &parent_stop,
-            vec![BringupTaskConfig {
-                upstream_http_base_url: "http://127.0.0.1:1".to_string(),
-                model_id: "test-model".to_string(),
-                config: BringupConfig {
-                    enabled: false,
-                    ..BringupConfig::default()
-                },
-                metrics: None,
-            }],
+    async fn disabled_bringup_starts_no_supervisor() {
+        let runtime_state = test_runtime_state();
+        let supervisor = start_bringup(
+            "http://127.0.0.1:1",
+            BringupConfig {
+                enabled: false,
+                ..BringupConfig::default()
+            },
             runtime_state.clone(),
-        );
+        )
+        .await
+        .expect("disabled bringup should start");
 
-        wait_for_bringup_state(&runtime_state, ModelBringupState::AdvertisingActive).await;
-
-        assert!(
-            !parent_stop.is_cancelled(),
-            "synchronously applied disabled bringup must not end the session"
-        );
-        supervisor.shutdown(Duration::from_secs(1)).await;
+        wait_for_bringup_ready(&runtime_state, true).await;
+        assert!(supervisor.is_none());
     }
 
     #[tokio::test]
@@ -645,19 +561,18 @@ mod tests {
             );
             axum::serve(listener, app).await.unwrap();
         });
-        let runtime_state =
-            PylonRuntimeState::new(InferenceServerStatus::Active, &["test-model".into()]);
+        let runtime_state = test_runtime_state();
+        runtime_state.set_model_bringup_ready("test-model", true);
         let stop = CancellationToken::new();
         let task = tokio::spawn(run_bringup_task(
-            BringupTaskConfig {
-                upstream_http_base_url: format!("http://{addr}"),
-                model_id: "test-model".to_string(),
-                config: BringupConfig {
+            test_task_config(
+                format!("http://{addr}"),
+                BringupConfig {
+                    active_canary_interval: Duration::from_millis(1),
                     canary_timeout: Duration::from_secs(60),
                     ..BringupConfig::default()
                 },
-                metrics: None,
-            },
+            ),
             runtime_state,
             stop.clone(),
         ));
@@ -681,7 +596,58 @@ mod tests {
         in_flight: Option<Arc<AtomicUsize>>,
         max_in_flight: Option<Arc<AtomicUsize>>,
         canary_failures_remaining: Option<Arc<AtomicUsize>>,
+        canaries: Option<CanarySequence>,
         health_ok: Option<Arc<AtomicBool>>,
+        health_requests: Option<Arc<AtomicUsize>>,
+        request_ids: Option<Arc<Mutex<Vec<String>>>>,
+    }
+
+    impl Default for TestServerState {
+        fn default() -> Self {
+            Self {
+                completion_tokens: 1,
+                prompt_too_long_above: None,
+                calibration_barrier: None,
+                completion_delay: None,
+                in_flight: None,
+                max_in_flight: None,
+                canary_failures_remaining: None,
+                canaries: None,
+                health_ok: None,
+                health_requests: None,
+                request_ids: None,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct ParsedPylonGeneratedRequestId<'a> {
+        kind: &'a str,
+        uuid: Uuid,
+        counter: u64,
+    }
+
+    fn parse_pylon_generated_request_id(request_id: &str) -> ParsedPylonGeneratedRequestId<'_> {
+        let (kind, suffix) = request_id
+            .split_once('-')
+            .expect("request id should include kind prefix");
+        let (uuid, counter) = suffix
+            .rsplit_once('-')
+            .expect("request id should end with a counter suffix");
+        ParsedPylonGeneratedRequestId {
+            kind,
+            uuid: Uuid::parse_str(uuid).expect("request id should include a UUID"),
+            counter: counter
+                .parse()
+                .expect("request id should include a decimal counter"),
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CanarySequence {
+        requests: Arc<AtomicUsize>,
+        started: [Arc<Notify>; 2],
+        release: [Arc<Notify>; 2],
     }
 
     async fn spawn_test_server(state: TestServerState) -> String {
@@ -702,6 +668,9 @@ mod tests {
         State(state): State<Arc<Mutex<TestServerState>>>,
     ) -> axum::response::Response {
         let state = state.lock().await.clone();
+        if let Some(health_requests) = &state.health_requests {
+            health_requests.fetch_add(1, Ordering::SeqCst);
+        }
         if state
             .health_ok
             .as_ref()
@@ -714,9 +683,17 @@ mod tests {
 
     async fn test_chat_completion(
         State(state): State<Arc<Mutex<TestServerState>>>,
+        headers: HeaderMap,
         Json(request): Json<Value>,
     ) -> axum::response::Response {
         let state = state.lock().await.clone();
+        if let Some(request_ids) = &state.request_ids
+            && let Some(request_id) = headers
+                .get(HEADER_REQUEST_ID)
+                .and_then(|value| value.to_str().ok())
+        {
+            request_ids.lock().await.push(request_id.to_string());
+        }
         let prompt = request
             .get("messages")
             .and_then(|value| value.as_array())
@@ -764,8 +741,17 @@ mod tests {
         }
 
         let mut completion_tokens = state.completion_tokens;
-        if prompt == "1+1="
-            && state
+        if prompt == "1+1=" {
+            if let Some(canaries) = &state.canaries {
+                let request = canaries.requests.fetch_add(1, Ordering::SeqCst);
+                if let (Some(started), Some(release)) =
+                    (canaries.started.get(request), canaries.release.get(request))
+                {
+                    started.notify_one();
+                    release.notified().await;
+                }
+                completion_tokens = if request == 0 { 7 } else { 1 };
+            } else if state
                 .canary_failures_remaining
                 .as_ref()
                 .is_some_and(|remaining| {
@@ -775,12 +761,13 @@ mod tests {
                         })
                         .is_ok()
                 })
-        {
-            completion_tokens = request
-                .get("max_tokens")
-                .and_then(|value| value.as_u64())
-                .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or(completion_tokens);
+            {
+                completion_tokens = request
+                    .get("max_tokens")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(completion_tokens);
+            }
         }
 
         Json(serde_json::json!({

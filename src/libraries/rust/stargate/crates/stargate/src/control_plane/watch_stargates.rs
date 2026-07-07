@@ -40,9 +40,7 @@ pub(super) struct WatchStargatesPublisherConfig {
 }
 
 pub(super) fn spawn_watch_stargates_publisher(
-    config: WatchStargatesPublisherConfig,
-) -> watch::Receiver<WatchStargatesResponse> {
-    let WatchStargatesPublisherConfig {
+    WatchStargatesPublisherConfig {
         advertise_addr,
         discovery_dns_name,
         discovery,
@@ -51,7 +49,8 @@ pub(super) fn spawn_watch_stargates_publisher(
         discovery_poll_interval,
         watch_heartbeat_interval,
         tasks,
-    } = config;
+    }: WatchStargatesPublisherConfig,
+) -> watch::Receiver<WatchStargatesResponse> {
     let local_watch_endpoint_keys = local_watch_endpoint_keys(advertise_addr, &discovery_dns_name);
     let remote_watch_stargate_urls =
         normalize_remote_watch_urls(remote_watch_stargate_urls, &local_watch_endpoint_keys);
@@ -82,9 +81,7 @@ pub(super) fn spawn_watch_stargates_publisher(
             };
 
             let changed = event != known;
-            let heartbeat_due = last_emit
-                .map(|ts| ts.elapsed() >= watch_heartbeat_interval)
-                .unwrap_or(true);
+            let heartbeat_due = last_emit.is_none_or(|ts| ts.elapsed() >= watch_heartbeat_interval);
 
             if changed || heartbeat_due {
                 let _ = watch_stargates_tx.send(event.clone());
@@ -112,42 +109,39 @@ fn build_watch_stargates_response(
     grpc_pylon_dial_addr: Option<&str>,
 ) -> WatchStargatesResponse {
     let mut stargates = normalize_stargates(stargates);
-    apply_grpc_pylon_dial_addr(&mut stargates, grpc_pylon_dial_addr);
+    if let Some(grpc_pylon_dial_addr) = grpc_pylon_dial_addr
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty())
+    {
+        for stargate in &mut stargates {
+            stargate.grpc_pylon_dial_addr = grpc_pylon_dial_addr.to_string();
+        }
+    }
     WatchStargatesResponse {
         stargates,
         watch_stargate_urls: remote_watch_stargate_urls.to_vec(),
     }
 }
 
-fn apply_grpc_pylon_dial_addr(stargates: &mut [StargateInfo], grpc_pylon_dial_addr: Option<&str>) {
-    let Some(grpc_pylon_dial_addr) = grpc_pylon_dial_addr
-        .map(str::trim)
-        .filter(|addr| !addr.is_empty())
-    else {
-        return;
-    };
-    for stargate in stargates {
-        stargate.grpc_pylon_dial_addr = grpc_pylon_dial_addr.to_string();
-    }
-}
-
 fn normalize_stargates(stargates: Vec<StargateInfo>) -> Vec<StargateInfo> {
     let mut by_advertise_addr: BTreeMap<String, StargateInfo> = BTreeMap::new();
     for stargate in stargates {
-        let entry = by_advertise_addr
+        by_advertise_addr
             .entry(stargate.advertise_addr.clone())
-            .or_insert_with(|| stargate.clone());
-        if entry.stargate_id.is_empty() || !stargate.stargate_id.is_empty() {
-            *entry = stargate;
-        }
+            .and_modify(|known| {
+                if known.stargate_id.is_empty() || !stargate.stargate_id.is_empty() {
+                    known.clone_from(&stargate);
+                }
+            })
+            .or_insert(stargate);
     }
 
-    let mut deduped: BTreeMap<String, StargateInfo> = BTreeMap::new();
+    let mut deduped = BTreeMap::new();
     for stargate in by_advertise_addr.into_values() {
-        let key = if !stargate.stargate_id.is_empty() {
-            stargate.stargate_id.clone()
-        } else {
+        let key = if stargate.stargate_id.is_empty() {
             stargate.advertise_addr.clone()
+        } else {
+            stargate.stargate_id.clone()
         };
         deduped.insert(key, stargate);
     }
@@ -178,21 +172,17 @@ fn local_watch_endpoint_keys(
     discovery_dns_name: &str,
 ) -> BTreeSet<String> {
     let discovery_dns_name = discovery_dns_name.trim();
-    let mut endpoints = vec![
-        advertise_addr.to_string(),
-        format!("{discovery_dns_name}:{}", advertise_addr.port()),
-    ];
     let cluster_service_dns_name = discovery_dns_name.replace("-headless.", ".");
-    if cluster_service_dns_name != discovery_dns_name {
-        endpoints.push(format!(
-            "{cluster_service_dns_name}:{}",
-            advertise_addr.port()
-        ));
-    }
-    endpoints
-        .into_iter()
-        .filter_map(|endpoint| watch_endpoint_key(&endpoint))
-        .collect()
+    [
+        Some(advertise_addr.to_string()),
+        Some(format!("{discovery_dns_name}:{}", advertise_addr.port())),
+        (cluster_service_dns_name != discovery_dns_name)
+            .then(|| format!("{cluster_service_dns_name}:{}", advertise_addr.port())),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|endpoint| watch_endpoint_key(&endpoint))
+    .collect()
 }
 
 fn watch_endpoint_key(endpoint: &str) -> Option<String> {
@@ -217,16 +207,13 @@ pub(super) fn watch_stargates_stream_from_receiver(
     let initial = rx.borrow_and_update().clone();
     let pending_initial = watch_response_has_entries(&initial).then_some(initial);
     stream::unfold((rx, pending_initial), |(mut rx, pending)| async move {
-        if let Some(message) = pending {
-            return Some((Ok(message), (rx, None)));
-        }
-        match rx.changed().await {
-            Ok(()) => {
-                let message = rx.borrow_and_update().clone();
-                Some((Ok(message), (rx, None)))
-            }
-            Err(_) => None,
-        }
+        let message = if let Some(message) = pending {
+            message
+        } else {
+            rx.changed().await.ok()?;
+            rx.borrow_and_update().clone()
+        };
+        Some((Ok(message), (rx, None)))
     })
 }
 
@@ -240,6 +227,15 @@ mod tests {
 
     use super::*;
 
+    fn stargate(id: &str, advertise_addr: &str, http_addr: &str) -> StargateInfo {
+        StargateInfo {
+            stargate_id: id.to_string(),
+            advertise_addr: advertise_addr.to_string(),
+            http_advertise_addr: http_addr.to_string(),
+            grpc_pylon_dial_addr: String::new(),
+        }
+    }
+
     #[test]
     fn watch_stargates_response_sorts_and_dedupes_local_and_remote_entries() {
         let remote_watch_urls = normalize_remote_watch_urls(
@@ -252,24 +248,9 @@ mod tests {
         );
         let response = build_watch_stargates_response(
             vec![
-                StargateInfo {
-                    stargate_id: "stargate-1".to_string(),
-                    advertise_addr: "10.0.0.2:50071".to_string(),
-                    http_advertise_addr: "10.0.0.2:8000".to_string(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
-                StargateInfo {
-                    stargate_id: "stargate-0".to_string(),
-                    advertise_addr: "10.0.0.1:50071".to_string(),
-                    http_advertise_addr: "10.0.0.1:8000".to_string(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
-                StargateInfo {
-                    stargate_id: "stargate-1".to_string(),
-                    advertise_addr: "10.0.0.2:50071".to_string(),
-                    http_advertise_addr: "10.0.0.2:8000".to_string(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
+                stargate("stargate-1", "10.0.0.2:50071", "10.0.0.2:8000"),
+                stargate("stargate-0", "10.0.0.1:50071", "10.0.0.1:8000"),
+                stargate("stargate-1", "10.0.0.2:50071", "10.0.0.2:8000"),
             ],
             &remote_watch_urls,
             None,
@@ -291,18 +272,8 @@ mod tests {
     fn watch_stargates_response_dedupes_empty_id_by_advertise_addr() {
         let response = build_watch_stargates_response(
             vec![
-                StargateInfo {
-                    stargate_id: String::new(),
-                    advertise_addr: "10.0.0.1:50071".to_string(),
-                    http_advertise_addr: "10.0.0.1:8000".to_string(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
-                StargateInfo {
-                    stargate_id: "stargate-0".to_string(),
-                    advertise_addr: "10.0.0.1:50071".to_string(),
-                    http_advertise_addr: "10.0.0.1:8000".to_string(),
-                    grpc_pylon_dial_addr: String::new(),
-                },
+                stargate("", "10.0.0.1:50071", "10.0.0.1:8000"),
+                stargate("stargate-0", "10.0.0.1:50071", "10.0.0.1:8000"),
             ],
             &[],
             None,
@@ -316,12 +287,7 @@ mod tests {
     #[test]
     fn watch_stargates_response_applies_configured_grpc_pylon_dial_addr() {
         let response = build_watch_stargates_response(
-            vec![StargateInfo {
-                stargate_id: "stargate-0".to_string(),
-                advertise_addr: "stargate-0.region-a:50071".to_string(),
-                http_advertise_addr: String::new(),
-                grpc_pylon_dial_addr: String::new(),
-            }],
+            vec![stargate("stargate-0", "stargate-0.region-a:50071", "")],
             &[],
             Some(" stargate-grpc-lb.region-a:443 "),
         );
@@ -361,12 +327,7 @@ mod tests {
             &WatchStargatesResponse::default()
         ));
         assert!(watch_response_has_entries(&WatchStargatesResponse {
-            stargates: vec![StargateInfo {
-                stargate_id: "stargate-0".to_string(),
-                advertise_addr: "10.0.0.1:50071".to_string(),
-                http_advertise_addr: "10.0.0.1:8000".to_string(),
-                grpc_pylon_dial_addr: String::new(),
-            }],
+            stargates: vec![stargate("stargate-0", "10.0.0.1:50071", "10.0.0.1:8000",)],
             watch_stargate_urls: Vec::new(),
         }));
         assert!(watch_response_has_entries(&WatchStargatesResponse {
@@ -379,12 +340,7 @@ mod tests {
     async fn watch_stargates_stream_marks_initial_snapshot_seen() {
         let (tx, rx) = watch::channel(WatchStargatesResponse::default());
         let first = WatchStargatesResponse {
-            stargates: vec![StargateInfo {
-                stargate_id: "stargate-0".to_string(),
-                advertise_addr: "10.0.0.1:50071".to_string(),
-                http_advertise_addr: "10.0.0.1:8000".to_string(),
-                grpc_pylon_dial_addr: String::new(),
-            }],
+            stargates: vec![stargate("stargate-0", "10.0.0.1:50071", "10.0.0.1:8000")],
             watch_stargate_urls: Vec::new(),
         };
         tx.send(first.clone()).expect("receiver should be alive");
@@ -400,12 +356,7 @@ mod tests {
         ));
 
         let second = WatchStargatesResponse {
-            stargates: vec![StargateInfo {
-                stargate_id: "stargate-1".to_string(),
-                advertise_addr: "10.0.0.2:50071".to_string(),
-                http_advertise_addr: "10.0.0.2:8000".to_string(),
-                grpc_pylon_dial_addr: String::new(),
-            }],
+            stargates: vec![stargate("stargate-1", "10.0.0.2:50071", "10.0.0.2:8000")],
             watch_stargate_urls: Vec::new(),
         };
         tx.send(second.clone()).expect("receiver should be alive");

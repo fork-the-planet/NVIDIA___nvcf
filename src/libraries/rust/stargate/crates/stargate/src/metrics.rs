@@ -20,7 +20,7 @@ use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use prometheus::core::{AtomicU64, GenericCounter};
+use prometheus::core::{AtomicU64, Collector, GenericCounter};
 use prometheus::{
     Encoder, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry,
     TextEncoder,
@@ -31,46 +31,105 @@ use tracing::{error, info};
 
 pub const DEFAULT_PREFIX: &str = "stargate_";
 
-/// Prometheus metrics for one stargate process. Uses a private [`Registry`] so
-/// multiple runtimes (e.g. parallel integration tests) do not share collectors.
-#[derive(Debug)]
-pub struct StargateMetrics {
-    registry: Arc<Registry>,
-    requests_total: IntCounterVec,
-    proxy_attempts_total: IntCounterVec,
-    proxy_retries_total: IntCounterVec,
-    routing_selections_total: IntCounterVec,
-    routing_kv_free_token_fallback_selections_total: IntCounterVec,
-    proxy_retry_exhausted_total: IntCounterVec,
-    admission_rejections_total: IntCounterVec,
-    quic_connection_evictions_total: IntCounterVec,
-    quic_hot_path_reconnect_total: IntCounterVec,
-    proxy_replay_buffer_bytes: HistogramVec,
-    proxy_duration_seconds: HistogramVec,
-    routing_duration_seconds: HistogramVec,
-    active_inference_servers: IntGaugeVec,
+macro_rules! define_stargate_metrics {
+    (
+        counters { $($counter:ident($counter_name:literal, $counter_help:literal, [$($counter_label:literal),*]);)* }
+        histograms { $($histogram:ident($histogram_name:literal, $histogram_help:literal, [$($histogram_label:literal),*], [$($bucket:expr),*]);)* }
+        gauges { $($gauge:ident($gauge_name:literal, $gauge_help:literal, [$($gauge_label:literal),*]);)* }
+    ) => {
+        /// Per-process metrics with a private [`Registry`] that isolates parallel runtimes.
+        #[derive(Debug)]
+        pub struct StargateMetrics {
+            registry: Arc<Registry>,
+            $($counter: IntCounterVec,)*
+            $($histogram: HistogramVec,)*
+            $($gauge: IntGaugeVec,)*
+        }
+
+        impl StargateMetrics {
+            fn register(prefix: &str) -> anyhow::Result<Self> {
+                let registry = Arc::new(Registry::new());
+                $(
+                    let $counter = register_collector(
+                        &registry,
+                        IntCounterVec::new(
+                            Opts::new(format!("{prefix}{}", $counter_name), $counter_help),
+                            &[$($counter_label),*],
+                        )?,
+                    )?;
+                )*
+                $(
+                    let $histogram = register_collector(
+                        &registry,
+                        HistogramVec::new(
+                            HistogramOpts::new(
+                                format!("{prefix}{}", $histogram_name),
+                                $histogram_help,
+                            )
+                            .buckets(vec![$($bucket),*]),
+                            &[$($histogram_label),*],
+                        )?,
+                    )?;
+                )*
+                $(
+                    let $gauge = register_collector(
+                        &registry,
+                        IntGaugeVec::new(
+                            Opts::new(format!("{prefix}{}", $gauge_name), $gauge_help),
+                            &[$($gauge_label),*],
+                        )?,
+                    )?;
+                )*
+                Ok(Self {
+                    registry,
+                    $($counter,)*
+                    $($histogram,)*
+                    $($gauge,)*
+                })
+            }
+        }
+    };
 }
 
-fn register_int_counter_vec(
-    registry: &Registry,
-    name: String,
-    help: &str,
-    labels: &[&str],
-) -> anyhow::Result<IntCounterVec> {
-    let metric = IntCounterVec::new(Opts::new(name, help), labels)?;
-    registry.register(Box::new(metric.clone()))?;
-    Ok(metric)
+define_stargate_metrics! {
+    counters {
+        requests_total("requests_total", "Total number of proxied requests", ["routing_key", "model", "inference_server_id", "status"]);
+        proxy_attempts_total("proxy_attempts_total", "Total number of upstream proxy attempts", ["routing_key", "model", "inference_server_id", "result"]);
+        proxy_retries_total("proxy_retries_total", "Total number of proxy retries", ["routing_key", "model", "reason"]);
+        routing_selections_total("routing_selections_total", "Total number of primary and ranked fallback cluster choices used for upstream attempts", ["routing_key", "model", "algorithm", "selection"]);
+        routing_kv_free_token_fallback_selections_total("routing_kv_free_token_fallback_selections_total", "Total number of selected routes reached after a higher-ranked candidate was skipped by KV free-token eligibility", ["routing_key", "model", "algorithm"]);
+        proxy_retry_exhausted_total("proxy_retry_exhausted_total", "Total number of proxy requests that exhausted retry options", ["routing_key", "model", "reason"]);
+        admission_rejections_total("admission_rejections_total", "Total number of requests rejected by local admission control", ["routing_key", "model", "reason"]);
+        quic_connection_evictions_total("quic_connection_evictions_total", "Total number of QUIC connection pool evictions", ["inference_server_id", "reason"]);
+        quic_hot_path_reconnect_total("quic_hot_path_reconnect_total", "Total number of direct QUIC reconnects attempted on the proxy hot path", ["inference_server_id", "result"]);
+    }
+    histograms {
+        proxy_replay_buffer_bytes("proxy_replay_buffer_bytes", "Bytes currently retained for proxied request body replay", ["model"], [0.0, 1024.0, 4096.0, 16_384.0, 65_536.0, 262_144.0, 1_048_576.0, 4_194_304.0, 16_777_216.0, 67_108_864.0]);
+        proxy_duration_seconds("proxy_duration_seconds", "Time to first byte from upstream", ["routing_key", "model", "inference_server_id"], [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]);
+        routing_duration_seconds("routing_duration_seconds", "Time spent selecting a inference server", ["routing_key", "model"], [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]);
+    }
+    gauges {
+        active_inference_servers("active_inference_servers", "Active inference servers available for a routing target", ["routing_key", "model"]);
+    }
 }
 
-fn register_int_gauge_vec(
-    registry: &Registry,
-    name: String,
-    help: &str,
-    labels: &[&str],
-) -> anyhow::Result<IntGaugeVec> {
-    let metric = IntGaugeVec::new(Opts::new(name, help), labels)?;
-    registry.register(Box::new(metric.clone()))?;
-    Ok(metric)
+fn register_collector<C>(registry: &Registry, collector: C) -> anyhow::Result<C>
+where
+    C: Collector + Clone + 'static,
+{
+    registry.register(Box::new(collector.clone()))?;
+    Ok(collector)
+}
+
+macro_rules! metric_accessors {
+    ($($return_type:ty, $name:ident($($arg:ident: $arg_type:ty),*) => [$($label:expr),*];)*) => {
+        $(
+            #[inline]
+            pub fn $name(&self, $($arg: $arg_type),*) -> $return_type {
+                self.$name.with_label_values(&[$($label),*])
+            }
+        )*
+    };
 }
 
 impl StargateMetrics {
@@ -79,293 +138,28 @@ impl StargateMetrics {
     }
 
     pub fn new_with_prefix(prefix: &str) -> anyhow::Result<Arc<Self>> {
-        let registry = Arc::new(Registry::new());
-        let metric_name = |suffix: &str| format!("{prefix}{suffix}");
-
-        let requests_total = register_int_counter_vec(
-            &registry,
-            metric_name("requests_total"),
-            "Total number of proxied requests",
-            &["routing_key", "model", "inference_server_id", "status"],
-        )?;
-
-        let proxy_attempts_total = register_int_counter_vec(
-            &registry,
-            metric_name("proxy_attempts_total"),
-            "Total number of upstream proxy attempts",
-            &["routing_key", "model", "inference_server_id", "result"],
-        )?;
-
-        let proxy_retries_total = register_int_counter_vec(
-            &registry,
-            metric_name("proxy_retries_total"),
-            "Total number of proxy retries",
-            &["routing_key", "model", "reason"],
-        )?;
-
-        let routing_selections_total = register_int_counter_vec(
-            &registry,
-            metric_name("routing_selections_total"),
-            "Total number of primary and ranked fallback cluster choices used for upstream attempts",
-            &["routing_key", "model", "algorithm", "selection"],
-        )?;
-
-        let routing_kv_free_token_fallback_selections_total = register_int_counter_vec(
-            &registry,
-            metric_name("routing_kv_free_token_fallback_selections_total"),
-            "Total number of selected routes reached after a higher-ranked candidate was skipped by KV free-token eligibility",
-            &["routing_key", "model", "algorithm"],
-        )?;
-
-        let proxy_retry_exhausted_total = register_int_counter_vec(
-            &registry,
-            metric_name("proxy_retry_exhausted_total"),
-            "Total number of proxy requests that exhausted retry options",
-            &["routing_key", "model", "reason"],
-        )?;
-
-        let admission_rejections_total = register_int_counter_vec(
-            &registry,
-            metric_name("admission_rejections_total"),
-            "Total number of requests rejected by local admission control",
-            &["routing_key", "model", "reason"],
-        )?;
-
-        let quic_connection_evictions_total = register_int_counter_vec(
-            &registry,
-            metric_name("quic_connection_evictions_total"),
-            "Total number of QUIC connection pool evictions",
-            &["inference_server_id", "reason"],
-        )?;
-
-        let quic_hot_path_reconnect_total = register_int_counter_vec(
-            &registry,
-            metric_name("quic_hot_path_reconnect_total"),
-            "Total number of direct QUIC reconnects attempted on the proxy hot path",
-            &["inference_server_id", "result"],
-        )?;
-
-        let proxy_replay_buffer_bytes = HistogramVec::new(
-            HistogramOpts::new(
-                metric_name("proxy_replay_buffer_bytes"),
-                "Bytes currently retained for proxied request body replay",
-            )
-            .buckets(vec![
-                0.0,
-                1024.0,
-                4096.0,
-                16_384.0,
-                65_536.0,
-                262_144.0,
-                1_048_576.0,
-                4_194_304.0,
-                16_777_216.0,
-                67_108_864.0,
-            ]),
-            &["model"],
-        )?;
-        registry.register(Box::new(proxy_replay_buffer_bytes.clone()))?;
-
-        let proxy_duration_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                metric_name("proxy_duration_seconds"),
-                "Time to first byte from upstream",
-            )
-            .buckets(vec![
-                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-            ]),
-            &["routing_key", "model", "inference_server_id"],
-        )?;
-        registry.register(Box::new(proxy_duration_seconds.clone()))?;
-
-        let routing_duration_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                metric_name("routing_duration_seconds"),
-                "Time spent selecting a inference server",
-            )
-            .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]),
-            &["routing_key", "model"],
-        )?;
-        registry.register(Box::new(routing_duration_seconds.clone()))?;
-
-        let active_inference_servers = register_int_gauge_vec(
-            &registry,
-            metric_name("active_inference_servers"),
-            "Active inference servers available for a routing target",
-            &["routing_key", "model"],
-        )?;
-
-        Ok(Arc::new(Self {
-            registry,
-            requests_total,
-            proxy_attempts_total,
-            proxy_retries_total,
-            routing_selections_total,
-            routing_kv_free_token_fallback_selections_total,
-            proxy_retry_exhausted_total,
-            admission_rejections_total,
-            quic_connection_evictions_total,
-            quic_hot_path_reconnect_total,
-            proxy_replay_buffer_bytes,
-            proxy_duration_seconds,
-            routing_duration_seconds,
-            active_inference_servers,
-        }))
+        Self::register(prefix).map(Arc::new)
     }
 
     pub fn registry(&self) -> Arc<Registry> {
         self.registry.clone()
     }
 
-    #[cfg(test)]
-    fn gather_text(&self) -> anyhow::Result<String> {
-        let metric_families = self.registry.gather();
-        let mut buffer = vec![];
-        TextEncoder::new().encode(&metric_families, &mut buffer)?;
-        String::from_utf8(buffer).map_err(Into::into)
-    }
-
-    #[inline]
-    pub fn requests_total(
-        &self,
-        routing_key: Option<&str>,
-        model: &str,
-        inference_server_id: &str,
-        status: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.requests_total.with_label_values(&[
-            routing_key.unwrap_or(""),
-            model,
-            inference_server_id,
-            status,
-        ])
-    }
-
-    #[inline]
-    pub fn proxy_attempts_total(
-        &self,
-        routing_key: Option<&str>,
-        model: &str,
-        inference_server_id: &str,
-        result: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.proxy_attempts_total.with_label_values(&[
-            routing_key.unwrap_or(""),
-            model,
-            inference_server_id,
-            result,
-        ])
-    }
-
-    #[inline]
-    pub fn proxy_retries_total(
-        &self,
-        routing_key: Option<&str>,
-        model: &str,
-        reason: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.proxy_retries_total
-            .with_label_values(&[routing_key.unwrap_or(""), model, reason])
-    }
-
-    #[inline]
-    pub fn routing_selections_total(
-        &self,
-        routing_key: Option<&str>,
-        model: &str,
-        algorithm: &str,
-        selection: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.routing_selections_total.with_label_values(&[
-            routing_key.unwrap_or(""),
-            model,
-            algorithm,
-            selection,
-        ])
-    }
-
-    #[inline]
-    pub fn routing_kv_free_token_fallback_selections_total(
-        &self,
-        routing_key: Option<&str>,
-        model: &str,
-        algorithm: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.routing_kv_free_token_fallback_selections_total
-            .with_label_values(&[routing_key.unwrap_or(""), model, algorithm])
-    }
-
-    #[inline]
-    pub fn proxy_retry_exhausted_total(
-        &self,
-        routing_key: Option<&str>,
-        model: &str,
-        reason: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.proxy_retry_exhausted_total.with_label_values(&[
-            routing_key.unwrap_or(""),
-            model,
-            reason,
-        ])
-    }
-
-    #[inline]
-    pub fn admission_rejections_total(
-        &self,
-        routing_key: Option<&str>,
-        model: &str,
-        reason: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.admission_rejections_total.with_label_values(&[
-            routing_key.unwrap_or(""),
-            model,
-            reason,
-        ])
-    }
-
-    #[inline]
-    pub fn quic_connection_evictions_total(
-        &self,
-        inference_server_id: &str,
-        reason: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.quic_connection_evictions_total
-            .with_label_values(&[inference_server_id, reason])
-    }
-
-    #[inline]
-    pub fn quic_hot_path_reconnect_total(
-        &self,
-        inference_server_id: &str,
-        result: &str,
-    ) -> GenericCounter<AtomicU64> {
-        self.quic_hot_path_reconnect_total
-            .with_label_values(&[inference_server_id, result])
-    }
-
-    #[inline]
-    pub fn proxy_replay_buffer_bytes(&self, model: &str) -> Histogram {
-        self.proxy_replay_buffer_bytes.with_label_values(&[model])
-    }
-
-    #[inline]
-    pub fn proxy_duration_seconds(
-        &self,
-        routing_key: Option<&str>,
-        model: &str,
-        inference_server_id: &str,
-    ) -> Histogram {
-        self.proxy_duration_seconds.with_label_values(&[
-            routing_key.unwrap_or(""),
-            model,
-            inference_server_id,
-        ])
-    }
-
-    #[inline]
-    pub fn routing_duration_seconds(&self, routing_key: Option<&str>, model: &str) -> Histogram {
-        self.routing_duration_seconds
-            .with_label_values(&[routing_key.unwrap_or(""), model])
+    // One row is one public accessor signature and its ordered Prometheus labels.
+    #[rustfmt::skip]
+    metric_accessors! {
+        GenericCounter<AtomicU64>, requests_total(routing_key: Option<&str>, model: &str, inference_server_id: &str, status: &str) => [routing_key.unwrap_or(""), model, inference_server_id, status];
+        GenericCounter<AtomicU64>, proxy_attempts_total(routing_key: Option<&str>, model: &str, inference_server_id: &str, result: &str) => [routing_key.unwrap_or(""), model, inference_server_id, result];
+        GenericCounter<AtomicU64>, proxy_retries_total(routing_key: Option<&str>, model: &str, reason: &str) => [routing_key.unwrap_or(""), model, reason];
+        GenericCounter<AtomicU64>, routing_selections_total(routing_key: Option<&str>, model: &str, algorithm: &str, selection: &str) => [routing_key.unwrap_or(""), model, algorithm, selection];
+        GenericCounter<AtomicU64>, routing_kv_free_token_fallback_selections_total(routing_key: Option<&str>, model: &str, algorithm: &str) => [routing_key.unwrap_or(""), model, algorithm];
+        GenericCounter<AtomicU64>, proxy_retry_exhausted_total(routing_key: Option<&str>, model: &str, reason: &str) => [routing_key.unwrap_or(""), model, reason];
+        GenericCounter<AtomicU64>, admission_rejections_total(routing_key: Option<&str>, model: &str, reason: &str) => [routing_key.unwrap_or(""), model, reason];
+        GenericCounter<AtomicU64>, quic_connection_evictions_total(inference_server_id: &str, reason: &str) => [inference_server_id, reason];
+        GenericCounter<AtomicU64>, quic_hot_path_reconnect_total(inference_server_id: &str, result: &str) => [inference_server_id, result];
+        Histogram, proxy_replay_buffer_bytes(model: &str) => [model];
+        Histogram, proxy_duration_seconds(routing_key: Option<&str>, model: &str, inference_server_id: &str) => [routing_key.unwrap_or(""), model, inference_server_id];
+        Histogram, routing_duration_seconds(routing_key: Option<&str>, model: &str) => [routing_key.unwrap_or(""), model];
     }
 
     #[inline]
@@ -425,6 +219,14 @@ pub async fn start_metrics_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl StargateMetrics {
+        fn gather_text(&self) -> anyhow::Result<String> {
+            let mut buffer = vec![];
+            TextEncoder::new().encode(&self.registry.gather(), &mut buffer)?;
+            String::from_utf8(buffer).map_err(Into::into)
+        }
+    }
 
     #[test]
     fn metrics_prefix_is_applied_to_registered_collectors() {

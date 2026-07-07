@@ -23,86 +23,93 @@ use super::estimates::{
     rtt_ms,
 };
 use super::{
-    GroqMultiregionConfig, choice_for_candidate, choose_less_queued_candidate, shuffle_prefix,
-    single_excluded_cluster_id,
+    GroqMultiregionConfig, RequestExclusions, choice_for_candidate, choose_less_queued_candidate,
+    shuffle_prefix,
 };
 
-pub(super) fn choose_from_queue_ignored_single_bucket(
+macro_rules! choose_with_fast_path_exclusions {
+    ($config:expr, $request:expr, $candidates:expr, $ttft_ms:expr) => {
+        match RequestExclusions::from($request) {
+            RequestExclusions::None => choose_from_single_bucket_filtered(
+                $config,
+                $request,
+                $candidates,
+                |_| false,
+                $ttft_ms,
+            ),
+            RequestExclusions::One(excluded_cluster_id) => choose_from_single_bucket_filtered(
+                $config,
+                $request,
+                $candidates,
+                |candidate| candidate.cluster_id == excluded_cluster_id,
+                $ttft_ms,
+            ),
+            RequestExclusions::Two(first_excluded, second_excluded) => {
+                choose_from_single_bucket_filtered(
+                    $config,
+                    $request,
+                    $candidates,
+                    |candidate| {
+                        let cluster_id = candidate.cluster_id.as_str();
+                        cluster_id == first_excluded || cluster_id == second_excluded
+                    },
+                    $ttft_ms,
+                )
+            }
+            // Larger retry exclusion sets are uncommon and need more filtering
+            // work per candidate. Keep them on the general path instead of
+            // making the steady-state fast path carry a HashSet probe.
+            RequestExclusions::Many => None,
+        }
+    };
+}
+
+pub(super) fn choose_from_single_bucket(
     config: &GroqMultiregionConfig,
     request: &LoadBalancerRequest<'_>,
     candidates: &[RoutedClusterSnapshot],
 ) -> Option<LoadBalancerCandidateChoice> {
-    if !config.ignore_queue_time() || config.ignore_input_processing_time() {
-        return None;
-    }
-    if config.max_queue_time(request).is_some() {
+    if !config.ignore_queue_time || config.max_queue_time(request).is_some() {
         return None;
     }
 
-    match request.excluded_cluster_ids {
-        Some(excluded) if excluded.is_empty() => {
-            choose_from_queue_ignored_single_bucket_filtered(config, request, candidates, |_| false)
-        }
-        None => {
-            choose_from_queue_ignored_single_bucket_filtered(config, request, candidates, |_| false)
-        }
-        Some(excluded) if excluded.len() == 1 => {
-            let excluded_cluster_id = single_excluded_cluster_id(request)?;
-            choose_from_queue_ignored_single_bucket_filtered(
-                config,
-                request,
-                candidates,
-                |candidate| candidate.cluster_id == excluded_cluster_id,
-            )
-        }
-        Some(excluded) if excluded.len() == 2 => {
-            let mut excluded_ids = excluded.iter().map(String::as_str);
-            let first_excluded = excluded_ids.next()?;
-            let second_excluded = excluded_ids.next()?;
-            choose_from_queue_ignored_single_bucket_filtered(
-                config,
-                request,
-                candidates,
-                |candidate| {
-                    let cluster_id = candidate.cluster_id.as_str();
-                    cluster_id == first_excluded || cluster_id == second_excluded
-                },
-            )
-        }
-        // Larger retry exclusion sets are uncommon and need more filtering
-        // work per candidate. Keep them on the general path instead of
-        // making the steady-state ignore-queue fast path carry a HashSet probe.
-        Some(_) => None,
+    if config.ignore_input_processing_time {
+        choose_with_fast_path_exclusions!(config, request, candidates, rtt_ms)
+    } else {
+        let input_tokens = request.input_tokens.unwrap_or(0) as f64;
+        choose_with_fast_path_exclusions!(config, request, candidates, |candidate| {
+            queue_ignored_ttft_ms(candidate, input_tokens)
+        })
     }
 }
 
-fn choose_from_queue_ignored_single_bucket_filtered(
+fn choose_from_single_bucket_filtered(
     config: &GroqMultiregionConfig,
     request: &LoadBalancerRequest<'_>,
     candidates: &[RoutedClusterSnapshot],
     mut excludes_candidate: impl FnMut(&RoutedClusterSnapshot) -> bool,
+    ttft_ms: impl Fn(&RoutedClusterSnapshot) -> f64,
 ) -> Option<LoadBalancerCandidateChoice> {
-    let input_tokens = request.input_tokens.unwrap_or(0) as f64;
     let mut fastest_ttft = f64::INFINITY;
     let mut slowest_ttft = f64::NEG_INFINITY;
     for candidate in candidates {
         if excludes_candidate(candidate) {
             continue;
         }
-        let ttft_ms = queue_ignored_ttft_ms(candidate, input_tokens);
-        if !ttft_ms.is_finite() {
+        let candidate_ttft_ms = ttft_ms(candidate);
+        if !candidate_ttft_ms.is_finite() {
             return None;
         }
-        fastest_ttft = fastest_ttft.min(ttft_ms);
-        slowest_ttft = slowest_ttft.max(ttft_ms);
+        fastest_ttft = fastest_ttft.min(candidate_ttft_ms);
+        slowest_ttft = slowest_ttft.max(candidate_ttft_ms);
     }
 
-    let bucket_size_ms = config.ttft_bucket_size().as_secs_f64() * 1000.0;
+    let bucket_size_ms = config.ttft_bucket_size.as_secs_f64() * 1000.0;
     if !fastest_ttft.is_finite() || slowest_ttft - fastest_ttft > bucket_size_ms {
         return None;
     }
 
-    let max_queued = config.max_queued();
+    let max_queued = config.max_queued;
     let mut unlocked_with_capacity = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if excludes_candidate(candidate) {
@@ -113,89 +120,7 @@ fn choose_from_queue_ignored_single_bucket_filtered(
         }
     }
 
-    // Queue is intentionally ignored for TTFT bucket construction in this
-    // config, but it is still the primary sampled-candidate comparator. Keep
-    // queue estimation to the sample instead of paying it for every backend.
-    choose_from_unlocked_candidate_refs(config, request, unlocked_with_capacity, candidates)
-}
-
-pub(super) fn choose_from_rtt_only_single_bucket(
-    config: &GroqMultiregionConfig,
-    request: &LoadBalancerRequest<'_>,
-    candidates: &[RoutedClusterSnapshot],
-) -> Option<LoadBalancerCandidateChoice> {
-    if !config.ignore_queue_time() || !config.ignore_input_processing_time() {
-        return None;
-    }
-    if config.max_queue_time(request).is_some() {
-        return None;
-    }
-
-    match request.excluded_cluster_ids {
-        Some(excluded) if excluded.is_empty() => {
-            choose_from_rtt_only_single_bucket_filtered(config, request, candidates, |_| false)
-        }
-        None => choose_from_rtt_only_single_bucket_filtered(config, request, candidates, |_| false),
-        Some(excluded) if excluded.len() == 1 => {
-            let excluded_cluster_id = single_excluded_cluster_id(request)?;
-            choose_from_rtt_only_single_bucket_filtered(config, request, candidates, |candidate| {
-                candidate.cluster_id == excluded_cluster_id
-            })
-        }
-        Some(excluded) if excluded.len() == 2 => {
-            let mut excluded_ids = excluded.iter().map(String::as_str);
-            let first_excluded = excluded_ids.next()?;
-            let second_excluded = excluded_ids.next()?;
-            choose_from_rtt_only_single_bucket_filtered(config, request, candidates, |candidate| {
-                let cluster_id = candidate.cluster_id.as_str();
-                cluster_id == first_excluded || cluster_id == second_excluded
-            })
-        }
-        // Larger retry exclusion sets are uncommon and need more filtering
-        // work per candidate. Keep them on the general path instead of
-        // making the steady-state RTT-only fast path carry a HashSet probe.
-        Some(_) => None,
-    }
-}
-
-fn choose_from_rtt_only_single_bucket_filtered(
-    config: &GroqMultiregionConfig,
-    request: &LoadBalancerRequest<'_>,
-    candidates: &[RoutedClusterSnapshot],
-    mut excludes_candidate: impl FnMut(&RoutedClusterSnapshot) -> bool,
-) -> Option<LoadBalancerCandidateChoice> {
-    let mut fastest_ttft = f64::INFINITY;
-    let mut slowest_ttft = f64::NEG_INFINITY;
-    for candidate in candidates {
-        if excludes_candidate(candidate) {
-            continue;
-        }
-        let ttft_ms = rtt_ms(candidate);
-        fastest_ttft = fastest_ttft.min(ttft_ms);
-        slowest_ttft = slowest_ttft.max(ttft_ms);
-    }
-
-    let bucket_size_ms = config.ttft_bucket_size().as_secs_f64() * 1000.0;
-    if !fastest_ttft.is_finite() || slowest_ttft - fastest_ttft > bucket_size_ms {
-        return None;
-    }
-
-    let max_queued = config.max_queued();
-    let mut unlocked_with_capacity = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if excludes_candidate(candidate) {
-            continue;
-        }
-        if has_capacity(candidate, max_queued) {
-            unlocked_with_capacity.push(candidate);
-        }
-    }
-
-    // When both non-RTT TTFT components are ignored and every candidate is
-    // already in the first bucket, routing only needs queue estimates for
-    // the sampled candidates. Computing sparse priority queue estimates for
-    // all non-excluded backends would preserve correctness but wastes work
-    // on the common wide-bucket, n=2 deployment shape.
+    // These fast paths need queue estimates only for sampled candidates.
     choose_from_unlocked_candidate_refs(config, request, unlocked_with_capacity, candidates)
 }
 
@@ -209,7 +134,7 @@ fn choose_from_unlocked_candidate_refs(
         return None;
     }
 
-    let sample_count = config.sample_count();
+    let sample_count = config.sample_count;
     if sample_count == 1 {
         let selected_index = rand::rng().random_range(0..unlocked_with_capacity.len());
         return Some(choice_for_candidate(

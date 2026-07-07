@@ -13,19 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-use std::error::Error;
-use std::fmt;
-use std::future::Future;
-use std::panic::AssertUnwindSafe;
+use std::{any::Any, fmt, future::Future, panic::AssertUnwindSafe};
 
-use anyhow::Result;
-use flume::Receiver;
 use futures::FutureExt;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-pub type CriticalTaskFailureReceiver = Receiver<CriticalTaskFailure>;
+pub type CriticalTaskFailureReceiver = flume::Receiver<CriticalTaskFailure>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CriticalTaskFailure {
@@ -58,7 +51,7 @@ impl fmt::Display for CriticalTaskFailure {
     }
 }
 
-impl Error for CriticalTaskFailure {}
+impl std::error::Error for CriticalTaskFailure {}
 
 #[derive(Clone)]
 pub struct CriticalTaskGroup {
@@ -97,7 +90,7 @@ impl CriticalTaskGroup {
     pub fn spawn_critical<F, Fut>(&self, name: &'static str, task: F)
     where
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
         let group = self.clone();
         let stop = self.shutdown_signal();
@@ -151,7 +144,17 @@ mod tests {
 
     use flume::TryRecvError;
 
-    use super::CriticalTaskGroup;
+    use super::{CriticalTaskFailure, CriticalTaskGroup};
+
+    async fn receive_failure(
+        failures: &flume::Receiver<CriticalTaskFailure>,
+        message: &'static str,
+    ) -> CriticalTaskFailure {
+        tokio::time::timeout(Duration::from_secs(1), failures.recv_async())
+            .await
+            .expect(message)
+            .expect("critical failure channel should remain open")
+    }
 
     #[tokio::test]
     async fn unexpected_critical_return_cancels_runtime_and_reports_root() {
@@ -159,10 +162,7 @@ mod tests {
 
         group.spawn_critical("finite root", |_| async { Ok(()) });
 
-        let failure = tokio::time::timeout(Duration::from_secs(1), failures.recv_async())
-            .await
-            .expect("critical return should report failure")
-            .expect("critical failure channel should remain open");
+        let failure = receive_failure(&failures, "critical return should report failure").await;
         assert_eq!(failure.process_name(), "test process");
         assert_eq!(failure.task_name(), "finite root");
         assert_eq!(failure.detail(), "exited unexpectedly");
@@ -177,10 +177,7 @@ mod tests {
             anyhow::bail!("listener failed")
         });
 
-        let failure = tokio::time::timeout(Duration::from_secs(1), failures.recv_async())
-            .await
-            .expect("critical error should report failure")
-            .expect("critical failure channel should remain open");
+        let failure = receive_failure(&failures, "critical error should report failure").await;
         assert_eq!(failure.task_name(), "failing root");
         assert!(failure.detail().contains("listener failed"));
         assert!(group.is_stopping());
@@ -190,16 +187,9 @@ mod tests {
     async fn critical_panic_cancels_runtime_and_reports_panic() {
         let (group, failures) = CriticalTaskGroup::new("test process");
 
-        group.spawn_critical("panicking root", |_| async {
-            panic!("root panic");
-            #[allow(unreachable_code)]
-            Ok(())
-        });
+        group.spawn_critical("panicking root", |_| async { panic!("root panic") });
 
-        let failure = tokio::time::timeout(Duration::from_secs(1), failures.recv_async())
-            .await
-            .expect("critical panic should report failure")
-            .expect("critical failure channel should remain open");
+        let failure = receive_failure(&failures, "critical panic should report failure").await;
         assert_eq!(failure.task_name(), "panicking root");
         assert!(failure.detail().contains("root panic"));
         assert!(group.is_stopping());

@@ -15,6 +15,7 @@
 
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use stargate_protocol::common::is_hop_by_hop_header;
 use stargate_protocol::tunnel_contract::{
     HEADER_STARGATE_EXPECTED_QUEUE_MS, HEADER_STARGATE_RETRY_AFTER_MS,
     HEADER_STARGATE_RETRY_REASON, HEADER_STARGATE_RETRYABLE,
@@ -62,14 +63,11 @@ pub(super) async fn proxy_via_quic_streaming(
     let mut body_stream = streaming_resp.body_stream;
 
     let body = Body::from_stream(async_stream::stream! {
-        loop {
-            match body_stream.recv_body().await {
-                Ok(Some(chunk)) => yield Ok::<_, std::io::Error>(chunk),
-                Ok(None) => break,
-                Err(e) => {
-                    yield Err(std::io::Error::other(e.to_string()));
-                    break;
-                }
+        while let Some(chunk) = body_stream.recv_body().await.transpose() {
+            let failed = chunk.is_err();
+            yield chunk.map_err(|error| std::io::Error::other(error.to_string()));
+            if failed {
+                break;
             }
         }
     });
@@ -105,35 +103,18 @@ pub(super) fn headers_for_upstream_attempt(
     attempt_headers
 }
 
-pub(super) fn proxy_attempt_result(
-    result: &Result<UpstreamStreamingResponse, StatusCode>,
-) -> String {
-    match result {
-        Ok(response) => format!("upstream_{}", response.status.as_u16()),
-        Err(status) => format!("proxy_{}", status.as_u16()),
-    }
-}
-
 fn should_forward_header(name: &HeaderName) -> bool {
-    // `HeaderName` stores normalized lowercase names, so matching the borrowed
-    // str avoids allocating a lowercase copy for every proxied header.
-    !matches!(
-        name.as_str(),
-        "connection"
-            | "proxy-connection"
-            | "keep-alive"
-            | "transfer-encoding"
-            | "te"
-            | "trailer"
-            | "upgrade"
-            | "host"
-            | HEADER_ROUTING_METHOD
-            | HEADER_STARGATE_RETRYABLE
-            | HEADER_STARGATE_RETRY_REASON
-            | HEADER_STARGATE_RETRY_AFTER_MS
-            | HEADER_STARGATE_EXPECTED_QUEUE_MS
-            | HEADER_STARGATE_ERROR_CODE
-    )
+    !is_hop_by_hop_header(name)
+        && !matches!(
+            name.as_str(),
+            "host"
+                | HEADER_ROUTING_METHOD
+                | HEADER_STARGATE_RETRYABLE
+                | HEADER_STARGATE_RETRY_REASON
+                | HEADER_STARGATE_RETRY_AFTER_MS
+                | HEADER_STARGATE_EXPECTED_QUEUE_MS
+                | HEADER_STARGATE_ERROR_CODE
+        )
 }
 
 pub(super) fn copy_forwardable_headers(from: &HeaderMap, to: &mut HeaderMap) {
@@ -146,7 +127,6 @@ pub(super) fn copy_forwardable_headers(from: &HeaderMap, to: &mut HeaderMap) {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Bytes;
     use stargate_protocol::tunnel_contract::HEADER_MODEL;
 
     use crate::routing_state::{RegistrationIdentity, test_registration_generation};
@@ -155,33 +135,28 @@ mod tests {
     use super::super::test_support::test_proxy_app_state;
     use super::*;
 
+    fn headers<const N: usize>(entries: [(&'static str, &'static str); N]) -> HeaderMap {
+        entries
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    HeaderName::from_static(name),
+                    HeaderValue::from_static(value),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn prepare_forwarded_headers_strips_internal_proxy_headers() {
-        let mut source = HeaderMap::new();
-        source.insert(
-            HeaderName::from_static("connection"),
-            HeaderValue::from_static("close"),
-        );
-        source.insert(
-            HeaderName::from_static("host"),
-            HeaderValue::from_static("example.test"),
-        );
-        source.insert(
-            HeaderName::from_static("x-routing-method"),
-            HeaderValue::from_static("random"),
-        );
-        source.insert(
-            HeaderName::from_static(HEADER_STARGATE_ERROR_CODE),
-            HeaderValue::from_static("no_eligible_candidates"),
-        );
-        source.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("gpt"),
-        );
-        source.insert(
-            HeaderName::from_static("x-upstream-header"),
-            HeaderValue::from_static("kept"),
-        );
+        let source = headers([
+            ("connection", "close"),
+            ("host", "example.test"),
+            ("x-routing-method", "random"),
+            (HEADER_STARGATE_ERROR_CODE, "no_eligible_candidates"),
+            (HEADER_MODEL, "gpt"),
+            ("x-upstream-header", "kept"),
+        ]);
 
         let forwarded = prepare_forwarded_headers(&source);
 
@@ -189,64 +164,36 @@ mod tests {
         assert!(!forwarded.contains_key("host"));
         assert!(!forwarded.contains_key("x-routing-method"));
         assert!(!forwarded.contains_key(HEADER_STARGATE_ERROR_CODE));
-        assert_eq!(
-            forwarded.get(HEADER_MODEL),
-            Some(&HeaderValue::from_static("gpt"))
-        );
-        assert_eq!(
-            forwarded.get("x-upstream-header"),
-            Some(&HeaderValue::from_static("kept"))
-        );
+        assert_eq!(forwarded.get(HEADER_MODEL).unwrap(), "gpt");
+        assert_eq!(forwarded.get("x-upstream-header").unwrap(), "kept");
     }
 
     #[test]
     fn headers_for_upstream_attempt_preserves_headers_and_adds_queue_estimate() {
         let span = tracing::info_span!("attempt_header_test");
-        let mut forwarded_headers = HeaderMap::new();
-        forwarded_headers.insert(
-            HeaderName::from_static(HEADER_MODEL),
-            HeaderValue::from_static("gpt"),
-        );
+        let forwarded_headers = headers([(HEADER_MODEL, "gpt")]);
 
         let attempt_headers = headers_for_upstream_attempt(&forwarded_headers, &span, Some(42));
 
+        assert_eq!(attempt_headers.get(HEADER_MODEL).unwrap(), "gpt");
         assert_eq!(
-            attempt_headers.get(HEADER_MODEL),
-            Some(&HeaderValue::from_static("gpt"))
-        );
-        assert_eq!(
-            attempt_headers.get(HEADER_STARGATE_EXPECTED_QUEUE_MS),
-            Some(&HeaderValue::from_static("42"))
+            attempt_headers
+                .get(HEADER_STARGATE_EXPECTED_QUEUE_MS)
+                .unwrap(),
+            "42"
         );
     }
 
     #[test]
     fn copy_forwardable_headers_strips_internal_retry_headers() {
-        let mut upstream = HeaderMap::new();
-        upstream.insert(
-            HeaderName::from_static(HEADER_STARGATE_ERROR_CODE),
-            HeaderValue::from_static("no_eligible_candidates"),
-        );
-        upstream.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRYABLE),
-            HeaderValue::from_static("true"),
-        );
-        upstream.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRY_REASON),
-            HeaderValue::from_static("retryable_proxy_error"),
-        );
-        upstream.insert(
-            HeaderName::from_static(HEADER_STARGATE_RETRY_AFTER_MS),
-            HeaderValue::from_static("25"),
-        );
-        upstream.insert(
-            HeaderName::from_static(HEADER_STARGATE_EXPECTED_QUEUE_MS),
-            HeaderValue::from_static("123"),
-        );
-        upstream.insert(
-            HeaderName::from_static("x-upstream-header"),
-            HeaderValue::from_static("preserved"),
-        );
+        let upstream = headers([
+            (HEADER_STARGATE_ERROR_CODE, "no_eligible_candidates"),
+            (HEADER_STARGATE_RETRYABLE, "true"),
+            (HEADER_STARGATE_RETRY_REASON, "retryable_proxy_error"),
+            (HEADER_STARGATE_RETRY_AFTER_MS, "25"),
+            (HEADER_STARGATE_EXPECTED_QUEUE_MS, "123"),
+            ("x-upstream-header", "preserved"),
+        ]);
 
         let mut downstream = HeaderMap::new();
         copy_forwardable_headers(&upstream, &mut downstream);
@@ -256,10 +203,7 @@ mod tests {
         assert!(!downstream.contains_key(HEADER_STARGATE_RETRY_REASON));
         assert!(!downstream.contains_key(HEADER_STARGATE_RETRY_AFTER_MS));
         assert!(!downstream.contains_key(HEADER_STARGATE_EXPECTED_QUEUE_MS));
-        assert_eq!(
-            downstream.get("x-upstream-header"),
-            Some(&HeaderValue::from_static("preserved"))
-        );
+        assert_eq!(downstream.get("x-upstream-header").unwrap(), "preserved");
     }
 
     #[tokio::test]
@@ -271,7 +215,6 @@ mod tests {
             inference_server_url: "quic://127.0.0.1:1".to_string(),
             routing_key: None,
             reverse_tunnel: false,
-            coordinated_calibration: false,
         });
         let body = Body::from("still-available");
         let mut replay_body = ReplayableRequestBody::new(&HeaderMap::new(), body, 1024).unwrap();
@@ -290,6 +233,6 @@ mod tests {
 
         let attempt_body = replay_body.body_for_attempt().unwrap();
         let attempt_bytes = axum::body::to_bytes(attempt_body, 1024).await.unwrap();
-        assert_eq!(attempt_bytes, Bytes::from_static(b"still-available"));
+        assert_eq!(attempt_bytes, "still-available");
     }
 }

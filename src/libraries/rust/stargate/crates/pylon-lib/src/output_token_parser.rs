@@ -13,20 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sonic_rs::JsonValueTrait;
-
-#[derive(Debug, Clone, Default)]
-pub struct OutputTokenParserFactory;
-
-impl OutputTokenParserFactory {
-    pub fn vllm() -> Self {
-        Self
-    }
-
-    pub(crate) fn create(&self) -> OutputTokenParser {
-        OutputTokenParser::new()
-    }
-}
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 #[derive(Debug, Default)]
 pub(crate) struct OutputTokenParser {
@@ -57,11 +44,8 @@ impl OutputTokenParser {
         }
     }
 
-    pub(crate) fn parse_output_token_progress(
-        &mut self,
-        raw_data: &str,
-    ) -> Option<OutputTokenProgress> {
-        if let Some(completion_tokens) = parse_explicit_completion_tokens(raw_data) {
+    pub(crate) fn observe_json(&mut self, value: Option<&Value>) -> Option<OutputTokenProgress> {
+        if let Some(completion_tokens) = explicit_completion_tokens(value) {
             let tokens = if self.saw_explicit_counter {
                 self.last_reported_tokens.max(completion_tokens)
             } else {
@@ -77,60 +61,28 @@ impl OutputTokenParser {
             return None;
         }
 
-        let delta = estimate_completion_delta_from_text(raw_data)?;
+        let delta = estimate_completion_delta_from_text(value?)?;
         // Text-derived token estimates are telemetry counters; saturate instead of wrapping.
         self.last_reported_tokens = self.last_reported_tokens.saturating_add(delta);
         Some(OutputTokenProgress::EstimatedDelta { delta })
     }
-
-    #[cfg(test)]
-    pub(crate) fn parse_incremental_output_tokens(&mut self, raw_data: &str) -> Option<u64> {
-        self.parse_output_token_progress(raw_data)
-            .map(OutputTokenProgress::delta)
-    }
 }
 
-fn parse_explicit_completion_tokens(raw_data: &str) -> Option<u64> {
-    parse_usage_completion_tokens(raw_data)
-        .or_else(|| parse_output_tokens_so_far(raw_data))
-        .or_else(|| parse_responses_output_tokens(raw_data))
+fn explicit_completion_tokens(value: Option<&Value>) -> Option<u64> {
+    let value = value?;
+    value["usage"]["completion_tokens"]
+        .as_u64()
+        .or_else(|| value["output_tokens_so_far"].as_u64())
+        .or_else(|| value["response"]["usage"]["output_tokens"].as_u64())
 }
 
-fn parse_usage_completion_tokens(raw_data: &str) -> Option<u64> {
-    sonic_rs::get(raw_data.as_bytes(), &["usage", "completion_tokens"])
-        .ok()
-        .filter(|value| !value.is_null())
-        .and_then(|value| value.as_u64())
-}
-
-fn parse_output_tokens_so_far(raw_data: &str) -> Option<u64> {
-    sonic_rs::get(raw_data.as_bytes(), &["output_tokens_so_far"])
-        .ok()
-        .filter(|value| !value.is_null())
-        .and_then(|value| value.as_u64())
-}
-
-fn parse_responses_output_tokens(raw_data: &str) -> Option<u64> {
-    sonic_rs::get(raw_data.as_bytes(), &["response", "usage", "output_tokens"])
-        .ok()
-        .filter(|value| !value.is_null())
-        .and_then(|value| value.as_u64())
-}
-
-fn estimate_completion_delta_from_text(raw_data: &str) -> Option<u64> {
-    let value = serde_json::from_str::<serde_json::Value>(raw_data).ok()?;
-    let total = value
-        .get("choices")
-        .and_then(|choices| choices.as_array())
+fn estimate_completion_delta_from_text(value: &Value) -> Option<u64> {
+    let total = value["choices"]
+        .as_array()
         .map(|choices| {
             choices
                 .iter()
-                .filter_map(|choice| {
-                    choice
-                        .get("delta")
-                        .and_then(|delta| delta.get("content"))
-                        .and_then(|content| content.as_str())
-                })
+                .filter_map(|choice| choice["delta"]["content"].as_str())
                 .map(estimate_token_like_units)
                 .sum()
         })
@@ -138,9 +90,8 @@ fn estimate_completion_delta_from_text(raw_data: &str) -> Option<u64> {
     if total > 0 {
         return Some(total);
     }
-    let total = value
-        .get("delta")
-        .and_then(|delta| delta.as_str())
+    let total = value["delta"]
+        .as_str()
         .map(estimate_token_like_units)
         .unwrap_or_default();
     Some(total).filter(|units| *units > 0)
@@ -163,6 +114,18 @@ fn estimate_token_like_units(content: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl OutputTokenParser {
+        fn parse_output_token_progress(&mut self, raw_data: &str) -> Option<OutputTokenProgress> {
+            let value = sonic_rs::from_str(raw_data).ok();
+            self.observe_json(value.as_ref())
+        }
+
+        fn parse_incremental_output_tokens(&mut self, raw_data: &str) -> Option<u64> {
+            self.parse_output_token_progress(raw_data)
+                .map(OutputTokenProgress::delta)
+        }
+    }
 
     #[test]
     fn vllm_parser_tracks_continuous_usage_deltas() {

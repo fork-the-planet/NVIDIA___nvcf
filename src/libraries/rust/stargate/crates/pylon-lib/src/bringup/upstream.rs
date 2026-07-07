@@ -13,14 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde::Deserialize;
 use stargate_protocol::tunnel_contract::{HEADER_INPUT_TOKENS, HEADER_MODEL, HEADER_REQUEST_ID};
+use uuid::Uuid;
 
-static BRINGUP_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+static PYLON_GENERATED_REQUEST_SCOPE: LazyLock<Uuid> = LazyLock::new(Uuid::new_v4);
+static PYLON_GENERATED_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub(super) async fn check_upstream_health(
     http_client: &reqwest::Client,
@@ -51,8 +54,14 @@ pub(super) async fn send_canary_request(
         "stream": false,
     });
 
-    let completion =
-        send_completion_request(http_client, upstream_http_base_url, timeout, request).await?;
+    let completion = send_completion_request(
+        http_client,
+        upstream_http_base_url,
+        timeout,
+        request,
+        "canary",
+    )
+    .await?;
     if completion.usage.completion_tokens == canary_max_generation_threshold {
         return Err(BringupError::RunawayGeneration {
             tokens: completion.usage.completion_tokens,
@@ -66,31 +75,22 @@ pub(super) async fn send_completion_request(
     upstream_http_base_url: &str,
     timeout: Duration,
     request: serde_json::Value,
+    request_id_prefix: &str,
 ) -> Result<ChatCompletionResponse, BringupError> {
-    let request_id = BRINGUP_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let request_url = format!(
-        "{}/v1/chat/completions",
-        upstream_http_base_url.trim_end_matches('/')
-    );
+    let request_id = next_pylon_generated_request_id(request_id_prefix);
     let response = http_client
-        .post(request_url)
+        .post(format!(
+            "{}/v1/chat/completions",
+            upstream_http_base_url.trim_end_matches('/')
+        ))
         .timeout(timeout)
-        .header(HEADER_REQUEST_ID, format!("bringup-{request_id}"))
-        .header(
-            HEADER_MODEL,
-            request
-                .get("model")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default(),
-        )
+        .header(HEADER_REQUEST_ID, request_id)
+        .header(HEADER_MODEL, request["model"].as_str().unwrap_or_default())
         .header(
             HEADER_INPUT_TOKENS,
             request
-                .get("messages")
-                .and_then(|value| value.as_array())
-                .and_then(|messages| messages.first())
-                .and_then(|message| message.get("content"))
-                .and_then(|value| value.as_str())
+                .pointer("/messages/0/content")
+                .and_then(serde_json::Value::as_str)
                 .map(|text| text.len().to_string())
                 .unwrap_or_else(|| "1".to_string()),
         )
@@ -101,18 +101,28 @@ pub(super) async fn send_completion_request(
     let status = response.status();
     let body = response.bytes().await?;
     if status.is_success() {
-        return serde_json::from_slice(&body)
-            .map_err(|error| BringupError::InvalidResponse(error.to_string()));
+        serde_json::from_slice(&body)
+            .map_err(|error| BringupError::InvalidResponse(error.to_string()))
+    } else {
+        let message = extract_error_message(&body);
+        if is_prompt_too_long(status, &message) {
+            Err(BringupError::PromptTooLong)
+        } else {
+            Err(BringupError::Api {
+                status,
+                message: message.unwrap_or_else(|| String::from_utf8_lossy(&body).into_owned()),
+            })
+        }
     }
+}
 
-    let message = extract_error_message(&body);
-    if is_prompt_too_long(status, &message) {
-        return Err(BringupError::PromptTooLong);
-    }
-    Err(BringupError::Api {
-        status,
-        message: message.unwrap_or_else(|| String::from_utf8_lossy(&body).into_owned()),
-    })
+fn next_pylon_generated_request_id(prefix: &str) -> String {
+    let counter = PYLON_GENERATED_REQUEST_COUNTER
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| {
+            counter.checked_add(1)
+        })
+        .expect("pylon-generated request id counter exhausted");
+    format!("{prefix}-{}-{counter}", *PYLON_GENERATED_REQUEST_SCOPE)
 }
 
 fn extract_error_message(body: &[u8]) -> Option<String> {
@@ -122,23 +132,22 @@ fn extract_error_message(body: &[u8]) -> Option<String> {
 }
 
 pub(super) fn is_prompt_too_long(status: StatusCode, message: &Option<String>) -> bool {
-    if !status.is_client_error() {
-        return false;
-    }
-    let Some(message) = message else {
-        return false;
-    };
-    let message = message.to_ascii_lowercase();
-    message.contains("prompt too long")
-        || message.contains("context length")
-        || message.contains("maximum context")
+    status.is_client_error()
+        && message.as_ref().is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            ["prompt too long", "context length", "maximum context"]
+                .iter()
+                .any(|needle| message.contains(needle))
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum BringupError {
+pub enum BringupError {
+    #[error("invalid calibration configuration: {0}")]
+    InvalidCalibrationConfig(&'static str),
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("upstream health check failed before assigned calibration")]
+    #[error("upstream health check failed during pylon startup")]
     UnhealthyUpstream,
     #[error("upstream rejected request ({status}): {message}")]
     Api { status: StatusCode, message: String },

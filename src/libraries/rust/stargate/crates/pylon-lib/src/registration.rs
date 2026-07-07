@@ -15,7 +15,6 @@
 
 use std::time::Duration;
 
-mod calibration;
 mod client;
 mod discovery;
 mod grpc_endpoint;
@@ -31,25 +30,6 @@ mod urls;
 pub use client::InferenceServerRegistrationClient;
 pub use types::{ClientError, InferenceServerRegistrationConfig};
 
-#[cfg(test)]
-use crate::runtime_state::{CurrentModelStats, gated_model_status};
-#[cfg(test)]
-use calibration::*;
-#[cfg(test)]
-use discovery::*;
-#[cfg(test)]
-use grpc_endpoint::*;
-#[cfg(test)]
-use reverse_tunnel::*;
-#[cfg(test)]
-use router_stream::*;
-#[cfg(test)]
-use state::*;
-#[cfg(test)]
-use topology::*;
-#[cfg(test)]
-use types::RegistrationStartPlan;
 use urls::normalize_addr;
 
 const REVERSE_TUNNEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CLUSTER_CALIBRATION_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(5);

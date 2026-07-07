@@ -4,7 +4,8 @@ This section provides a comprehensive list of all components required for NVIDIA
 
 ## Artifacts Overview
 
-The following tables list all artifacts required for an inference-only self-hosted NVCF deployment, organized by category, with their container images, Helm charts, and other resources.
+The following inventories list the artifacts for an inference-only self-hosted
+NVCF deployment. Artifacts are grouped by deployment plane and type.
 
 <Warning>
 Artifact version compatibility
@@ -19,8 +20,8 @@ cannot guarantee compatibility when you substitute other artifact versions.
 ## Prepare Helm charts for Helmfile
 
 The self-managed Helmfile bundles currently expect NVCF charts in an OCI
-registry. Rows marked `Chart (HTTP)` are NGC Helm repository
-charts. Before deploying with Helmfile, copy each required `Chart (HTTP)`
+registry. Chart distributions that start with `https://` are Helm repository
+charts. Before deploying with Helmfile, copy each required repository chart
 version into the OCI registry configured by `global.helm.sources` in the
 Helmfile bundles.
 
@@ -41,10 +42,10 @@ helm push "${CHART_NAME}-${CHART_VERSION}.tgz" \
   "oci://${TARGET_REGISTRY}/${TARGET_REPOSITORY}"
 ```
 
-Repeat this process for every required `Chart (HTTP)` row. Copy any required
-`Chart (OCI)` rows into the same target repository so Helmfile can resolve all
-NVCF charts from one source. Configure the stack environment with that OCI
-location:
+Repeat this process for every required chart with an `https://` distribution.
+Copy required charts with an `nvcr.io` distribution into the same target
+repository so Helmfile can resolve all NVCF charts from one source. Configure
+the stack environment with that OCI location:
 
 ```yaml
 global:
@@ -61,238 +62,108 @@ Some supporting components such as the GPU Operator, OpenBao, NATS, Cassandra, e
 
 </Info>
 
-### Artifact Registry Paths
+The following tables list the complete artifact inventory.
 
 {/* docs-version-sync:BEGIN manifest-artifact-registry-paths */}
 
-#### Infrastructure Components
+### Control plane Helm charts
 
-Core infrastructure services including NATS for messaging, NATS auth callout support, Cassandra for data storage, and OpenBao for secret management.
+| Artifact | Version | Required | Description | Distribution | Source code |
+| --- | --- | --- | --- | --- | --- |
+| `helm-admin-token-issuer-proxy` | `1.4.3` | Optional | Deploys the admin token issuer proxy used by the reference architecture. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-admin-token-issuer-proxy:1.4.3` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/admin-token-issuer-proxy) |
+| `helm-nvcf-api` | `1.23.1` | Required | Deploys the NVCF API service. | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-api:1.23.1` |  |
+| `helm-nvcf-api-keys` | `1.5.1` | Required | Deploys the API key management service. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-api-keys:1.5.1` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/api-keys-colocated) |
+| `helm-nvcf-cassandra` | `0.15.5` | Required | Deploys Cassandra and its initialization jobs. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-cassandra:0.15.5` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/cassandra) / [Upstream](https://github.com/bitnami/charts/tree/main/bitnami/cassandra) |
+| `helm-nvcf-cert-manager` | `0.1.0` | Required | Deploys the NVCF cert-manager configuration. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-cert-manager:0.1.0` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/cert-manager) / [Upstream](https://github.com/cert-manager/cert-manager) |
+| `helm-nvcf-ess-api` | `1.6.1` | Required | Deploys the Encrypted Secrets Service API. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-ess-api:1.6.1` |  |
+| `helm-nvcf-grpc-proxy` | `1.6.7` | Required | Deploys the gRPC proxy service. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-grpc-proxy:1.6.7` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/grpc-proxy) |
+| `helm-nvcf-invocation-service` | `1.5.5` | Required | Deploys the HTTP invocation service. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-invocation-service:1.5.5` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/http-invocation) |
+| `helm-nvcf-llm-api-gateway` | `1.2.0` | Optional | Deploys the OpenAI-compatible LLM API gateway. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-llm-api-gateway:1.2.0` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/llm-api-gateway) |
+| `helm-nvcf-llm-request-router` | `1.6.3` | Optional | Deploys the LLM request router. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-llm-request-router:1.6.3` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/llm-request-router) |
+| `helm-nvcf-nats` | `0.7.1` | Required | Deploys NATS messaging for the control plane. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-nats:0.7.1` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/nats) / [Upstream](https://github.com/nats-io/k8s) |
+| `helm-nvcf-nats-auth-callout-service` | `1.1.3` | Required | Deploys the NATS authorization callout service. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-nats-auth-callout-service:1.1.3` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/nats-auth-callout) |
+| `helm-nvcf-notary-service` | `1.4.1` | Required | Deploys the notary service for signing and validation. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-notary-service:1.4.1` |  |
+| `helm-nvcf-nvct-api` | `1.4.2` | Required | Deploys the NVCF tenant API service. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-nvct-api:1.4.2` |  |
+| `helm-nvcf-openbao-server` | `0.30.23` | Required | Deploys OpenBao secret management. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-openbao-server:0.30.23` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/openbao) / [Upstream](https://github.com/openbao/openbao-helm) |
+| `helm-nvcf-rate-limiter` | `1.0.3` | Optional | Deploys request rate limiting for supported invocation paths. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-rate-limiter:1.0.3` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/ratelimiter) |
+| `helm-nvcf-sis` | `1.17.0` | Required | Deploys the Spot Instance Service. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-sis:1.17.0` |  |
+| `helm-nvcf-state-metrics` | `1.0.1` | Optional | Deploys NVCF state metrics for observability. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-state-metrics:1.0.1` |  |
+| `helm-nvcf-vanity-gateway` | `0.1.0-nvcf-10204.1` | Optional | Deploys the optional vanity hostname gateway. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-vanity-gateway:0.1.0-nvcf-10204.1` |  |
+| `helm-reval` | `1.3.8` | Required | Deploys the function revalidation service. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-reval:1.3.8` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/helm-reval) |
+| `nvcf-example-dashboards` | `1.6.0` | Optional | Deploys example Grafana dashboards for NVCF telemetry. | `https://helm.ngc.nvidia.com/nvidia/nvcf/nvcf-example-dashboards:1.6.0` |  |
+| `nvcf-gateway-routes` | `1.13.4` | Optional | Deploys Gateway API routes for the reference architecture. | `https://helm.ngc.nvidia.com/nvidia/nvcf/nvcf-gateway-routes:1.13.4` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/gateway-routes) |
+| `nvcf-observability-reference-stack` | `1.10.0` | Optional | Deploys a reference observability backend for evaluation. | `https://helm.ngc.nvidia.com/nvidia/nvcf/nvcf-observability-reference-stack:1.10.0` |  |
 
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | nats-box | `nvcr.io/0833294136851237/nvcf-ncp-staging/nats-box:0.19.7-nonroot` |
-| Image | nats-server | `nvcr.io/nvidia/nvcf/nats-server:2.11.17-alpine3.22` |
-| Image | nats-server-config-reloader | `nvcr.io/0833294136851237/nvcf-ncp-staging/nats-server-config-reloader:0.23.0` |
-| Chart (HTTP) | helm-nvcf-nats | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-nats:0.7.1` |
-| Image | nvcf-nats-auth-callout-service | `nvcr.io/nvidia/nvcf/nvcf-nats-auth-callout-service:0.5.10` |
-| Chart (HTTP) | helm-nvcf-nats-auth-callout-service | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-nats-auth-callout-service:1.1.3` |
-| Image | bitnami-cassandra | `nvcr.io/0833294136851237/nvcf-ncp-staging/bitnami-cassandra:5.0.6-nv-1` |
-| Image | nvcf-cassandra-migrations | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cassandra-migrations:0.8.1` |
-| Chart (HTTP) | helm-nvcf-cassandra | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-cassandra:0.15.5` |
-| Image | nvcf-openbao | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-openbao:2.5.4-nv-1.3.0` |
-| Image | nvcf-openbao-migrations | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-openbao-migrations:0.16.1` |
-| Chart (HTTP) | helm-nvcf-openbao-server | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-openbao-server:0.30.23` |
-| Image | oss-vault-k8s | `nvcr.io/nvidia/nvcf/oss-vault-k8s:1.7.4` |
+### Control plane services and images
 
-#### Control Plane Components
+| Artifact | Version | Required | Description | Distribution | Source code |
+| --- | --- | --- | --- | --- | --- |
+| `admin-token-issuer-proxy` | `1.0.2` | Optional | Proxies admin token requests for the reference architecture. | `nvcr.io/0833294136851237/nvcf-ncp-staging/admin-token-issuer-proxy:1.0.2` |  |
+| `alpine-k8s` | `1.36.1` | Required | Provides Kubernetes command-line utilities for deployment jobs. | `nvcr.io/0833294136851237/nvcf-ncp-staging/alpine-k8s:1.36.1` |  |
+| `cert-manager-cainjector` | `v1.20.2` | Required | Injects certificate authority data into Kubernetes resources. | `nvcr.io/nvidia/nvcf/cert-manager-cainjector:v1.20.2` | [Upstream](https://github.com/cert-manager/cert-manager) |
+| `cert-manager-controller` | `v1.20.2` | Required | Reconciles certificates and issuers for the control plane. | `nvcr.io/nvidia/nvcf/cert-manager-controller:v1.20.2` | [Upstream](https://github.com/cert-manager/cert-manager) |
+| `cert-manager-startupapicheck` | `v1.20.2` | Required | Verifies that the cert-manager API is ready. | `nvcr.io/nvidia/nvcf/cert-manager-startupapicheck:v1.20.2` | [Upstream](https://github.com/cert-manager/cert-manager) |
+| `cert-manager-webhook` | `v1.20.2` | Required | Validates and converts cert-manager API resources. | `nvcr.io/nvidia/nvcf/cert-manager-webhook:v1.20.2` | [Upstream](https://github.com/cert-manager/cert-manager) |
+| `ess-api` | `v0.57.26` | Required | Provides encrypted application secrets to NVCF workloads. | `nvcr.io/nvidia/nvcf/ess-api:v0.57.26` |  |
+| `llm-api-gateway` | `0.8.3` | Optional | Exposes OpenAI-compatible APIs for LLM functions. | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.8.3` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/invocation-plane-services/llm-api-gateway) |
+| `llm-request-router` | `0.3.0` | Optional | Routes LLM requests to eligible worker instances. | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.3.0` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/libraries/rust/stargate) |
+| `nats-box` | `0.19.7-nonroot` | Required | Provides NATS administration and diagnostic utilities. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nats-box:0.19.7-nonroot` | [Upstream](https://github.com/nats-io/nats-box) |
+| `nats-server` | `2.11.17-alpine3.22` | Required | Provides messaging for function deployment and invocation. | `nvcr.io/nvidia/nvcf/nats-server:2.11.17-alpine3.22` | [Upstream](https://github.com/nats-io/nats-server) |
+| `nats-server-config-reloader` | `0.23.0` | Required | Reloads NATS server configuration when mounted settings change. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nats-server-config-reloader:0.23.0` | [Upstream](https://github.com/nats-io/k8s) |
+| `notary-service` | `1.9.4` | Required | Signs and validates functions and cluster nodes. | `nvcr.io/0833294136851237/nvcf-ncp-staging/notary-service:1.9.4` |  |
+| `nvcf-api-keys-service` | `1.2.14` | Required | Creates and manages NVCF API keys. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-api-keys-service:1.2.14` |  |
+| `nvcf-grpc-proxy` | `1.29.1` | Required | Proxies bidirectional gRPC traffic between the control and compute planes. | `nvcr.io/nvidia/nvcf/nvcf-grpc-proxy:1.29.1` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/invocation-plane-services/grpc-proxy) |
+| `nvcf-invocation-service` | `0.8.5` | Required | Routes stateless HTTP function invocation requests. | `nvcr.io/nvidia/nvcf/nvcf-invocation-service:0.8.5` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/invocation-plane-services/http-invocation) |
+| `nvcf-nats-auth-callout-service` | `0.5.10` | Required | Authorizes NATS clients for NVCF services and workloads. | `nvcr.io/nvidia/nvcf/nvcf-nats-auth-callout-service:0.5.10` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/control-plane-services/nats-auth-callout) |
+| `nvcf-openbao` | `2.5.4-nv-1.3.0` | Required | Stores and manages control-plane secrets. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-openbao:2.5.4-nv-1.3.0` | [Upstream](https://github.com/openbao/openbao) |
+| `nvcf-openbao-migrations` | `0.16.1` | Required | Applies the OpenBao configuration required by NVCF. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-openbao-migrations:0.16.1` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/migrations/openbao) |
+| `nvcf-service-oss` | `1.9.0` | Required | Provides the primary NVCF control-plane API. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-service-oss:1.9.0` |  |
+| `nvct-service-oss` | `1.5.5` | Required | Provides tenant-scoped NVCF control-plane operations. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvct-service-oss:1.5.5` |  |
+| `oss-vault-k8s` | `1.7.4` | Required | Integrates Kubernetes workloads with OpenBao secrets. | `nvcr.io/nvidia/nvcf/oss-vault-k8s:1.7.4` |  |
+| `reval-server` | `0.2.2` | Required | Revalidates function state in the background. | `nvcr.io/nvidia/nvcf/reval-server:0.2.2` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/control-plane-services/helm-reval) |
+| `spot` | `1.563.1` | Required | Manages deployments, clusters, and function instances. | `nvcr.io/0833294136851237/nvcf-ncp-staging/spot:1.563.1` |  |
 
-Services that manage the NVCF platform including API gateway, deployment orchestration, invocation handling, LLM routing, and security services.
+### Compute plane Helm charts
 
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | spot | `nvcr.io/0833294136851237/nvcf-ncp-staging/spot:1.563.1` |
-| Image | nvcf-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-service-oss:1.9.0` |
-| Chart (OCI) | helm-nvcf-api | `nvcr.io/0833294136851237/nvcf-ncp-staging/helm-nvcf-api:1.23.1` |
-| Chart (HTTP) | helm-nvcf-sis | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-sis:1.17.0` |
-| Image | nvcf-grpc-proxy | `nvcr.io/nvidia/nvcf/nvcf-grpc-proxy:1.29.1` |
-| Chart (HTTP) | helm-nvcf-grpc-proxy | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-grpc-proxy:1.6.7` |
-| Image | nvcf-invocation-service | `nvcr.io/nvidia/nvcf/nvcf-invocation-service:0.8.5` |
-| Chart (HTTP) | helm-nvcf-invocation-service | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-invocation-service:1.5.5` |
-| Image | ess-api | `nvcr.io/nvidia/nvcf/ess-api:v0.57.26` |
-| Chart (HTTP) | helm-nvcf-ess-api | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-ess-api:1.6.1` |
-| Image | notary-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/notary-service:1.9.4` |
-| Chart (HTTP) | helm-nvcf-notary-service | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-notary-service:1.4.1` |
-| Image | reval-server | `nvcr.io/nvidia/nvcf/reval-server:0.2.2` |
-| Chart (HTTP) | helm-reval | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-reval:1.3.8` |
-| Image | nvcf-api-keys-service | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-api-keys-service:1.2.14` |
-| Chart (HTTP) | helm-nvcf-api-keys | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-api-keys:1.5.1` |
-| Image | nvct-service-oss | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvct-service-oss:1.5.5` |
-| Chart (HTTP) | helm-nvcf-nvct-api | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-nvct-api:1.4.2` |
-| Image | llm-api-gateway | `nvcr.io/0833294136851237/nvcf-ncp-staging/llm-api-gateway:0.8.3` |
-| Image | llm-request-router | `nvcr.io/0833294136851237/nvcf-ncp-staging/stargate:0.3.0` |
-| Chart (HTTP) | helm-nvcf-llm-api-gateway | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-llm-api-gateway:1.2.0` |
-| Chart (HTTP) | helm-nvcf-llm-request-router | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-llm-request-router:1.6.3` |
+| Artifact | Version | Required | Description | Distribution | Source code |
+| --- | --- | --- | --- | --- | --- |
+| `csi-driver-smb` | `supported` | Optional | Provides SMB persistent volumes for supported deployments. | `https://raw.githubusercontent.com/kubernetes-csi/csi-driver-smb/master/charts` | [Upstream](https://github.com/kubernetes-csi/csi-driver-smb) |
+| `ebs-csi-driver` | `supported` | Optional | Provides Amazon EBS persistent volumes for EKS clusters. | `https://kubernetes-sigs.github.io/aws-ebs-csi-driver` | [Upstream](https://github.com/kubernetes-sigs/aws-ebs-csi-driver) |
+| `gpu-operator` | `supported` | Required | Manages NVIDIA GPU software on Kubernetes nodes. | `https://helm.ngc.nvidia.com/nvidia` | [Upstream](https://github.com/NVIDIA/gpu-operator) |
+| `helm-nvca-operator` | `1.12.7` | Required | Deploys the NVCA operator and compute-plane integration. | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvca-operator:1.12.7` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/nvca-operator) |
+| `nvcf-container-cache` | `0.25.22` | Optional | Deploys container image caching on GPU cluster nodes. | `https://helm.ngc.nvidia.com/nvidia/nvcf/nvcf-container-cache:0.25.22` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/container-cache) |
 
-#### GPU Workload Components
+### Compute plane services and images
 
-Components that run on GPU nodes to manage function execution, including the NVCA operator and supporting containers.
+| Artifact | Version | Required | Description | Distribution | Source code |
+| --- | --- | --- | --- | --- | --- |
+| `ess-agent` | `1.1.0` | Required | Injects encrypted application secrets into function workloads. | `nvcr.io/0833294136851237/nvcf-ncp-staging/ess-agent:1.1.0` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/ess-agent) |
+| `gpu-operator-validator` | `supported` | Required | Validates GPU Operator components on GPU nodes. | `https://catalog.ngc.nvidia.com/orgs/nvidia/teams/cloud-native/containers/gpu-operator-validator` | [Upstream](https://github.com/NVIDIA/gpu-operator) |
+| `k8s-device-plugin` | `supported` | Required | Advertises NVIDIA GPU resources to Kubernetes. | `https://catalog.ngc.nvidia.com/orgs/nvidia/teams/k8s/containers/device-plugin` | [Upstream](https://github.com/NVIDIA/k8s-device-plugin) |
+| `nvca` | `3.0.3` | Required | Registers GPU clusters and orchestrates deployments in-cluster. | `nvcr.io/nvidia/nvcf/nvca:3.0.3` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/nvca) |
+| `nvca-operator` | `3.0.3` | Required | Reconciles NVCA resources and compute-plane configuration. | `nvcr.io/nvidia/nvcf/nvca-operator:3.0.3` |  |
+| `nvcf-container-cache` | `v1.1.31` | Optional | Caches container image layers on GPU cluster nodes. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-container-cache:v1.1.31` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/helm/container-cache) |
+| `nvcf-image-credential-helper` | `0.10.2` | Required | Resolves container image credentials for function workloads. | `nvcr.io/nvidia/nvcf/nvcf-image-credential-helper:0.10.2` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/image-credential-helper) |
+| `nvcf-proxy-tls-certs` | `1.2.0` | Optional | Configures TLS trust for the optional container cache proxy. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-proxy-tls-certs:1.2.0` |  |
+| `nvcf_worker_init` | `2.109.4` | Required | Prepares function resources before the user container starts. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_init:2.109.4` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/worker-init) |
+| `nvcf_worker_utils` | `2.109.4` | Required | Proxies NATS traffic between function containers and the control plane. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_utils:2.109.4` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/compute-plane-services/worker-utils) |
+| `pylon` | `0.3.0` | Optional | Connects LLM worker pods to the LLM request router. | `nvcr.io/0833294136851237/nvcf-ncp-staging/pylon:0.3.0` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/libraries/rust/stargate) |
 
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | nvca | `nvcr.io/nvidia/nvcf/nvca:3.0.3` |
-| Image | nvca-operator | `nvcr.io/nvidia/nvcf/nvca-operator:3.0.3` |
-| Chart (HTTP) | helm-nvca-operator | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvca-operator:1.12.7` |
-| Image | nvcf_worker_utils | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_utils:2.109.4` |
-| Image | nvcf_worker_init | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf_worker_init:2.109.4` |
-| Image | ess-agent | `nvcr.io/0833294136851237/nvcf-ncp-staging/ess-agent:1.1.0` |
-| Image | nvcf-image-credential-helper | `nvcr.io/nvidia/nvcf/nvcf-image-credential-helper:0.10.2` |
+### EA-only CVE-impacted artifacts
 
-#### Supporting Components
+These Early Access artifacts have known CVE impact. Use only the QA-qualified versions listed for this EA stack.
 
-Additional utilities and helper services required for the platform, including the NVIDIA GPU Operator for GPU node management.
+| Artifact | Version | Required | Description | Distribution | Source code |
+| --- | --- | --- | --- | --- | --- |
+| `bitnami-cassandra` | `5.0.6-nv-1` | Required | Stores NVCF account, function, cluster, and service state during Early Access. | `nvcr.io/0833294136851237/nvcf-ncp-staging/bitnami-cassandra:5.0.6-nv-1` | [Upstream](https://github.com/bitnami/containers/tree/main/bitnami/cassandra) |
+| `nvcf-cassandra-migrations` | `0.8.1` | Required | Applies the Cassandra schemas required by Early Access NVCF services. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cassandra-migrations:0.8.1` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/migrations/cassandra) |
 
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | alpine-k8s | `nvcr.io/0833294136851237/nvcf-ncp-staging/alpine-k8s:1.36.1` |
-| Chart (HTTP) | gpu-operator | [Public NGC Helm repo](https://helm.ngc.nvidia.com/nvidia) |
-| Image | gpu-operator-validator | [Public NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/cloud-native/containers/gpu-operator-validator) |
-| Image | k8s-device-plugin | [Public NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/k8s/containers/device-plugin) |
-| Chart (HTTP) | ebs-csi-driver | `https://kubernetes-sigs.github.io/aws-ebs-csi-driver` |
-| Chart (HTTP) | csi-driver-smb | `https://raw.githubusercontent.com/kubernetes-csi/csi-driver-smb/master/charts` |
+### Tools and deployment resources
 
-#### Reference Architecture Components
-
-Optional components for the reference deployment architecture.
-
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Chart (HTTP) | nvcf-gateway-routes | `https://helm.ngc.nvidia.com/nvidia/nvcf/nvcf-gateway-routes:1.13.4` |
-| Image | admin-token-issuer-proxy | `nvcr.io/0833294136851237/nvcf-ncp-staging/admin-token-issuer-proxy:1.0.2` |
-| Chart (HTTP) | helm-admin-token-issuer-proxy | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-admin-token-issuer-proxy:1.4.3` |
-
-#### Observability Components
-
-Optional example components for monitoring and observability. These are provided as reference implementations only and are not intended for production use. See [self-hosted-example-dashboards](./example-dashboards.md) for deployment instructions.
-
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Chart (HTTP) | nvcf-observability-reference-stack | `https://helm.ngc.nvidia.com/nvidia/nvcf/nvcf-observability-reference-stack:1.10.0` |
-| Chart (HTTP) | nvcf-example-dashboards | `https://helm.ngc.nvidia.com/nvidia/nvcf/nvcf-example-dashboards:1.6.0` |
-| Chart (HTTP) | helm-nvcf-state-metrics | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-state-metrics:1.0.1` |
-
-#### Container Caching Components
-
-Optional components for accelerating container image pulls across all workload types.
-
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | nvcf-container-cache | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-container-cache:v1.1.31` |
-| Chart (HTTP) | nvcf-container-cache | `https://helm.ngc.nvidia.com/nvidia/nvcf/nvcf-container-cache:0.25.22` |
-| Image | nvcf-proxy-tls-certs | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-proxy-tls-certs:1.2.0` |
-
-#### Other Published Components
-
-Additional components present in the current stack artifact manifest.
-
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Image | cert-manager-cainjector | `nvcr.io/nvidia/nvcf/cert-manager-cainjector:v1.20.2` |
-| Image | cert-manager-controller | `nvcr.io/nvidia/nvcf/cert-manager-controller:v1.20.2` |
-| Image | cert-manager-startupapicheck | `nvcr.io/nvidia/nvcf/cert-manager-startupapicheck:v1.20.2` |
-| Image | cert-manager-webhook | `nvcr.io/nvidia/nvcf/cert-manager-webhook:v1.20.2` |
-| Chart (HTTP) | helm-nvcf-cert-manager | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-cert-manager:0.1.0` |
-| Chart (HTTP) | helm-nvcf-rate-limiter | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-rate-limiter:1.0.3` |
-| Chart (HTTP) | helm-nvcf-vanity-gateway | `https://helm.ngc.nvidia.com/nvidia/nvcf/helm-nvcf-vanity-gateway:0.1.0-nvcf-10204.1` |
-| Image | pylon | `nvcr.io/0833294136851237/nvcf-ncp-staging/pylon:0.3.0` |
-
-#### Deployment Resources
-
-Helmfile and CLI resources for deployment.
-
-| Type | Component Name | Full Path |
-| --- | --- | --- |
-| Resource | nvcf-self-managed-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.98` |
-| Resource | nvcf-cli | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` |
-| Resource | nvcf-compute-plane-stack | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:1.0.6` |
+| Artifact | Version | Description | Distribution | Source code |
+| --- | --- | --- | --- | --- |
+| `nvcf-cli` | `0.0.30` | Manages functions, deployments, and clusters from the command line. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-cli:0.0.30` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/src/clis/nvcf-cli) |
+| `nvcf-compute-plane-stack` | `1.0.6` | Provides the Helmfile bundle for compute-plane deployment. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-compute-plane-stack:1.0.6` |  |
+| `nvcf-self-managed-stack` | `0.6.0-rc.98` | Provides the Helmfile bundle for control-plane deployment. | `nvcr.io/0833294136851237/nvcf-ncp-staging/nvcf-self-managed-stack:0.6.0-rc.98` | [GitHub](https://github.com/NVIDIA/nvcf/tree/main/deploy/stacks/self-managed) |
 
 {/* docs-version-sync:END manifest-artifact-registry-paths */}
-
-### Component Descriptions
-
-#### Infrastructure Components
-
-| Component Name | Description |
-| --- | --- |
-| nats-box | NATS utility container for debugging and administration |
-| nats-server | Pub Sub Messages, used for Function Invocation and Deployment |
-| nats-server-config-reloader | Configuration reloader for NATS server |
-| helm-nvcf-nats | Helm chart for NATS deployment |
-| nvcf-nats-auth-callout-service | Auth callout service for NATS authorization |
-| helm-nvcf-nats-auth-callout-service | Helm chart for the NATS auth callout service |
-| bitnami-cassandra | Database for Account, Function and Cluster Management |
-| nvcf-cassandra-migrations | Database migration scripts for Cassandra |
-| helm-nvcf-cassandra | Helm chart for Cassandra deployment |
-| nvcf-openbao | Secret management (OpenBao/Vault) |
-| nvcf-openbao-migrations | Migration scripts for OpenBao |
-| helm-nvcf-openbao-server | OpenBao Helm chart |
-| oss-vault-k8s | Kubernetes integration for secret management |
-
-#### Control Plane Components
-
-| Component Name | Description |
-| --- | --- |
-| spot | Spot Instance Service (SIS) - Manages deployments, cluster and instance state |
-| nvcf-service-oss | NVCF API service, refer to [self-hosted-api](./api.md) for full API specification |
-| helm-nvcf-api | Helm chart for NVCF API service |
-| helm-nvcf-sis | Helm chart for Spot Instance Service |
-| nvcf-grpc-proxy | Used for bi-directional communication and state management |
-| helm-nvcf-grpc-proxy | Helm chart for GRPC Proxy deployment |
-| nvcf-invocation-service | Handles stateless HTTP Function invocation requests |
-| helm-nvcf-invocation-service | Helm chart for Invocation Service |
-| ess-api | Encrypted Secrets Service - Used for application secret injection |
-| helm-nvcf-ess-api | Helm chart for ESS API |
-| notary-service | Used to sign and validate Functions and nodes |
-| helm-nvcf-notary-service | Helm chart for Notary Service |
-| reval-server | Reval (re-validation) service - Handles background re-validation of function state |
-| helm-reval | Helm chart for Reval service |
-| nvcf-api-keys-service | API key generation and management |
-| helm-nvcf-api-keys | Helm chart for API Keys service |
-| llm-api-gateway | Gateway service for OpenAI-compatible LLM requests |
-| llm-request-router | Request routing service backed by the Stargate image |
-| helm-nvcf-llm-api-gateway | Helm chart for LLM API gateway services |
-| helm-nvcf-llm-request-router | Helm chart for LLM request routing services |
-
-#### GPU Workload Components
-
-| Component Name | Description |
-| --- | --- |
-| nvca | Performs the registration of the cluster and deployment orchestration in-cluster |
-| helm-nvca-operator (chart) | Helm chart for NVCA operator deployment (current chart name, versions 1.4.0+) |
-| nvcf_worker_utils | Acts as a proxy to NATS from the user's application |
-| nvcf_worker_init | Setup & Resource loading on deployment for the users application |
-| ess-agent | Injects User Secrets |
-| nvcf-image-credential-helper | Helper for managing container image credentials |
-
-#### Supporting Components
-
-| Component Name | Description |
-| --- | --- |
-| alpine-k8s | Kubernetes utility container |
-| gpu-operator | NVIDIA GPU Operator for dynamic GPU discovery - Can also pull directly from public NGC Catalog |
-| gpu-operator-validator | GPU Operator validation component |
-| k8s-device-plugin | Kubernetes device plugin for GPU support |
-| ebs-csi-driver | AWS EBS CSI Driver for persistent volume provisioning on EKS |
-| csi-driver-smb | CSI Driver for SMB/CIFS file shares |
-
-#### Reference Architecture Components
-
-| Component Name | Description |
-| --- | --- |
-| nvcf-gateway-routes | Gateway routing configuration for reference architecture |
-| admin-token-issuer-proxy | Admin token management proxy |
-| helm-admin-token-issuer-proxy | Helm chart for admin token issuer proxy |
-
-#### Observability Components
-
-| Component Name | Description |
-| --- | --- |
-| nvcf-observability-reference-stack | Reference observability backend (Prometheus, Grafana, Loki, Tempo, OpenTelemetry Collector) |
-| nvcf-example-dashboards | Pre-configured Grafana dashboards for NVCF control-plane metrics |
-| helm-nvcf-state-metrics | Helm chart for NVCF state metrics service |
-
-#### Container Caching Components
-
-| Component Name | Description |
-| --- | --- |
-| nvcf-container-cache | Accelerates container image pulls by caching layers locally on nodes |
-| nvcf-container-cache (chart) | Helm chart for container cache deployment |
-| nvcf-proxy-tls-certs | TLS certificate management for container cache proxy |
-
-#### Deployment Resources
-
-| Component Name | Description |
-| --- | --- |
-| nvcf-self-managed-stack | Helmfile bundle for self-managed stack deployment |
-| nvcf-compute-plane-stack | Helmfile bundle for compute-plane stack deployment |
-| nvcf-cli | Command-line interface for managing functions and deployments |

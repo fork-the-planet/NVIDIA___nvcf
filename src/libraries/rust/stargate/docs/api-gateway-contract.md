@@ -9,6 +9,7 @@ The gateway is the public API boundary. Stargate is the local backend router.
 This contract was checked against:
 
 - `crates/stargate/src/http_proxy.rs`
+- `crates/stargate/src/http_proxy/diagnostics.rs`
 - `crates/stargate/src/control_plane.rs`
 - `crates/pylon-lib/src/request_observer.rs`
 - `crates/pylon-lib/src/queue_admission.rs`
@@ -59,7 +60,28 @@ services. Those are not gateway APIs.
 
 ## Model Discovery
 
-Call `StargateModelDiscovery/ListModels`.
+Call `StargateModelDiscovery/ListModels`, or use the HTTP mirror on the
+`stargate-proxy` Service:
+
+```text
+GET /v1/models
+```
+
+The HTTP mirror accepts an optional repeatable `model_ids` filter:
+
+| Query parameter | Meaning |
+| --- | --- |
+| `model_ids` | Optional repeatable model filter, for example `?model_ids=a&model_ids=b`. |
+
+The HTTP response is JSON with the same shape as the gRPC response:
+
+```json
+{"model_ids":["model-a","model-b"]}
+```
+
+An empty `model_ids` value returns HTTP `400`. The HTTP path uses the same
+model-id normalization and local routing-state lookup as gRPC, with an
+unscoped model lookup.
 
 Request:
 
@@ -76,6 +98,18 @@ followed by proxy `404` with `x-stargate-error-code: no_eligible_candidates`,
 the local route changed after discovery returned; the gateway may retry
 according to its normal policy. A `503` for a registered model means no
 eligible active backend, not a discovery miss.
+
+## Operator Debug State
+
+`GET /debug/state` on the `stargate-proxy` HTTP listener returns a JSON
+snapshot for live diagnosis. It includes safe static configuration (identity,
+listener addresses, tunnel selection, and reverse-tunnel enablement) plus the
+serving Stargate's current active model IDs. The state is local and
+best-effort: routing can change while the response is being assembled.
+
+This endpoint intentionally exposes only explicit non-secret fields; it does
+not serialize credentials, TLS material, backend URLs, or routing topology.
+Restrict it to trusted operator networks; it is not a public gateway API.
 
 ## Proxy Endpoints
 

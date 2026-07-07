@@ -14,12 +14,15 @@
 // limitations under the License.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::http::StatusCode;
 use tracing::{error, warn};
+
+type BodySendResult = std::result::Result<Result<()>, tokio::task::JoinError>;
 
 pub(in crate::tunnel) struct RequestBodySendTask {
     label: &'static str,
@@ -41,14 +44,9 @@ impl RequestBodySendTask {
     }
 
     pub(in crate::tunnel) async fn finish(mut self) -> Result<()> {
-        let Some(handle) = self.handle.take() else {
-            return Ok(());
-        };
-        let mut handle = AbortOnDropRequestBodySendHandle::new(handle);
-
-        match tokio::time::timeout(self.completion_timeout, handle.join()).await {
+        match tokio::time::timeout(self.completion_timeout, self.join()).await {
             Ok(result) => {
-                handle.disarm();
+                self.disarm();
                 finish_request_body_send_result(self.label, result)
             }
             Err(_) => {
@@ -59,39 +57,21 @@ impl RequestBodySendTask {
                 );
                 // The upstream response is already complete; abort the upload
                 // producer so response finalization cannot stall forever.
-                handle.abort();
-                let result = handle.join().await;
-                handle.disarm();
+                self.abort();
+                let result = self.join().await;
+                self.disarm();
                 finish_timed_out_request_body_send(self.label, result)
             }
         }
     }
 
-    pub(super) fn abort(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
-    }
-}
-
-struct AbortOnDropRequestBodySendHandle {
-    handle: Option<tokio::task::JoinHandle<Result<()>>>,
-}
-
-impl AbortOnDropRequestBodySendHandle {
-    fn new(handle: tokio::task::JoinHandle<Result<()>>) -> Self {
-        Self {
-            handle: Some(handle),
-        }
-    }
-
-    fn abort(&self) {
+    pub(super) fn abort(&self) {
         if let Some(handle) = &self.handle {
             handle.abort();
         }
     }
 
-    async fn join(&mut self) -> std::result::Result<Result<()>, tokio::task::JoinError> {
+    async fn join(&mut self) -> BodySendResult {
         self.handle
             .as_mut()
             .expect("request body send handle should not be disarmed before join")
@@ -103,35 +83,15 @@ impl AbortOnDropRequestBodySendHandle {
     }
 }
 
-impl Drop for AbortOnDropRequestBodySendHandle {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.handle {
-            // Response EOF finalization can be cancelled by downstream disconnect;
-            // abort before dropping the handle so the upload task is not detached.
-            handle.abort();
-        }
-    }
+fn finish_request_body_send_result(label: &'static str, result: BodySendResult) -> Result<()> {
+    result
+        .with_context(|| format!("failed to join {label} send task"))?
+        .with_context(|| format!("failed to send {label}"))
 }
 
-fn finish_request_body_send_result(
-    label: &'static str,
-    result: std::result::Result<Result<()>, tokio::task::JoinError>,
-) -> Result<()> {
-    match result.with_context(|| format!("failed to join {label} send task"))? {
-        Ok(()) => Ok(()),
-        Err(error) => Err(error.context(format!("failed to send {label}"))),
-    }
-}
-
-fn finish_timed_out_request_body_send(
-    label: &'static str,
-    result: std::result::Result<Result<()>, tokio::task::JoinError>,
-) -> Result<()> {
+fn finish_timed_out_request_body_send(label: &'static str, result: BodySendResult) -> Result<()> {
     match result {
-        Ok(result) => match result {
-            Ok(()) => Ok(()),
-            Err(error) => Err(error.context(format!("failed to send {label}"))),
-        },
+        Ok(result) => result.with_context(|| format!("failed to send {label}")),
         Err(error) if error.is_cancelled() => Ok(()),
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
         Err(error) => Err(error).with_context(|| format!("failed to join {label} send task")),
@@ -140,15 +100,15 @@ fn finish_timed_out_request_body_send(
 
 impl Drop for RequestBodySendTask {
     fn drop(&mut self) {
-        // If callers drop the response before EOF, stop the producer so it
-        // cannot keep reading user body bytes after the response is abandoned.
+        // This owner spans the response-head race and response-body lifetime.
+        // Cancellation or abandonment must not detach the upload producer.
         self.abort();
     }
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum ResponseHeadRaceBias {
-    // Custom QUIC can see a peer reset and body-producer error become ready
+    // Raw QUIC can see a peer reset and body-producer error become ready
     // together; prefer the local body error because it is more actionable.
     SendFirst,
     // HTTP/3 and WebTransport can receive an early server response while the
@@ -158,18 +118,18 @@ pub(super) enum ResponseHeadRaceBias {
 
 pub(super) struct ResponseHeadRaceConfig {
     pub(super) upload_label: &'static str,
-    pub(super) upload_panic_context: &'static str,
-    pub(super) upload_error_context: &'static str,
     pub(super) response_header_timeout: Duration,
     pub(super) bias: ResponseHeadRaceBias,
 }
 
 pub(super) struct ResponseHeadRaceOutcome<Head> {
     pub(super) head: Head,
-    send_done: bool,
-    send_task: tokio::task::JoinHandle<Result<()>>,
-    upload_label: &'static str,
-    response_header_timeout: Duration,
+    request_body_send_task: Option<RequestBodySendTask>,
+}
+
+enum ResponseHeadRaceResult<Head> {
+    Head(Result<Head>),
+    Send(BodySendResult),
 }
 
 impl<Head> ResponseHeadRaceOutcome<Head> {
@@ -177,26 +137,11 @@ impl<Head> ResponseHeadRaceOutcome<Head> {
         self,
         status: StatusCode,
     ) -> (Head, Option<RequestBodySendTask>) {
-        let Self {
-            head,
-            send_done,
-            send_task,
-            upload_label,
-            response_header_timeout,
-        } = self;
-        let request_body_send_task = if status.is_success() && !send_done {
-            Some(RequestBodySendTask::new(
-                upload_label,
-                response_header_timeout,
-                send_task,
-            ))
+        if status.is_success() {
+            (self.head, self.request_body_send_task)
         } else {
-            if !send_done {
-                send_task.abort();
-            }
-            None
-        };
-        (head, request_body_send_task)
+            (self.head, None)
+        }
     }
 }
 
@@ -213,63 +158,110 @@ where
     let response_header_deadline = tokio::time::Instant::now() + config.response_header_timeout;
     let upload_label = config.upload_label;
     let response_header_timeout = config.response_header_timeout;
-    let mut send_task = tokio::spawn(async move {
+    let send_task = tokio::spawn(async move {
         let result = send_body(body).await;
         if let Err(error) = &result {
             error!(error = %error, upload_label, "failed to send request body");
         }
         result
     });
-    let mut send_done = false;
+    let mut send_task = RequestBodySendTask::new(upload_label, response_header_timeout, send_task);
     let response_head = recv_head(response_header_deadline);
     tokio::pin!(response_head);
 
-    let head = match config.bias {
-        ResponseHeadRaceBias::SendFirst => {
-            tokio::select! {
-                biased;
-                send_result = &mut send_task => {
-                    send_done = true;
-                    match send_result.context(config.upload_panic_context)? {
-                        Ok(()) => response_head.await?,
-                        Err(error) => return Err(error.context(config.upload_error_context)),
-                    }
-                },
-                response_head = &mut response_head => match response_head {
-                    Ok(response_head) => response_head,
-                    Err(error) => {
-                        send_task.abort();
-                        return Err(error);
-                    }
-                },
-            }
-        }
-        ResponseHeadRaceBias::ResponseFirst => {
-            tokio::select! {
-                biased;
-                response_head = &mut response_head => match response_head {
-                    Ok(response_head) => response_head,
-                    Err(error) => {
-                        send_task.abort();
-                        return Err(error);
-                    }
-                },
-                send_result = &mut send_task => {
-                    send_done = true;
-                    match send_result.context(config.upload_panic_context)? {
-                        Ok(()) => response_head.await?,
-                        Err(error) => return Err(error.context(config.upload_error_context)),
-                    }
-                },
-            }
-        }
+    let first = match config.bias {
+        ResponseHeadRaceBias::SendFirst => tokio::select! {
+            biased;
+            result = send_task.join() => ResponseHeadRaceResult::Send(result),
+            result = &mut response_head => ResponseHeadRaceResult::Head(result),
+        },
+        ResponseHeadRaceBias::ResponseFirst => tokio::select! {
+            biased;
+            result = &mut response_head => ResponseHeadRaceResult::Head(result),
+            result = send_task.join() => ResponseHeadRaceResult::Send(result),
+        },
     };
+    finish_response_head_race(first, send_task, response_head.as_mut(), upload_label).await
+}
 
+async fn finish_response_head_race<Head, RecvHeadFuture>(
+    first: ResponseHeadRaceResult<Head>,
+    mut send_task: RequestBodySendTask,
+    response_head: Pin<&mut RecvHeadFuture>,
+    upload_label: &'static str,
+) -> Result<ResponseHeadRaceOutcome<Head>>
+where
+    RecvHeadFuture: Future<Output = Result<Head>> + Send,
+{
+    let (head, request_body_send_task) = match first {
+        ResponseHeadRaceResult::Send(send_result) => {
+            let head = match send_result
+                .with_context(|| format!("{upload_label} send task panicked"))?
+            {
+                Ok(()) => response_head.await?,
+                Err(error) => return Err(error.context(format!("failed to send {upload_label}"))),
+            };
+            send_task.disarm();
+            (head, None)
+        }
+        ResponseHeadRaceResult::Head(response_head) => match response_head {
+            Ok(response_head) => (response_head, Some(send_task)),
+            Err(error) => return Err(error),
+        },
+    };
     Ok(ResponseHeadRaceOutcome {
         head,
-        send_done,
-        send_task,
-        upload_label,
-        response_header_timeout,
+        request_body_send_task,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    struct DropNotifier(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropNotifier {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_response_head_race_aborts_upload() {
+        let (entered_tx, mut entered_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        {
+            let race = race_request_body_and_response_head(
+                ResponseHeadRaceConfig {
+                    upload_label: "cancelled upload race",
+                    response_header_timeout: Duration::from_secs(30),
+                    bias: ResponseHeadRaceBias::SendFirst,
+                },
+                Body::empty(),
+                move |_| async move {
+                    let _notifier = DropNotifier(Some(dropped_tx));
+                    let _ = entered_tx.send(());
+                    pending::<Result<()>>().await
+                },
+                |_| pending::<Result<()>>(),
+            );
+            tokio::pin!(race);
+            tokio::select! {
+                _ = &mut race => panic!("pending race should not finish"),
+                entered = &mut entered_rx => entered.expect("upload should start"),
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("dropping the race should stop the upload")
+            .expect("upload drop notifier should send");
+    }
 }

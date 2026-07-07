@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use stargate_protocol::common::valid_last_mean_input_tps;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::load_balancer::{
@@ -54,23 +55,16 @@ impl PulsarRankingStore {
             if cache.matches(request.routing_target, candidates)
                 && let Some(ranking) = cache.get_ref(cache_affinity_key)
             {
-                // Keep the cached ranking borrowed only while the cache guard is
-                // alive, then return the already-materialized choice. This avoids
-                // cloning the Arc on the PULSAR cache-hit path without letting a
-                // borrowed ranking escape the lock guard's lifetime.
-                let choice = choose(ranking);
-                return Some((PulsarRankingLookup::Hit, choice));
+                // Choose under the guard to avoid cloning the cached Arc.
+                return Some((PulsarRankingLookup::Hit, choose(ranking)));
             }
         }
 
         let mut cache = self.cache.write();
         cache.refresh_if_needed(request.routing_target, candidates);
         if let Some(ranking) = cache.get_ref(cache_affinity_key) {
-            // Another thread may have populated the ranking after the read miss.
-            // Choose while the write guard owns the borrowed slice for the same
-            // reason as the read-hit fast path above.
-            let choice = choose(ranking);
-            return Some((PulsarRankingLookup::Hit, choice));
+            // Another thread populated the ranking after the read miss.
+            return Some((PulsarRankingLookup::Hit, choose(ranking)));
         }
         Some((cache.miss_lookup(cache_affinity_key), None))
     }
@@ -166,12 +160,8 @@ impl PulsarRankingCache {
             .map(|ranking| ranking.as_slice())
     }
 
-    fn has_room(&self) -> bool {
-        self.rankings.len() < RANKING_CACHE_LIMIT
-    }
-
     fn miss_lookup(&mut self, cache_affinity_key: &str) -> PulsarRankingLookup {
-        if self.has_room() || self.remove_probation(cache_affinity_key) {
+        if self.rankings.len() < RANKING_CACHE_LIMIT || self.remove_probation(cache_affinity_key) {
             return PulsarRankingLookup::MissCacheable;
         }
 
@@ -182,15 +172,11 @@ impl PulsarRankingCache {
     }
 
     fn insert(&mut self, cache_affinity_key: String, ranking: Arc<Vec<usize>>) {
-        if let Some(existing) = self.rankings.get_mut(&cache_affinity_key) {
-            *existing = ranking;
-            return;
-        }
-
-        while self.rankings.len() >= RANKING_CACHE_LIMIT {
-            let Some(oldest) = self.ranking_order.pop_front() else {
-                break;
-            };
+        if self.rankings.len() == RANKING_CACHE_LIMIT {
+            let oldest = self
+                .ranking_order
+                .pop_front()
+                .expect("ranking cache order should match its entries");
             self.rankings.remove(&oldest);
         }
         self.remove_probation(&cache_affinity_key);
@@ -199,14 +185,16 @@ impl PulsarRankingCache {
     }
 
     fn insert_probation(&mut self, cache_affinity_key: String) {
-        if !self.probation.insert(cache_affinity_key.clone()) {
-            return;
-        }
+        assert!(
+            self.probation.insert(cache_affinity_key.clone()),
+            "probation key should not already be present"
+        );
         self.probation_order.push_back(cache_affinity_key);
-        while self.probation_order.len() > RANKING_CACHE_PROBATION_LIMIT {
-            let Some(oldest) = self.probation_order.pop_front() else {
-                break;
-            };
+        if self.probation_order.len() > RANKING_CACHE_PROBATION_LIMIT {
+            let oldest = self
+                .probation_order
+                .pop_front()
+                .expect("probation order should contain the inserted key");
             self.probation.remove(&oldest);
         }
     }
@@ -215,13 +203,12 @@ impl PulsarRankingCache {
         if !self.probation.remove(cache_affinity_key) {
             return false;
         }
-        if let Some(position) = self
+        let position = self
             .probation_order
             .iter()
             .position(|cached| cached == cache_affinity_key)
-        {
-            self.probation_order.remove(position);
-        }
+            .expect("probation order should match its set");
+        self.probation_order.remove(position);
         true
     }
 }
@@ -255,23 +242,17 @@ impl PulsarScorer {
             &request.routing_target.model_id,
             request.cache_affinity_key,
         );
-        let prefix_len = hash_bytes.len();
         Self {
+            prefix_len: hash_bytes.len(),
             hash_bytes,
-            prefix_len,
         }
     }
 
     pub(super) fn score(&mut self, candidate: &RoutedClusterSnapshot) -> Option<f64> {
         let weight = pulsar_weight(candidate)?;
-
         let u = self.hash_to_unit_interval(candidate);
         let e = -u.ln();
-        if e.is_finite() && e > 0.0 {
-            Some(weight / e)
-        } else {
-            None
-        }
+        (e.is_finite() && e > 0.0).then(|| weight / e)
     }
 
     fn hash_to_unit_interval(&mut self, candidate: &RoutedClusterSnapshot) -> f64 {
@@ -282,9 +263,7 @@ impl PulsarScorer {
             candidate.cluster_id.as_bytes(),
         );
         let hash = xxh3_64(&self.hash_bytes);
-        let numerator = (hash as f64) + 1.0;
-        let denominator = (u64::MAX as f64) + 2.0;
-        numerator / denominator
+        ((hash as f64) + 1.0) / ((u64::MAX as f64) + 2.0)
     }
 }
 
@@ -325,15 +304,11 @@ pub(super) fn pulsar_weight(candidate: &RoutedClusterSnapshot) -> Option<f64> {
     // belongs in feasibility gates, not in the base rendezvous weight. `last_mean_input_tps`
     // is the built-in stable capacity proxy we already have, and for PULSAR it is
     // required: a backend without valid capacity metadata does not participate.
-    if has_valid_input_capacity(candidate) {
-        return Some(candidate.stats.last_mean_input_tps);
-    }
-
-    None
+    has_valid_input_capacity(candidate).then_some(candidate.stats.last_mean_input_tps)
 }
 
 pub(super) fn has_valid_input_capacity(candidate: &RoutedClusterSnapshot) -> bool {
-    candidate.stats.last_mean_input_tps > 0.0 && candidate.stats.last_mean_input_tps.is_finite()
+    valid_last_mean_input_tps(candidate.stats.last_mean_input_tps)
 }
 
 const PULSAR_HASH_VERSION: u8 = 1;

@@ -33,7 +33,6 @@ hickory-resolver = { workspace = true }
 rand = { workspace = true }
 parking_lot = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 stargate-tls = { workspace = true }
 scc = { workspace = true }
 serde = { workspace = true }

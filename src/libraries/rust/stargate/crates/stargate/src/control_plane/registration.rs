@@ -26,9 +26,7 @@ use crate::routing_state::{RunningRegistration, StargateState};
 use crate::tunnel::{EnsureConnectedResult, QuicHttpProxy, RegistrationTunnel};
 
 use stargate_proto::REGISTRATION_HEARTBEAT_MS_METADATA;
-use stargate_proto::pb::{
-    InferenceServerAck, InferenceServerRegistration, ModelCalibrationDirective,
-};
+use stargate_proto::pb::{InferenceServerAck, InferenceServerRegistration};
 
 mod health;
 
@@ -67,113 +65,36 @@ enum ApplyUpdateOutcome {
     Shutdown,
 }
 
-struct RegistrationStreamProcessorContext {
+pub(super) async fn process_registration_stream(
+    mut stream: impl Stream<Item = Result<InferenceServerRegistration, Status>> + Unpin,
     state: Arc<StargateState>,
     connection: RegistrationConnectionConfig,
     responses: flume::Sender<Result<InferenceServerAck, Status>>,
     auth_result: AuthResult,
     idle_timeout: Option<Duration>,
     stop: CancellationToken,
-}
-
-impl RegistrationStreamProcessorContext {
-    fn new(
-        state: Arc<StargateState>,
-        connection: RegistrationConnectionConfig,
-        responses: flume::Sender<Result<InferenceServerAck, Status>>,
-        auth_result: AuthResult,
-        idle_timeout: Option<Duration>,
-        stop: CancellationToken,
-    ) -> Self {
-        Self {
-            state,
-            connection,
-            responses,
-            auth_result,
-            idle_timeout,
-            stop,
-        }
-    }
-}
-
-pub(super) async fn process_registration_stream(
-    stream: impl Stream<Item = Result<InferenceServerRegistration, Status>> + Unpin,
-    state: Arc<StargateState>,
-    registration_connection_config: RegistrationConnectionConfig,
-    tx: flume::Sender<Result<InferenceServerAck, Status>>,
-    auth_result: AuthResult,
-    idle_timeout: Option<Duration>,
-    stop: CancellationToken,
 ) {
-    process_registration_stream_with_context(
-        stream,
-        RegistrationStreamProcessorContext::new(
-            state,
-            registration_connection_config,
-            tx,
-            auth_result,
-            idle_timeout,
-            stop,
-        ),
-    )
-    .await;
-}
-
-async fn process_registration_stream_with_context(
-    mut stream: impl Stream<Item = Result<InferenceServerRegistration, Status>> + Unpin,
-    context: RegistrationStreamProcessorContext,
-) {
-    let RegistrationStreamProcessorContext {
-        state,
-        connection: registration_connection_config,
-        responses: tx,
-        auth_result,
-        idle_timeout,
-        stop,
-    } = context;
-
     let Some(first_update) = next_registration_update(&mut stream, idle_timeout, &stop).await
     else {
         debug!("register inference servers stream exited before admission");
         return;
     };
-    let mut session = match RegistrationSession::start(
+    let session = match RegistrationSession::start(
         &first_update,
         state,
-        registration_connection_config,
+        connection,
         auth_result.routing_key.as_deref(),
     ) {
         Ok(session) => session,
         Err(status) => {
-            let _ = send_registration_response(&tx, &stop, Err(status)).await;
+            let _ = send_registration_response(&responses, &stop, Err(status)).await;
             return;
         }
     };
 
-    let mut update = first_update;
-    loop {
-        match session.apply_update(&update, &stop).await {
-            Ok(ApplyUpdateOutcome::Ack(ack)) => {
-                if !send_registration_response(&tx, &stop, Ok(ack)).await {
-                    break;
-                }
-            }
-            Ok(ApplyUpdateOutcome::Skip) => {}
-            Ok(ApplyUpdateOutcome::Shutdown) => break,
-            Err(status) => {
-                let _ = send_registration_response(&tx, &stop, Err(status)).await;
-                break;
-            }
-        }
-
-        let Some(next_update) = next_registration_update(&mut stream, idle_timeout, &stop).await
-        else {
-            break;
-        };
-        update = next_update;
-    }
-
-    session.close().await;
+    session
+        .run(first_update, &mut stream, &responses, idle_timeout, &stop)
+        .await;
 }
 
 async fn next_registration_update(
@@ -181,17 +102,13 @@ async fn next_registration_update(
     idle_timeout: Option<Duration>,
     stop: &CancellationToken,
 ) -> Option<InferenceServerRegistration> {
-    // Once shutdown begins, cleanup must win over another ready stream update.
     let next = if let Some(idle_timeout) = idle_timeout {
-        let next = tokio::select! {
+        // Once shutdown begins, cleanup must win over another ready stream update.
+        tokio::select! {
             biased;
             _ = stop.cancelled() => return None,
-            next = tokio::time::timeout(idle_timeout, stream.next()) => next,
-        };
-        match next {
-            Ok(Some(next)) => next,
-            Ok(None) => return None,
-            Err(_elapsed) => {
+            next = stream.next() => next,
+            _ = tokio::time::sleep(idle_timeout) => {
                 warn!(
                     idle_timeout_ms = idle_timeout.as_millis(),
                     "registration stream idle timeout; closing registration"
@@ -200,16 +117,13 @@ async fn next_registration_update(
             }
         }
     } else {
-        let next = tokio::select! {
+        tokio::select! {
             biased;
             _ = stop.cancelled() => return None,
             next = stream.next() => next,
-        };
-        match next {
-            Some(next) => next,
-            None => return None,
         }
     };
+    let next = next?;
 
     let update = match next {
         Ok(update) => update,
@@ -220,10 +134,17 @@ async fn next_registration_update(
     };
     debug!(
         inference_server_id = %update.inference_server_id,
-        model_ids = ?update.models.keys().collect::<Vec<_>>(),
+        cluster_id = %update.cluster_id,
+        model_ids = ?sorted_model_ids(&update),
         "received inference servers update"
     );
     Some(update)
+}
+
+fn sorted_model_ids(update: &InferenceServerRegistration) -> Vec<&str> {
+    let mut model_ids = update.models.keys().map(String::as_str).collect::<Vec<_>>();
+    model_ids.sort_unstable();
+    model_ids
 }
 
 async fn send_registration_response(
@@ -306,6 +227,37 @@ impl RegistrationSession {
         })
     }
 
+    async fn run(
+        mut self,
+        mut update: InferenceServerRegistration,
+        stream: &mut (impl Stream<Item = Result<InferenceServerRegistration, Status>> + Unpin),
+        responses: &flume::Sender<Result<InferenceServerAck, Status>>,
+        idle_timeout: Option<Duration>,
+        stop: &CancellationToken,
+    ) {
+        loop {
+            match self.apply_update(&update, stop).await {
+                Ok(ApplyUpdateOutcome::Ack(ack)) => {
+                    if !send_registration_response(responses, stop, Ok(ack)).await {
+                        break;
+                    }
+                }
+                Ok(ApplyUpdateOutcome::Skip) => {}
+                Ok(ApplyUpdateOutcome::Shutdown) => break,
+                Err(status) => {
+                    let _ = send_registration_response(responses, stop, Err(status)).await;
+                    break;
+                }
+            }
+            let Some(next_update) = next_registration_update(stream, idle_timeout, stop).await
+            else {
+                break;
+            };
+            update = next_update;
+        }
+        self.close().await;
+    }
+
     async fn apply_update(
         &mut self,
         update: &InferenceServerRegistration,
@@ -340,14 +292,12 @@ impl RegistrationSession {
             return Ok(ApplyUpdateOutcome::Shutdown);
         }
 
-        let model_calibration_directives = self
-            .state
+        self.state
             .apply_registration_update(&self.registration, update, reverse_connected, rtt)
             .await;
 
         Ok(ApplyUpdateOutcome::Ack(build_registration_ack(
             &self.connection,
-            model_calibration_directives,
         )))
     }
 
@@ -368,7 +318,6 @@ impl RegistrationSession {
 
 fn build_registration_ack(
     registration_connection_config: &RegistrationConnectionConfig,
-    model_calibration_directives: Vec<ModelCalibrationDirective>,
 ) -> InferenceServerAck {
     let (reverse_tunnel_target, reverse_tunnel_pylon_dial_addr) =
         match &registration_connection_config.reverse_tunnel {
@@ -381,7 +330,6 @@ fn build_registration_ack(
     InferenceServerAck {
         reverse_tunnel_target,
         reverse_tunnel_pylon_dial_addr,
-        model_calibration_directives,
     }
 }
 
@@ -395,14 +343,40 @@ mod tests {
     use crate::tunnel::QuicTunnelConfig;
     use stargate_proto::pb::{InferenceServerModelRegistration, InferenceServerStatus, ModelStats};
 
-    fn make_identity() -> RegistrationIdentity {
+    const TEST_SERVER_ID: &str = "server-1";
+    const TEST_SERVER_URL: &str = "quic://10.0.0.1:8080";
+
+    fn direct_identity(id: &str, url: &str) -> RegistrationIdentity {
         RegistrationIdentity {
-            inference_server_id: "server-1".to_string(),
-            cluster_id: "server-1".to_string(),
-            inference_server_url: "quic://10.0.0.1:8080".to_string(),
+            inference_server_id: id.to_owned(),
+            cluster_id: id.to_owned(),
+            inference_server_url: url.to_owned(),
             routing_key: None,
             reverse_tunnel: false,
-            coordinated_calibration: false,
+        }
+    }
+
+    fn registration_update(
+        identity: &RegistrationIdentity,
+        active_model: Option<&str>,
+    ) -> InferenceServerRegistration {
+        InferenceServerRegistration {
+            inference_server_id: identity.inference_server_id.clone(),
+            cluster_id: identity.cluster_id.clone(),
+            inference_server_url: identity.inference_server_url.clone(),
+            reverse_tunnel: identity.reverse_tunnel,
+            models: active_model
+                .map(|model_id| {
+                    (
+                        model_id.to_owned(),
+                        InferenceServerModelRegistration {
+                            stats: Some(ModelStats::default()),
+                            status: InferenceServerStatus::Active as i32,
+                        },
+                    )
+                })
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -428,13 +402,50 @@ mod tests {
         }
     }
 
+    async fn process_test_stream(
+        stream: impl Stream<Item = Result<InferenceServerRegistration, Status>> + Unpin,
+        state: Arc<StargateState>,
+        responses: flume::Sender<Result<InferenceServerAck, Status>>,
+        idle_timeout: Option<Duration>,
+        stop: CancellationToken,
+    ) {
+        process_registration_stream(
+            stream,
+            state,
+            test_registration_connection_config(),
+            responses,
+            AuthResult { routing_key: None },
+            idle_timeout,
+            stop,
+        )
+        .await;
+    }
+
+    #[test]
+    fn registration_log_model_ids_are_sorted() {
+        let update = InferenceServerRegistration {
+            models: HashMap::from([
+                (
+                    "zeta".to_string(),
+                    InferenceServerModelRegistration::default(),
+                ),
+                (
+                    "alpha".to_string(),
+                    InferenceServerModelRegistration::default(),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(sorted_model_ids(&update), vec!["alpha", "zeta"]);
+    }
+
     #[tokio::test]
     async fn registration_ack_defaults_empty_reverse_tunnel_fields() {
-        let ack = build_registration_ack(&test_registration_connection_config(), Vec::new());
+        let ack = build_registration_ack(&test_registration_connection_config());
 
         assert!(ack.reverse_tunnel_target.is_empty());
         assert!(ack.reverse_tunnel_pylon_dial_addr.is_empty());
-        assert!(ack.model_calibration_directives.is_empty());
     }
 
     #[tokio::test]
@@ -448,7 +459,7 @@ mod tests {
             ..test_registration_connection_config()
         };
 
-        let ack = build_registration_ack(&config, Vec::new());
+        let ack = build_registration_ack(&config);
 
         assert_eq!(
             ack.reverse_tunnel_target,
@@ -463,21 +474,8 @@ mod tests {
     #[tokio::test]
     async fn registration_session_close_removes_routable_model_and_releases_identity() {
         let state = Arc::new(StargateState::default());
-        let identity = make_identity();
-        let update = InferenceServerRegistration {
-            inference_server_id: identity.inference_server_id.clone(),
-            cluster_id: String::new(),
-            inference_server_url: identity.inference_server_url.clone(),
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-            models: HashMap::from([(
-                "model-idle".to_string(),
-                InferenceServerModelRegistration {
-                    stats: Some(ModelStats::default()),
-                    status: InferenceServerStatus::Active as i32,
-                },
-            )]),
-        };
+        let identity = direct_identity(TEST_SERVER_ID, TEST_SERVER_URL);
+        let update = registration_update(&identity, Some("model-idle"));
         let session = RegistrationSession::start(
             &update,
             state.clone(),
@@ -494,10 +492,7 @@ mod tests {
             )
             .await;
 
-        let target = crate::routing_state::RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-idle".to_string(),
-        };
+        let target = crate::routing_state::RoutingTargetKey::new(None, "model-idle");
         assert_eq!(state.candidates_for_target(&target).await.len(), 1);
 
         session.close().await;
@@ -512,30 +507,19 @@ mod tests {
     #[tokio::test]
     async fn registration_stream_idle_timeout_closes_admitted_session() {
         let state = Arc::new(StargateState::default());
-        let identity = make_identity();
-        let update = InferenceServerRegistration {
-            inference_server_id: identity.inference_server_id.clone(),
-            cluster_id: String::new(),
-            inference_server_url: identity.inference_server_url.clone(),
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-            models: HashMap::new(),
-        };
+        let identity = direct_identity(TEST_SERVER_ID, TEST_SERVER_URL);
+        let update = registration_update(&identity, None);
         let stream = futures::stream::pending::<Result<InferenceServerRegistration, Status>>();
         let stream = futures::stream::iter([Ok(update)]).chain(stream);
         let (tx, _rx) = flume::bounded(1);
         tokio::time::timeout(
             Duration::from_secs(2),
-            process_registration_stream_with_context(
+            process_test_stream(
                 stream,
-                RegistrationStreamProcessorContext::new(
-                    state.clone(),
-                    test_registration_connection_config(),
-                    tx,
-                    AuthResult { routing_key: None },
-                    Some(Duration::from_millis(1)),
-                    CancellationToken::new(),
-                ),
+                state.clone(),
+                tx,
+                Some(Duration::from_millis(1)),
+                CancellationToken::new(),
             ),
         )
         .await
@@ -550,39 +534,13 @@ mod tests {
     #[tokio::test]
     async fn registration_stream_skips_update_when_direct_connection_unavailable() {
         let state = Arc::new(StargateState::default());
-        let update = InferenceServerRegistration {
-            inference_server_id: "unavailable-direct".to_string(),
-            cluster_id: String::new(),
-            inference_server_url: "quic://127.0.0.1:1".to_string(),
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-            models: HashMap::from([(
-                "model-unavailable".to_string(),
-                InferenceServerModelRegistration {
-                    stats: Some(ModelStats::default()),
-                    status: InferenceServerStatus::Active as i32,
-                },
-            )]),
-        };
-        let target = crate::routing_state::RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-unavailable".to_string(),
-        };
+        let identity = direct_identity("unavailable-direct", "quic://127.0.0.1:1");
+        let update = registration_update(&identity, Some("model-unavailable"));
+        let target = crate::routing_state::RoutingTargetKey::new(None, "model-unavailable");
         let stream = futures::stream::iter([Ok(update)]);
         let (tx, rx) = flume::bounded(1);
 
-        process_registration_stream_with_context(
-            stream,
-            RegistrationStreamProcessorContext::new(
-                state.clone(),
-                test_registration_connection_config(),
-                tx,
-                AuthResult { routing_key: None },
-                None,
-                CancellationToken::new(),
-            ),
-        )
-        .await;
+        process_test_stream(stream, state.clone(), tx, None, CancellationToken::new()).await;
 
         assert!(matches!(
             rx.try_recv(),
@@ -594,28 +552,8 @@ mod tests {
     #[tokio::test]
     async fn unavailable_direct_update_removes_existing_route_before_stream_cleanup() {
         let state = Arc::new(StargateState::default());
-        let identity = RegistrationIdentity {
-            inference_server_id: "lost-direct".to_string(),
-            cluster_id: "lost-direct".to_string(),
-            inference_server_url: "quic://127.0.0.1:1".to_string(),
-            routing_key: None,
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-        };
-        let update = InferenceServerRegistration {
-            inference_server_id: identity.inference_server_id.clone(),
-            cluster_id: identity.cluster_id.clone(),
-            inference_server_url: identity.inference_server_url.clone(),
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-            models: HashMap::from([(
-                "model-lost-direct".to_string(),
-                InferenceServerModelRegistration {
-                    stats: Some(ModelStats::default()),
-                    status: InferenceServerStatus::Active as i32,
-                },
-            )]),
-        };
+        let identity = direct_identity("lost-direct", "quic://127.0.0.1:1");
+        let update = registration_update(&identity, Some("model-lost-direct"));
         let mut session = RegistrationSession::start(
             &update,
             state.clone(),
@@ -623,10 +561,7 @@ mod tests {
             None,
         )
         .expect("registration session should start");
-        let target = crate::routing_state::RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-lost-direct".to_string(),
-        };
+        let target = crate::routing_state::RoutingTargetKey::new(None, "model-lost-direct");
         state
             .apply_registration_update(
                 &session.registration,
@@ -650,15 +585,8 @@ mod tests {
     #[tokio::test]
     async fn admitted_registration_session_owns_health_check_until_close() {
         let state = Arc::new(StargateState::default());
-        let identity = make_identity();
-        let update = InferenceServerRegistration {
-            inference_server_id: identity.inference_server_id.clone(),
-            cluster_id: identity.cluster_id.clone(),
-            inference_server_url: identity.inference_server_url.clone(),
-            reverse_tunnel: identity.reverse_tunnel,
-            coordinated_calibration: identity.coordinated_calibration,
-            models: HashMap::new(),
-        };
+        let identity = direct_identity(TEST_SERVER_ID, TEST_SERVER_URL);
+        let update = registration_update(&identity, None);
         let mut session =
             RegistrationSession::start(&update, state, test_registration_connection_config(), None)
                 .expect("registration session should start");
@@ -676,21 +604,8 @@ mod tests {
     #[tokio::test]
     async fn registration_stream_shutdown_interrupts_pending_stream_and_cleans_state() {
         let state = Arc::new(StargateState::default());
-        let identity = make_identity();
-        let update = InferenceServerRegistration {
-            inference_server_id: identity.inference_server_id.clone(),
-            cluster_id: String::new(),
-            inference_server_url: identity.inference_server_url.clone(),
-            reverse_tunnel: false,
-            coordinated_calibration: false,
-            models: HashMap::from([(
-                "model-idle-timeout".to_string(),
-                InferenceServerModelRegistration {
-                    stats: Some(ModelStats::default()),
-                    status: InferenceServerStatus::Active as i32,
-                },
-            )]),
-        };
+        let identity = direct_identity(TEST_SERVER_ID, TEST_SERVER_URL);
+        let update = registration_update(&identity, Some("model-idle-timeout"));
 
         let (polled_tx, polled_rx) = tokio::sync::oneshot::channel();
         let mut polled_tx = Some(polled_tx);
@@ -703,16 +618,12 @@ mod tests {
         let stream = futures::stream::iter([Ok(update)]).chain(pending_stream);
         let (tx, _rx) = flume::bounded(1);
         let stop = CancellationToken::new();
-        let processor = tokio::spawn(process_registration_stream_with_context(
+        let processor = tokio::spawn(process_test_stream(
             stream,
-            RegistrationStreamProcessorContext::new(
-                state.clone(),
-                test_registration_connection_config(),
-                tx,
-                AuthResult { routing_key: None },
-                None,
-                stop.clone(),
-            ),
+            state.clone(),
+            tx,
+            None,
+            stop.clone(),
         ));
         tokio::time::timeout(Duration::from_secs(1), polled_rx)
             .await
@@ -736,145 +647,52 @@ mod tests {
         state.end_registration(replacement).await;
     }
 
-    #[test]
-    fn registration_idle_timeout_is_negotiated_from_heartbeat_metadata() {
+    fn negotiated_timeout(
+        heartbeat_ms: Option<&str>,
+        configured_idle_secs: u64,
+        configured_max_idle_secs: u64,
+    ) -> Option<Duration> {
         let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(
-            REGISTRATION_HEARTBEAT_MS_METADATA,
-            "120000".parse().unwrap(),
-        );
-
-        let timeout = negotiated_registration_update_idle_timeout(
+        if let Some(heartbeat_ms) = heartbeat_ms {
+            metadata.insert(
+                REGISTRATION_HEARTBEAT_MS_METADATA,
+                heartbeat_ms
+                    .parse()
+                    .expect("test heartbeat should be ASCII"),
+            );
+        }
+        negotiated_registration_update_idle_timeout(
             &metadata,
-            Duration::from_secs(60),
-            Duration::from_secs(600),
-        );
-
-        assert_eq!(timeout, Some(Duration::from_secs(360)));
+            Duration::from_secs(configured_idle_secs),
+            Duration::from_secs(configured_max_idle_secs),
+        )
     }
 
     #[test]
-    fn registration_idle_timeout_uses_configured_floor() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(REGISTRATION_HEARTBEAT_MS_METADATA, "1000".parse().unwrap());
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &metadata,
-            Duration::from_secs(60),
-            Duration::from_secs(600),
-        );
-
-        assert_eq!(timeout, Some(Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn registration_idle_timeout_zero_heartbeat_uses_configured_floor() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(REGISTRATION_HEARTBEAT_MS_METADATA, "0".parse().unwrap());
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &metadata,
-            Duration::from_secs(60),
-            Duration::from_secs(300),
-        );
-
-        assert_eq!(timeout, Some(Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn registration_idle_timeout_uses_configured_cap_for_large_heartbeat() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(
-            REGISTRATION_HEARTBEAT_MS_METADATA,
-            "120000".parse().unwrap(),
-        );
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &metadata,
-            Duration::from_secs(60),
-            Duration::from_secs(300),
-        );
-
-        assert_eq!(timeout, Some(Duration::from_secs(300)));
-    }
-
-    #[test]
-    fn registration_idle_timeout_uses_configured_cap_without_heartbeat_metadata() {
-        let metadata = tonic::metadata::MetadataMap::new();
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &metadata,
-            Duration::from_secs(60),
-            Duration::from_secs(300),
-        );
-
-        assert_eq!(timeout, Some(Duration::from_secs(300)));
-    }
-
-    #[test]
-    fn registration_idle_timeout_honors_configured_cap_below_floor() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(REGISTRATION_HEARTBEAT_MS_METADATA, "1000".parse().unwrap());
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &metadata,
-            Duration::from_secs(60),
-            Duration::from_secs(10),
-        );
-
-        assert_eq!(timeout, Some(Duration::from_secs(10)));
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &tonic::metadata::MetadataMap::new(),
-            Duration::from_secs(60),
-            Duration::from_secs(10),
-        );
-
-        assert_eq!(timeout, Some(Duration::from_secs(10)));
-    }
-
-    #[test]
-    fn registration_idle_timeout_can_be_disabled() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(REGISTRATION_HEARTBEAT_MS_METADATA, "1000".parse().unwrap());
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &metadata,
-            Duration::ZERO,
-            Duration::from_secs(300),
-        );
-
-        assert_eq!(timeout, None);
-    }
-
-    #[test]
-    fn registration_idle_timeout_max_zero_disables_enforcement() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(REGISTRATION_HEARTBEAT_MS_METADATA, "1000".parse().unwrap());
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &metadata,
-            Duration::from_secs(60),
-            Duration::ZERO,
-        );
-
-        assert_eq!(timeout, None);
-    }
-
-    #[test]
-    fn malformed_registration_heartbeat_metadata_uses_configured_cap() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(
-            REGISTRATION_HEARTBEAT_MS_METADATA,
-            "not-a-number".parse().unwrap(),
-        );
-
-        let timeout = negotiated_registration_update_idle_timeout(
-            &metadata,
-            Duration::from_secs(60),
-            Duration::from_secs(300),
-        );
-
-        assert_eq!(timeout, Some(Duration::from_secs(300)));
+    fn registration_idle_timeout_policy() {
+        for (case, heartbeat_ms, idle_secs, max_idle_secs, expected_secs) in [
+            ("heartbeat", Some("120000"), 60, 600, Some(360)),
+            ("configured floor", Some("1000"), 60, 600, Some(60)),
+            ("zero heartbeat", Some("0"), 60, 300, Some(60)),
+            ("configured cap", Some("120000"), 60, 300, Some(300)),
+            ("missing heartbeat", None, 60, 300, Some(300)),
+            ("cap below floor", Some("1000"), 60, 10, Some(10)),
+            ("missing with cap below floor", None, 60, 10, Some(10)),
+            ("zero idle disables", Some("1000"), 0, 300, None),
+            ("zero max disables", Some("1000"), 60, 0, None),
+            (
+                "malformed heartbeat",
+                Some("not-a-number"),
+                60,
+                300,
+                Some(300),
+            ),
+        ] {
+            assert_eq!(
+                negotiated_timeout(heartbeat_ms, idle_secs, max_idle_secs),
+                expected_secs.map(Duration::from_secs),
+                "{case}"
+            );
+        }
     }
 }

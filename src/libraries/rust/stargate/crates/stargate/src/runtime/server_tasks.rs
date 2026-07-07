@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -22,25 +22,21 @@ use tonic::transport::Server;
 use tower::util::MapRequestLayer;
 
 use crate::control_plane::StargateService;
+use stargate_proto::pb::{
+    stargate_control_plane_server::StargateControlPlaneServer,
+    stargate_model_discovery_server::StargateModelDiscoveryServer,
+};
 use stargate_runtime::CriticalTaskGroup;
 
-pub(super) async fn bind_tcp_listener(
-    listener: Option<std::net::TcpListener>,
-    bind_addr: SocketAddr,
+pub(super) fn into_tokio_tcp_listener(
+    listener: TcpListener,
     name: &'static str,
 ) -> Result<tokio::net::TcpListener> {
-    match listener {
-        Some(listener) => {
-            listener
-                .set_nonblocking(true)
-                .with_context(|| format!("failed to set {name} listener to non-blocking"))?;
-            tokio::net::TcpListener::from_std(listener)
-                .with_context(|| format!("failed to convert {name} listener"))
-        }
-        None => tokio::net::TcpListener::bind(bind_addr)
-            .await
-            .with_context(|| format!("failed to bind {name} listener")),
-    }
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("failed to set {name} listener to non-blocking"))?;
+    tokio::net::TcpListener::from_std(listener)
+        .with_context(|| format!("failed to convert {name} listener"))
 }
 
 pub(super) fn spawn_control_plane_grpc_server(
@@ -58,14 +54,8 @@ pub(super) fn spawn_control_plane_grpc_server(
         });
         Server::builder()
             .layer(authority_layer)
-            .add_service(
-                stargate_proto::pb::stargate_control_plane_server::StargateControlPlaneServer::new(
-                    service,
-                ),
-            )
-            .serve_with_incoming_shutdown(incoming, async move {
-                stop.cancelled().await;
-            })
+            .add_service(StargateControlPlaneServer::new(service))
+            .serve_with_incoming_shutdown(incoming, stop.cancelled_owned())
             .await
             .context("control-plane gRPC server failed")
     });
@@ -79,14 +69,8 @@ pub(super) fn spawn_model_discovery_grpc_server(
     let incoming = TcpListenerStream::new(listener);
     tasks.spawn_critical("model-discovery gRPC server", move |stop| async move {
         Server::builder()
-            .add_service(
-                stargate_proto::pb::stargate_model_discovery_server::StargateModelDiscoveryServer::new(
-                    service,
-                ),
-            )
-            .serve_with_incoming_shutdown(incoming, async move {
-                stop.cancelled().await;
-            })
+            .add_service(StargateModelDiscoveryServer::new(service))
+            .serve_with_incoming_shutdown(incoming, stop.cancelled_owned())
             .await
             .context("model-discovery gRPC server failed")
     });
@@ -102,9 +86,7 @@ pub(super) fn spawn_http_proxy_server(
             listener,
             proxy_router.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(async move {
-            stop.cancelled().await;
-        })
+        .with_graceful_shutdown(stop.cancelled_owned())
         .await
         .context("HTTP proxy server failed")
     });

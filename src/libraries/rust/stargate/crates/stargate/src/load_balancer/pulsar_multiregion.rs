@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-
 use super::groq_multiregion::{GroqMultiregionConfig, GroqMultiregionLoadBalancer};
 use super::pulsar::PulsarLoadBalancer;
 use super::{
@@ -37,54 +35,46 @@ impl PulsarMultiregionLoadBalancer {
         }
     }
 
-    fn choice_with_pulsar_rank(
+    fn choose_band(
         &self,
         request: &LoadBalancerRequest<'_>,
         candidates: &[RoutedClusterSnapshot],
         ranked_indices: &[usize],
-        choice: LoadBalancerCandidateChoice,
-    ) -> LoadBalancerCandidateChoice {
-        let rank_depth = ranked_indices
-            .iter()
-            .position(|index| *index == choice.candidate_index)
-            .map(|position| position + 1)
-            .expect("multiregion choice must come from the PULSAR-ranked candidates");
-        LoadBalancerCandidateChoice {
-            candidate_index: choice.candidate_index,
-            rank_depth,
-            selected_after_kv_free_tokens_skip: ranked_indices[..rank_depth - 1].iter().any(
-                |candidate_index| {
-                    self.ranking
-                        .feasibility(request, &candidates[*candidate_index])
-                        .skipped_for_kv_free_tokens()
-                },
-            ),
-        }
-    }
-
-    fn kv_eligible_ranked_indices(
-        &self,
-        request: &LoadBalancerRequest<'_>,
-        candidates: &[RoutedClusterSnapshot],
-        ranked_indices: &[usize],
-    ) -> Vec<usize> {
-        ranked_indices
+        band: &[usize],
+    ) -> Option<LoadBalancerCandidateChoice> {
+        let eligible = band
             .iter()
             .copied()
-            .filter(|candidate_index| {
+            .filter(|index| {
                 self.ranking
-                    .feasibility(request, &candidates[*candidate_index])
+                    .feasibility(request, &candidates[*index])
                     .is_eligible()
             })
-            .collect()
+            .collect::<Vec<_>>();
+        self.multiregion
+            .choose_from_candidate_indices(request, candidates, &eligible)
+            .map(|choice| {
+                let rank_depth = ranked_indices
+                    .iter()
+                    .position(|index| *index == choice.candidate_index)
+                    .expect("multiregion choice must come from the PULSAR ranking")
+                    + 1;
+                LoadBalancerCandidateChoice {
+                    candidate_index: choice.candidate_index,
+                    rank_depth,
+                    selected_after_kv_free_tokens_skip: ranked_indices[..rank_depth - 1]
+                        .iter()
+                        .any(|index| {
+                            self.ranking
+                                .feasibility(request, &candidates[*index])
+                                .skipped_for_kv_free_tokens()
+                        }),
+                }
+            })
     }
 }
 
-impl fmt::Display for PulsarMultiregionLoadBalancer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pulsar-multiregion")
-    }
-}
+impl_display!(PulsarMultiregionLoadBalancer, "pulsar-multiregion");
 
 impl LoadBalancer for PulsarMultiregionLoadBalancer {
     fn choose_candidate(
@@ -109,40 +99,23 @@ impl LoadBalancer for PulsarMultiregionLoadBalancer {
             });
         }
 
-        let primary_candidates =
-            self.kv_eligible_ranked_indices(request, candidates, &[primary_index]);
         if let Some(choice) =
-            self.multiregion
-                .choose_from_candidate_indices(request, candidates, &primary_candidates)
+            self.choose_band(request, candidates, &ranked_indices, &ranked_indices[..1])
         {
-            return Some(self.choice_with_pulsar_rank(
-                request,
-                candidates,
-                &ranked_indices,
-                choice,
-            ));
+            return Some(choice);
         }
 
         let mut band_start = 1usize;
         let mut band_width = 2usize;
         while band_start < ranked_indices.len() {
             let band_end = (band_start + band_width).min(ranked_indices.len());
-            let eligible_indices = self.kv_eligible_ranked_indices(
+            if let Some(choice) = self.choose_band(
                 request,
                 candidates,
+                &ranked_indices,
                 &ranked_indices[band_start..band_end],
-            );
-            if let Some(choice) = self.multiregion.choose_from_candidate_indices(
-                request,
-                candidates,
-                &eligible_indices,
             ) {
-                return Some(self.choice_with_pulsar_rank(
-                    request,
-                    candidates,
-                    &ranked_indices,
-                    choice,
-                ));
+                return Some(choice);
             }
             band_start = band_end;
             band_width = band_width.saturating_mul(2);
@@ -160,18 +133,16 @@ mod tests {
     use stargate_proto::pb::{InferenceServerStatus, ModelStats};
 
     use super::super::pulsar::PulsarLoadBalancer;
+    use super::super::tests::LoadBalancerTestChoiceExt;
     use super::super::{
         GroqMultiregionAlgorithmConfig, LoadBalancerAlgorithm, LoadBalancerAlgorithmConfig,
-        LoadBalancerRequest, LoadBalancerTestChoiceExt,
+        LoadBalancerRequest,
     };
     use super::*;
     use crate::routing_state::{RoutedClusterSnapshot, RoutingTargetKey};
 
     fn target() -> RoutingTargetKey {
-        RoutingTargetKey {
-            routing_key: Some("rk-1".to_string()),
-            model_id: "model-a".to_string(),
-        }
+        RoutingTargetKey::new(Some("rk-1".to_string()), "model-a")
     }
 
     fn request<'a>(
@@ -202,6 +173,7 @@ mod tests {
 
     fn pulsar_multiregion_algorithm_config(
         seed: &str,
+        consider_kv_free_tokens: bool,
         configure: impl FnOnce(&mut GroqMultiregionAlgorithmConfig),
     ) -> LoadBalancerAlgorithmConfig {
         let mut config =
@@ -209,20 +181,12 @@ mod tests {
         config
             .set_seed(Some(seed.to_string()))
             .expect("pulsar-multiregion supports deterministic seeding");
+        config.request_policy_mut().consider_kv_free_tokens = consider_kv_free_tokens;
         configure(
             config
                 .multiregion_settings_mut()
                 .expect("pulsar-multiregion config should expose multiregion settings"),
         );
-        config
-    }
-
-    fn kv_aware_pulsar_multiregion_algorithm_config(
-        seed: &str,
-        configure: impl FnOnce(&mut GroqMultiregionAlgorithmConfig),
-    ) -> LoadBalancerAlgorithmConfig {
-        let mut config = pulsar_multiregion_algorithm_config(seed, configure);
-        config.request_policy_mut().consider_kv_free_tokens = true;
         config
     }
 
@@ -249,6 +213,12 @@ mod tests {
             status: InferenceServerStatus::Active,
             active_backend_count: 1,
         }
+    }
+
+    fn candidates(count: usize, kv_cache_free_tokens: u64) -> Vec<RoutedClusterSnapshot> {
+        (0..count)
+            .map(|index| candidate(&format!("cluster-{index}"), kv_cache_free_tokens))
+            .collect()
     }
 
     fn pulsar_ranked_indices(
@@ -283,14 +253,10 @@ mod tests {
     fn without_queue_slo_keeps_full_primary() {
         let target = target();
         let affinity_key = "hybrid-prefix-without-slo";
-        let mut candidates = (0..3)
-            .map(|index| {
-                let mut candidate = candidate(&format!("cluster-{index}"), 0);
-                candidate.stats.last_mean_input_tps = 100.0;
-                candidate.stats.max_engine_concurrency = 1;
-                candidate
-            })
-            .collect::<Vec<_>>();
+        let mut candidates = candidates(3, 0);
+        for candidate in &mut candidates {
+            candidate.stats.max_engine_concurrency = 1;
+        }
         let hybrid_request = request(&target, Some(affinity_key), Some(0));
         let primary_index =
             pulsar_ranked_indices("hybrid-seed", &target, affinity_key, 0, &candidates)[0];
@@ -298,6 +264,7 @@ mod tests {
 
         let hybrid = PulsarMultiregionLoadBalancer::new(pulsar_multiregion_algorithm_config(
             "hybrid-seed",
+            false,
             |settings| {
                 settings.n = Some(2);
             },
@@ -317,14 +284,10 @@ mod tests {
     fn kv_skip_uses_ranked_fallback_band_and_composes_with_slo() {
         let target = target();
         let request = request(&target, Some("hybrid-kv-prefix"), Some(100));
-        let mut candidates = (0..4)
-            .map(|index| {
-                let mut candidate = candidate(&format!("cluster-{index}"), 1024);
-                candidate.stats.last_mean_input_tps = 100.0;
-                candidate.rtt = Duration::from_millis(50);
-                candidate
-            })
-            .collect::<Vec<_>>();
+        let mut candidates = candidates(4, 1024);
+        for candidate in &mut candidates {
+            candidate.rtt = Duration::from_millis(50);
+        }
         let ranked_indices = pulsar_ranked_indices(
             "hybrid-kv-seed",
             &target,
@@ -340,11 +303,13 @@ mod tests {
         candidates[primary_index].stats.kv_cache_free_tokens = 50;
         candidates[primary_index].stats.kv_cache_used_tokens = 974;
 
-        let hybrid = PulsarMultiregionLoadBalancer::new(
-            kv_aware_pulsar_multiregion_algorithm_config("hybrid-kv-seed", |settings| {
+        let hybrid = PulsarMultiregionLoadBalancer::new(pulsar_multiregion_algorithm_config(
+            "hybrid-kv-seed",
+            true,
+            |settings| {
                 settings.n = Some(2);
-            }),
-        );
+            },
+        ));
         let first_band_choice = hybrid
             .choose_for_test(&request, &candidates)
             .expect("first ranked fallback band should contain a usable candidate");
@@ -371,7 +336,7 @@ mod tests {
         candidates[primary_index].stats.kv_cache_used_tokens = 0;
         candidates[primary_index].stats.queued_input_size = 50;
         let hybrid_with_slo = PulsarMultiregionLoadBalancer::new(
-            kv_aware_pulsar_multiregion_algorithm_config("hybrid-kv-seed", |settings| {
+            pulsar_multiregion_algorithm_config("hybrid-kv-seed", true, |settings| {
                 settings.max_queue_time_floor_ms = Some(100);
                 settings.max_queue_time_ceil_ms = Some(100);
                 settings.ttft_bucket_size_ms = Some(100);
@@ -393,14 +358,10 @@ mod tests {
     fn keeps_primary_until_queue_slo_requires_first_band_fallback() {
         let target = target();
         let affinity_key = "hybrid-prefix";
-        let mut candidates = (0..5)
-            .map(|index| {
-                let mut candidate = candidate(&format!("cluster-{index}"), 0);
-                candidate.stats.last_mean_input_tps = 100.0;
-                candidate.rtt = Duration::from_millis(100);
-                candidate
-            })
-            .collect::<Vec<_>>();
+        let mut candidates = candidates(5, 0);
+        for candidate in &mut candidates {
+            candidate.rtt = Duration::from_millis(100);
+        }
         let ranked_indices =
             pulsar_ranked_indices("hybrid-seed", &target, affinity_key, 0, &candidates);
         let ranked_ids = ranked_indices
@@ -428,6 +389,7 @@ mod tests {
 
         let hybrid = PulsarMultiregionLoadBalancer::new(pulsar_multiregion_algorithm_config(
             "hybrid-seed",
+            false,
             |settings| {
                 settings.max_queue_time_floor_ms = Some(100);
                 settings.max_queue_time_ceil_ms = Some(100);

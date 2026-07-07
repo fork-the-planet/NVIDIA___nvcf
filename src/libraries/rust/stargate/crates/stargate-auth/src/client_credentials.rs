@@ -13,82 +13,64 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! OAuth2 client-credentials token source.
-//!
-//! Exchanges a client id/secret for a short-lived bearer token, for
-//! deployments that have no static token signer.
-
-use std::fmt;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, anyhow};
 use sonic_rs::JsonValueTrait;
+use tokio::sync::Mutex;
 use tracing::debug;
 
-/// Expiry used when the token endpoint omits `expires_in`.
 const DEFAULT_EXPIRES_IN: Duration = Duration::from_secs(300);
-
-/// Refresh a cached token this far before its stated expiry so in-flight calls
-/// never present a token that expires mid-request.
 const EXPIRY_REFRESH_BUFFER: Duration = Duration::from_secs(60);
-
-/// Upper bound on a token lifetime. Clamps an absurd `expires_in` from the token
-/// endpoint so adding it to `Instant::now()` cannot overflow and panic.
 const MAX_EXPIRES_IN: Duration = Duration::from_secs(24 * 60 * 60);
+const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Mints bearer tokens via the OAuth2 client-credentials grant.
-///
-/// Re-reads the id/secret per refresh so they can rotate; caches the token
-/// until it nears expiry.
+fn token_client(timeout: Duration) -> reqwest::Client {
+    // Bound the single-flight refresh lock when the endpoint stalls at headers or body.
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("failed to build oauth2 token client")
+}
+
+/// Mints and caches OAuth2 tokens, re-reading credentials for every refresh.
 pub struct ClientCredentialsProvider {
-    /// Token endpoint, formed as `<provider_host>/token`.
     token_url: String,
-    /// Secrets file holding the `id` and `secret`.
     credentials_path: PathBuf,
-    /// OAuth2 scope requested for the token.
     scope: String,
     http: reqwest::Client,
-    cache: tokio::sync::Mutex<Option<CachedToken>>,
+    cache: Mutex<Option<CachedToken>>,
 }
 
-struct CachedToken {
-    token: String,
-    expires_at: Instant,
-}
+struct CachedToken(String, Instant);
 
 impl ClientCredentialsProvider {
-    /// Mints tokens with `scope` at `<provider_host>/token`, reading the
-    /// id/secret from `credentials_path`.
+    /// Mints scoped tokens at `<provider_host>/token` using `credentials_path`.
     pub fn new(provider_host: &str, credentials_path: PathBuf, scope: impl Into<String>) -> Self {
         Self {
             token_url: format!("{}/token", provider_host.trim_end_matches('/')),
             credentials_path,
             scope: scope.into(),
-            http: reqwest::Client::new(),
-            cache: tokio::sync::Mutex::new(None),
+            http: token_client(TOKEN_REQUEST_TIMEOUT),
+            cache: Mutex::new(None),
         }
     }
 
-    /// Returns a cached token, minting a fresh one when none is cached or it is
-    /// near expiry. The lock is held across the refresh so callers coalesce onto
-    /// one token request.
+    /// Returns a valid cached token, coalescing refresh callers under one lock.
     pub async fn resolve(&self) -> anyhow::Result<String> {
         let mut cache = self.cache.lock().await;
-        if let Some(cached) = cache.as_ref()
-            && Instant::now() + EXPIRY_REFRESH_BUFFER < cached.expires_at
+        if let Some(CachedToken(token, expires_at)) = cache.as_ref()
+            && Instant::now() + EXPIRY_REFRESH_BUFFER < *expires_at
         {
-            return Ok(cached.token.clone());
+            return Ok(token.clone());
         }
 
-        let minted = self.mint().await?;
-        let token = minted.token.clone();
-        *cache = Some(minted);
-        Ok(token)
-    }
-
-    async fn mint(&self) -> anyhow::Result<CachedToken> {
-        let (client_id, client_secret) = self.read_credentials().await?;
+        let credentials = crate::read_secret_file(&self.credentials_path).await?;
+        let (client_id, client_secret) = parse_client_credentials(&credentials)?;
 
         let response = self
             .http
@@ -102,60 +84,47 @@ impl ClientCredentialsProvider {
             .send()
             .await
             .context("oauth2 token request failed")?;
-
-        let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .context("failed to read oauth2 token response")?;
-        if !status.is_success() {
-            return Err(anyhow!("oauth2 token endpoint returned status {status}"));
-        }
-
-        let access_token = sonic_rs::get(&body, ["access_token"])
-            .context("oauth2 token response missing access_token")?
-            .as_str()
-            .ok_or_else(|| anyhow!("oauth2 access_token is not a string"))?
-            .to_owned();
-        let expires_in = sonic_rs::get(&body, ["expires_in"])
-            .ok()
-            .and_then(|value| value.as_u64())
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_EXPIRES_IN)
-            .min(MAX_EXPIRES_IN);
-
-        debug!(
-            scope = %self.scope,
-            expires_in_secs = expires_in.as_secs(),
-            "minted worker-auth client-credentials token"
-        );
-        Ok(CachedToken {
-            token: access_token,
-            expires_at: Instant::now() + expires_in,
-        })
-    }
-
-    async fn read_credentials(&self) -> anyhow::Result<(String, String)> {
-        let bytes = tokio::fs::read(&self.credentials_path)
-            .await
-            .with_context(|| format!("failed to read {}", self.credentials_path.display()))?;
-        let id = json_string_field(&bytes, "id")?;
-        let secret = json_string_field(&bytes, "secret")?;
-        Ok((id, secret))
+        let (access_token, expires_in) = parse_token_response(response).await?;
+        let expires_in_secs = expires_in.as_secs();
+        debug!(scope = %self.scope, expires_in_secs, "minted worker-auth client-credentials token");
+        let expires_at = Instant::now() + expires_in;
+        *cache = Some(CachedToken(access_token.clone(), expires_at));
+        Ok(access_token)
     }
 }
 
-fn json_string_field(bytes: &[u8], field: &str) -> anyhow::Result<String> {
-    let value =
-        sonic_rs::get(bytes, [field]).with_context(|| format!("secrets file missing {field}"))?;
-    let s = value
+async fn parse_token_response(response: reqwest::Response) -> anyhow::Result<(String, Duration)> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!("oauth2 token endpoint returned status {status}"));
+    }
+    let body = response.bytes().await;
+    let body = body.context("failed to read oauth2 token response")?;
+    let access_token = sonic_rs::get(&body, ["access_token"])
+        .context("oauth2 token response missing access_token")?
         .as_str()
-        .ok_or_else(|| anyhow!("secrets file value at {field} is not a string"))?;
-    Ok(s.to_owned())
+        .ok_or_else(|| anyhow!("oauth2 access_token is not a string"))?
+        .to_owned();
+    let expires_in = sonic_rs::get(&body, ["expires_in"])
+        .ok()
+        .and_then(|value| value.as_u64())
+        .map_or(DEFAULT_EXPIRES_IN, Duration::from_secs)
+        .min(MAX_EXPIRES_IN);
+    Ok((access_token, expires_in))
 }
 
-// Manual Debug so the cached token and the credentials path's contents never
-// leak into logs.
+fn parse_client_credentials(bytes: &[u8]) -> anyhow::Result<(String, String)> {
+    let field = |name| {
+        sonic_rs::get(bytes, [name])
+            .with_context(|| format!("secrets file missing {name}"))?
+            .as_str()
+            .with_context(|| format!("secrets file value at {name} is not a string"))
+            .map(str::to_owned)
+    };
+    Ok((field("id")?, field("secret")?))
+}
+
+// Keep credentials and cached tokens out of logs.
 impl fmt::Debug for ClientCredentialsProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientCredentialsProvider")
@@ -174,25 +143,17 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::Router;
-    use axum::extract::State;
+    use axum::extract::{Form, State};
     use axum::routing::post;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-    struct TokenEndpoint {
-        scope: String,
-        client_id: String,
-        client_secret: String,
-        hits: Arc<AtomicUsize>,
-        expires_in: u64,
-    }
+    type EndpointState = (Arc<AtomicUsize>, u64);
 
-    /// Starts a fake OAuth2 token endpoint on a random port. It asserts the
-    /// client-credentials form fields and returns a token, counting each hit.
-    async fn serve_token_endpoint(endpoint: TokenEndpoint) -> (String, Arc<AtomicUsize>) {
-        let hits = endpoint.hits.clone();
-        let state = Arc::new(endpoint);
+    async fn serve_token_endpoint(expires_in: u64) -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route("/token", post(handle_token))
-            .with_state(state);
+            .with_state((hits.clone(), expires_in));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -202,46 +163,23 @@ mod tests {
         (format!("http://{addr}"), hits)
     }
 
-    async fn handle_token(State(endpoint): State<Arc<TokenEndpoint>>, body: String) -> String {
-        endpoint.hits.fetch_add(1, Ordering::SeqCst);
-        let form: std::collections::HashMap<String, String> = url_decode_form(&body);
-        assert_eq!(
-            form.get("grant_type").map(String::as_str),
-            Some("client_credentials")
-        );
-        assert_eq!(form.get("scope"), Some(&endpoint.scope));
-        assert_eq!(form.get("client_id"), Some(&endpoint.client_id));
-        assert_eq!(form.get("client_secret"), Some(&endpoint.client_secret));
+    async fn handle_token(
+        State((hits, expires_in)): State<EndpointState>,
+        Form(form): Form<std::collections::HashMap<String, String>>,
+    ) -> String {
+        hits.fetch_add(1, Ordering::SeqCst);
+        for (field, expected) in [
+            ("grant_type", "client_credentials"),
+            ("scope", "llm:check worker/+&"),
+            ("client_id", "client id+&"),
+            ("client_secret", "client-secret +=&"),
+        ] {
+            assert_eq!(form.get(field).map(String::as_str), Some(expected));
+        }
         format!(
             r#"{{"access_token":"minted-token","token_type":"Bearer","expires_in":{}}}"#,
-            endpoint.expires_in
+            expires_in
         )
-    }
-
-    fn url_decode_form(body: &str) -> std::collections::HashMap<String, String> {
-        body.split('&')
-            .filter_map(|pair| pair.split_once('='))
-            .map(|(k, v)| (percent_decode(k), percent_decode(v)))
-            .collect()
-    }
-
-    fn percent_decode(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        let mut bytes = s.bytes();
-        while let Some(b) = bytes.next() {
-            match b {
-                b'+' => out.push(' '),
-                b'%' => {
-                    let hi = bytes.next().unwrap();
-                    let lo = bytes.next().unwrap();
-                    let decoded =
-                        u8::from_str_radix(&format!("{}{}", hi as char, lo as char), 16).unwrap();
-                    out.push(decoded as char);
-                }
-                other => out.push(other as char),
-            }
-        }
-        out
     }
 
     fn credentials_file(id: &str, secret: &str) -> tempfile::NamedTempFile {
@@ -250,90 +188,122 @@ mod tests {
         tmp
     }
 
+    fn provider_for(host: &str) -> (ClientCredentialsProvider, tempfile::NamedTempFile) {
+        let credentials = credentials_file("client id+&", "client-secret +=&");
+        let provider = ClientCredentialsProvider::new(
+            host,
+            credentials.path().to_path_buf(),
+            "llm:check worker/+&",
+        );
+        (provider, credentials)
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) {
+        let mut request_line = String::new();
+        tokio::io::BufReader::new(socket)
+            .read_line(&mut request_line)
+            .await
+            .unwrap();
+        assert_eq!(request_line, "POST /token HTTP/1.1\r\n");
+    }
+
+    async fn stalled_request_error(
+        response_head: Option<&'static [u8]>,
+        request_timeout: Duration,
+        retry_succeeds: bool,
+    ) -> anyhow::Error {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let (stalled, request_stalled) = tokio::sync::oneshot::channel();
+        let (release, request_finished) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_request(&mut first).await;
+            if let Some(response_head) = response_head {
+                first.write_all(response_head).await.unwrap();
+            }
+            stalled.send(()).unwrap();
+            request_finished.await.unwrap();
+            // The retry must establish a fresh connection after the timed-out request.
+            drop(first);
+            if retry_succeeds {
+                let (mut retry, _) = listener.accept().await.unwrap();
+                read_request(&mut retry).await;
+                let body = r#"{"access_token":"minted-token","expires_in":300}"#;
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                retry.write_all(head.as_bytes()).await.unwrap();
+                retry.write_all(body.as_bytes()).await.unwrap();
+            }
+        });
+        let (mut provider, _credentials) = provider_for(&host);
+        provider.http = token_client(request_timeout);
+        let (stalled, outcome) = tokio::join!(
+            request_stalled,
+            tokio::time::timeout(Duration::from_secs(1), provider.resolve())
+        );
+        stalled.unwrap();
+        let error = outcome
+            .expect("stalled token request did not finish within its bound")
+            .unwrap_err();
+        release.send(()).unwrap();
+        if retry_succeeds {
+            assert_eq!(provider.resolve().await.unwrap(), "minted-token");
+        }
+        server.await.unwrap();
+        error
+    }
+
+    fn assert_timed_out(error: anyhow::Error) {
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("timed out"))
+        );
+    }
+
+    type Fixture = (
+        ClientCredentialsProvider,
+        Arc<AtomicUsize>,
+        tempfile::NamedTempFile,
+    );
+
+    async fn fixture(expires_in: u64) -> Fixture {
+        let (host, hits) = serve_token_endpoint(expires_in).await;
+        let (provider, credentials) = provider_for(&host);
+        (provider, hits, credentials)
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn mints_token_with_client_credentials_grant() {
-        let (host, _hits) = serve_token_endpoint(TokenEndpoint {
-            scope: "llm:check_worker".to_string(),
-            client_id: "client-id".to_string(),
-            client_secret: "client-secret".to_string(),
-            hits: Arc::new(AtomicUsize::new(0)),
-            expires_in: 300,
-        })
-        .await;
-        let creds = credentials_file("client-id", "client-secret");
-
-        let provider =
-            ClientCredentialsProvider::new(&host, creds.path().to_path_buf(), "llm:check_worker");
-
+    async fn mints_token_without_exposing_secrets_in_debug() {
+        let (provider, _hits, _credentials) = fixture(300).await;
         assert_eq!(provider.resolve().await.unwrap(), "minted-token");
+        let output = format!("{provider:?}");
+        for secret in ["client id+&", "client-secret +=&", "minted-token"] {
+            assert!(!output.contains(secret));
+        }
+        let provider = crate::AuthTokenProvider::ClientCredentials(Arc::new(provider));
+        assert_eq!(format!("{provider:?}"), "ClientCredentials(<redacted>)");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn caches_token_within_validity_window() {
-        let (host, hits) = serve_token_endpoint(TokenEndpoint {
-            scope: "llm:check_worker".to_string(),
-            client_id: "client-id".to_string(),
-            client_secret: "client-secret".to_string(),
-            hits: Arc::new(AtomicUsize::new(0)),
-            expires_in: 300,
-        })
-        .await;
-        let creds = credentials_file("client-id", "client-secret");
-        let provider =
-            ClientCredentialsProvider::new(&host, creds.path().to_path_buf(), "llm:check_worker");
-
+        let (provider, hits, _credentials) = fixture(300).await;
         provider.resolve().await.unwrap();
         provider.resolve().await.unwrap();
-
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            1,
-            "second resolve should hit the cache"
-        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn refetches_when_token_is_near_expiry() {
-        // expires_in below the refresh buffer means the cached token is always
-        // considered stale, so every resolve mints a fresh one.
-        let (host, hits) = serve_token_endpoint(TokenEndpoint {
-            scope: "llm:check_worker".to_string(),
-            client_id: "client-id".to_string(),
-            client_secret: "client-secret".to_string(),
-            hits: Arc::new(AtomicUsize::new(0)),
-            expires_in: 1,
-        })
-        .await;
-        let creds = credentials_file("client-id", "client-secret");
-        let provider =
-            ClientCredentialsProvider::new(&host, creds.path().to_path_buf(), "llm:check_worker");
-
+        let (provider, hits, _credentials) = fixture(1).await;
         provider.resolve().await.unwrap();
         provider.resolve().await.unwrap();
-
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            2,
-            "near-expiry token should be refetched"
-        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn clamps_oversized_expires_in() {
-        // A huge expires_in must not panic when added to Instant::now(); the
-        // clamped lifetime is far enough out that the token caches.
-        let (host, hits) = serve_token_endpoint(TokenEndpoint {
-            scope: "llm:check_worker".to_string(),
-            client_id: "client-id".to_string(),
-            client_secret: "client-secret".to_string(),
-            hits: Arc::new(AtomicUsize::new(0)),
-            expires_in: u64::MAX,
-        })
-        .await;
-        let creds = credentials_file("client-id", "client-secret");
-        let provider =
-            ClientCredentialsProvider::new(&host, creds.path().to_path_buf(), "llm:check_worker");
-
+        let (provider, hits, _credentials) = fixture(u64::MAX).await;
         assert_eq!(provider.resolve().await.unwrap(), "minted-token");
         provider.resolve().await.unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -341,18 +311,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn errors_when_credentials_file_lacks_id() {
-        let (host, _hits) = serve_token_endpoint(TokenEndpoint {
-            scope: "llm:check_worker".to_string(),
-            client_id: "client-id".to_string(),
-            client_secret: "client-secret".to_string(),
-            hits: Arc::new(AtomicUsize::new(0)),
-            expires_in: 300,
-        })
-        .await;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, r#"{{"secret": "client-secret"}}"#).unwrap();
-        let provider =
-            ClientCredentialsProvider::new(&host, tmp.path().to_path_buf(), "llm:check_worker");
+        let provider = ClientCredentialsProvider::new(
+            "http://unused",
+            tmp.path().to_path_buf(),
+            "llm:check_worker",
+        );
 
         let error = provider.resolve().await.unwrap_err();
         assert!(error.to_string().contains("missing id"));
@@ -360,23 +325,29 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn errors_on_non_success_status() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = Router::new().route(
-            "/token",
-            post(|| async { (axum::http::StatusCode::UNAUTHORIZED, "denied") }),
-        );
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let creds = credentials_file("client-id", "client-secret");
-        let provider = ClientCredentialsProvider::new(
-            &format!("http://{addr}"),
-            creds.path().to_path_buf(),
-            "llm:check_worker",
-        );
-
-        let error = provider.resolve().await.unwrap_err();
+        let error = stalled_request_error(
+            Some(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 1024\r\n\r\n"),
+            TOKEN_REQUEST_TIMEOUT,
+            false,
+        )
+        .await;
         assert!(error.to_string().contains("401"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_timeout_releases_single_flight_lock_for_retry() {
+        let error = stalled_request_error(None, Duration::from_millis(250), true).await;
+        assert_timed_out(error);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_timeout_covers_success_response_body() {
+        let error = stalled_request_error(
+            Some(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\n"),
+            Duration::from_millis(250),
+            false,
+        )
+        .await;
+        assert_timed_out(error);
     }
 }

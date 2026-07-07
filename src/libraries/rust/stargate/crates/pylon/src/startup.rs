@@ -13,119 +13,163 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use pylon_lib::{
-    AuthTokenProvider, BringupConfig, EngineStatsStreamConfig, EngineStatsStreamHandle,
-    EngineStatsStreamMode, InferenceServerRegistrationClient, InferenceServerRegistrationConfig,
-    MetricsServerHandle, OutputTokenParserFactory, PylonMetrics, PylonQueueMismatchRetryConfig,
-    PylonRetryConfig, PylonRuntimeState, QuicHttpTunnelConfig, QuicHttpTunnelHandle,
-    RequestQualityMonitorConfig, StatsCollectorConfig, StatsCollectorHandle,
-    start_engine_stats_stream, start_metrics_server, start_quic_http_tunnel,
-    start_stats_collector_with_engine_stats, stats_aggregator_update_channel,
+    AuthTokenProvider, BringupConfig, BringupHandle, CalibrationConfig, EngineStatsStreamConfig,
+    EngineStatsStreamHandle, EngineStatsStreamMode, InferenceServerRegistrationClient,
+    InferenceServerRegistrationConfig, MetricsServerHandle, PylonMetrics,
+    PylonQueueMismatchRetryConfig, PylonRetryConfig, PylonRuntimeState, QuicHttpTunnelConfig,
+    QuicHttpTunnelHandle, RequestQualityMonitorConfig, StatsCollectorConfig, StatsCollectorHandle,
+    TunnelForwardingConfig, run_startup_calibration, start_bringup, start_engine_stats_stream,
+    start_metrics_server, start_quic_http_tunnel, start_stats_collector_with_engine_stats,
+    stats_aggregator_update_channel,
 };
 use reqwest::header::HeaderName;
 use stargate_proto::pb::InferenceServerStatus;
+use stargate_protocol::BackendConnectivity;
 use stargate_runtime::wait_for_termination_signal;
 use tokio::task::JoinError;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
-use super::{Args, telemetry};
+use super::Args;
+
+type TaskExit = std::result::Result<(), JoinError>;
 
 pub(super) async fn run(args: Args) -> Result<()> {
-    let _telemetry_guard =
-        telemetry::init_telemetry(args.otel_endpoint.as_deref(), &args.otel_service_name)?;
     let plan = PylonStartupPlan::from_args(&args)?;
+    let _telemetry_guard = stargate_telemetry::init_telemetry(
+        args.otel_endpoint.as_deref(),
+        &args.otel_service_name,
+        "pylon_upstream_http_request",
+        None,
+    )?;
     let runtime = start_pylon_runtime(&args, &plan).await?;
 
-    if plan.reverse_mode() {
-        info!(
-            stargate = %args.stargate_address,
-            inference_server_id = %args.inference_server_id,
-            upstream = %plan.upstream,
-            "registered with stargate (reverse tunnel mode)"
-        );
-    } else {
-        info!(
-            stargate = %args.stargate_address,
-            inference_server_id = %args.inference_server_id,
-            inference_server_url = %runtime.registration_inference_server_url,
-            upstream = %plan.upstream,
-            "registered with stargate"
-        );
-    }
+    log_startup_complete(
+        &args.stargate_address,
+        &args.inference_server_id,
+        &plan,
+        &runtime.registration_inference_server_url,
+    );
     info!("pylon running");
     runtime
         .run_until_shutdown(wait_for_termination_signal())
         .await
 }
 
-#[derive(Clone)]
+fn log_startup_complete(
+    stargate_address: &str,
+    inference_server_id: &str,
+    plan: &PylonStartupPlan,
+    registration_inference_server_url: &str,
+) {
+    if plan.backend_tunnel.is_reverse() {
+        info!(
+            stargate = stargate_address,
+            inference_server_id,
+            cluster_id = %plan.cluster_id,
+            upstream = %plan.upstream,
+            model_ids = ?plan.model_ids,
+            "pylon startup complete; stargate registration started (reverse tunnel mode)"
+        );
+    } else {
+        info!(
+            stargate = stargate_address,
+            inference_server_id,
+            cluster_id = %plan.cluster_id,
+            inference_server_url = registration_inference_server_url,
+            upstream = %plan.upstream,
+            model_ids = ?plan.model_ids,
+            "pylon startup complete; stargate registration started (direct tunnel mode)"
+        );
+    }
+}
+
 pub(crate) struct PylonStartupPlan {
     upstream: String,
     cluster_id: String,
+    model_ids: Vec<String>,
     pylon_retry: PylonRetryConfig,
     queue_mismatch_retry: PylonQueueMismatchRetryConfig,
-    fixed_last_mean_input_tps: Option<f64>,
+    input_tps_bootstrap: InputTpsBootstrap,
+    bringup: BringupConfig,
     request_quality_monitor: RequestQualityMonitorConfig,
     metrics_addr: SocketAddr,
     auth_token_provider: Option<Arc<AuthTokenProvider>>,
-    mode: PylonStartupMode,
+    backend_tunnel: BackendTunnelStartup,
 }
 
-#[derive(Clone, Copy)]
-enum PylonStartupMode {
+enum BackendTunnelStartup {
     Direct { listen_addr: SocketAddr },
     Reverse,
 }
 
+impl BackendTunnelStartup {
+    fn from_args(args: &Args) -> Result<Self> {
+        match args.backend_connectivity {
+            BackendConnectivity::Direct => Ok(Self::Direct {
+                listen_addr: args.quic_listen_addr.parse()?,
+            }),
+            BackendConnectivity::Reverse => Ok(Self::Reverse),
+        }
+    }
+
+    fn direct_listen_addr(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Direct { listen_addr } => Some(*listen_addr),
+            Self::Reverse => None,
+        }
+    }
+
+    fn is_reverse(&self) -> bool {
+        matches!(self, Self::Reverse)
+    }
+}
+
+enum InputTpsBootstrap {
+    Calibration(CalibrationConfig),
+    Initial { input_tps: f64, pin: bool },
+}
+
 impl PylonStartupPlan {
     pub(crate) fn from_args(args: &Args) -> Result<Self> {
+        let input_tps_bootstrap = input_tps_bootstrap_from_args(args)?;
+        let mut model_ids = args.model_name.clone();
+        model_ids.sort_unstable();
+        model_ids.dedup();
         Ok(Self {
             upstream: normalize_base_url(&args.upstream_http_base_url),
             cluster_id: effective_cluster_id(args),
+            model_ids,
             pylon_retry: pylon_retry_config_from_args(args)?,
             queue_mismatch_retry: pylon_queue_mismatch_retry_config_from_args(args)?,
-            fixed_last_mean_input_tps: benchmark_fixed_last_mean_input_tps_from_args(args)?,
+            input_tps_bootstrap,
+            bringup: BringupConfig {
+                enabled: !args.disable_bringup,
+                active_canary_interval: Duration::from_millis(args.active_canary_interval_ms),
+                canary_timeout: Duration::from_millis(args.bringup_canary_timeout_ms),
+                canary_max_generation_threshold: args.canary_max_generation_threshold,
+            },
             request_quality_monitor: request_quality_monitor_config_from_args(args),
             metrics_addr: format!("{}:{}", args.metrics_host, args.metrics_port).parse()?,
-            auth_token_provider: auth_token_provider_from_args(args),
-            mode: startup_mode_from_args(args)?,
+            auth_token_provider: match (&args.auth_token, &args.auth_token_file) {
+                (Some(token), _) => Some(Arc::new(AuthTokenProvider::Static(token.clone()))),
+                (None, Some(path)) => Some(Arc::new(AuthTokenProvider::File(path.clone().into()))),
+                (None, None) => None,
+            },
+            backend_tunnel: BackendTunnelStartup::from_args(args)?,
         })
     }
 
     pub(crate) fn direct_tunnel_listen_addr(&self) -> Option<SocketAddr> {
-        match self.mode {
-            PylonStartupMode::Direct { listen_addr } => Some(listen_addr),
-            PylonStartupMode::Reverse => None,
-        }
-    }
-
-    pub(crate) fn registration_inference_server_url(&self, direct_quic_url: &str) -> String {
-        match self.mode {
-            PylonStartupMode::Direct { .. } => direct_quic_url.to_string(),
-            PylonStartupMode::Reverse => self.upstream.clone(),
-        }
-    }
-
-    fn reverse_mode(&self) -> bool {
-        matches!(self.mode, PylonStartupMode::Reverse)
-    }
-}
-
-fn startup_mode_from_args(args: &Args) -> Result<PylonStartupMode> {
-    if args.reverse_tunnel {
-        Ok(PylonStartupMode::Reverse)
-    } else {
-        Ok(PylonStartupMode::Direct {
-            listen_addr: args.quic_listen_addr.parse()?,
-        })
+        self.backend_tunnel.direct_listen_addr()
     }
 }
 
@@ -133,6 +177,7 @@ struct RunningPylon {
     registration_client: InferenceServerRegistrationClient,
     engine_stats_stream: Option<RunningEngineStatsStream>,
     stats_collector: StatsCollectorHandle,
+    bringup: Option<BringupHandle>,
     metrics_server: MetricsServerHandle,
     tunnel: Option<QuicHttpTunnelHandle>,
     registration_inference_server_url: String,
@@ -143,15 +188,6 @@ struct RunningEngineStatsStream {
     handle: EngineStatsStreamHandle,
 }
 
-enum PylonRuntimeExit {
-    Signal(std::io::Result<&'static str>),
-    CriticalTask {
-        name: &'static str,
-        result: std::result::Result<(), JoinError>,
-    },
-    EngineStatsStream(std::result::Result<(), JoinError>),
-}
-
 impl RunningPylon {
     async fn run_until_shutdown<S>(mut self, signal: S) -> Result<()>
     where
@@ -159,8 +195,8 @@ impl RunningPylon {
     {
         tokio::pin!(signal);
         loop {
-            match self.wait_for_exit(signal.as_mut()).await {
-                PylonRuntimeExit::Signal(result) => {
+            let error = tokio::select! {
+                result = signal.as_mut() => {
                     let result = result.context("failed to receive pylon termination signal");
                     if let Ok(signal) = &result {
                         info!(signal, "received shutdown signal");
@@ -168,56 +204,43 @@ impl RunningPylon {
                     self.shutdown().await;
                     return result.map(|_| ());
                 }
-                PylonRuntimeExit::EngineStatsStream(result)
+                result = self.registration_client.wait_for_exit() => critical_task_exit_error("registration session", result),
+                result = async {
+                    match self.engine_stats_stream.as_mut() {
+                        Some(stream) => stream.handle.wait_for_exit().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     if engine_stats_exit_is_expected(
                         self.engine_stats_stream.as_ref().map(|stream| stream.mode),
                         &result,
-                    ) =>
-                {
-                    info!("auto engine stats stream completed after enabling fallback");
-                    self.engine_stats_stream = None;
+                    ) {
+                        info!("auto engine stats stream completed after enabling fallback");
+                        self.engine_stats_stream = None;
+                        continue;
+                    }
+                    critical_task_exit_error("engine stats stream", result)
                 }
-                PylonRuntimeExit::EngineStatsStream(result) => {
-                    let error = critical_task_exit_error("engine stats stream", result);
-                    error!(error = %error, "critical pylon task exited");
-                    self.shutdown().await;
-                    return Err(error);
+                result = self.stats_collector.wait_for_exit() => critical_task_exit_error("stats collector", result),
+                result = async {
+                    match self.bringup.as_mut() {
+                        Some(bringup) => bringup.wait_for_exit().await,
+                        None => std::future::pending().await,
+                    }
+                } => critical_task_exit_error("bringup supervisor", result),
+                result = self.metrics_server.wait_for_exit() => critical_task_exit_error("metrics server", result),
+                result = async {
+                    match self.tunnel.as_mut() {
+                        Some(tunnel) => tunnel.wait_for_exit().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    critical_task_exit_error("direct tunnel accept loop", result)
                 }
-                PylonRuntimeExit::CriticalTask { name, result } => {
-                    let error = critical_task_exit_error(name, result);
-                    error!(error = %error, "critical pylon task exited");
-                    self.shutdown().await;
-                    return Err(error);
-                }
-            }
-        }
-    }
-
-    async fn wait_for_exit<S>(&mut self, signal: Pin<&mut S>) -> PylonRuntimeExit
-    where
-        S: Future<Output = std::io::Result<&'static str>>,
-    {
-        tokio::select! {
-            result = signal => PylonRuntimeExit::Signal(result),
-            result = self.registration_client.wait_for_exit() => PylonRuntimeExit::CriticalTask {
-                name: "registration session",
-                result,
-            },
-            result = wait_for_engine_stats_exit(&mut self.engine_stats_stream) => {
-                PylonRuntimeExit::EngineStatsStream(result)
-            },
-            result = self.stats_collector.wait_for_exit() => PylonRuntimeExit::CriticalTask {
-                name: "stats collector",
-                result,
-            },
-            result = self.metrics_server.wait_for_exit() => PylonRuntimeExit::CriticalTask {
-                name: "metrics server",
-                result,
-            },
-            result = wait_for_tunnel_exit(&mut self.tunnel) => PylonRuntimeExit::CriticalTask {
-                name: "direct tunnel accept loop",
-                result,
-            },
+            };
+            error!(error = %error, "critical pylon task exited");
+            self.shutdown().await;
+            return Err(error);
         }
     }
 
@@ -226,200 +249,46 @@ impl RunningPylon {
             mut registration_client,
             engine_stats_stream,
             stats_collector,
+            bringup,
             metrics_server,
             tunnel,
             ..
         } = self;
         tokio::join!(
             registration_client.shutdown(),
-            shutdown_engine_stats_stream(engine_stats_stream),
+            async move {
+                if let Some(stream) = engine_stats_stream {
+                    stream.handle.shutdown().await;
+                }
+            },
             stats_collector.shutdown(),
+            async move {
+                if let Some(bringup) = bringup {
+                    bringup.shutdown().await;
+                }
+            },
             metrics_server.shutdown(),
-            shutdown_tunnel(tunnel),
+            async move {
+                if let Some(tunnel) = tunnel {
+                    tunnel.shutdown().await;
+                }
+            },
         );
     }
 }
 
-async fn wait_for_engine_stats_exit(
-    engine_stats_stream: &mut Option<RunningEngineStatsStream>,
-) -> std::result::Result<(), JoinError> {
-    let Some(engine_stats_stream) = engine_stats_stream else {
-        return std::future::pending().await;
-    };
-    engine_stats_stream.handle.wait_for_exit().await
-}
-
-async fn wait_for_tunnel_exit(
-    tunnel: &mut Option<QuicHttpTunnelHandle>,
-) -> std::result::Result<(), JoinError> {
-    let Some(tunnel) = tunnel else {
-        return std::future::pending().await;
-    };
-    tunnel.wait_for_exit().await
-}
-
-async fn shutdown_engine_stats_stream(engine_stats_stream: Option<RunningEngineStatsStream>) {
-    if let Some(engine_stats_stream) = engine_stats_stream {
-        engine_stats_stream.handle.shutdown().await;
-    }
-}
-
-async fn shutdown_tunnel(tunnel: Option<QuicHttpTunnelHandle>) {
-    if let Some(tunnel) = tunnel {
-        tunnel.shutdown().await;
-    }
-}
-
-fn critical_task_exit_error(
-    name: &'static str,
-    result: std::result::Result<(), JoinError>,
-) -> anyhow::Error {
+fn critical_task_exit_error(name: &'static str, result: TaskExit) -> anyhow::Error {
     match result {
         Ok(()) => anyhow::anyhow!("{name} exited unexpectedly"),
         Err(error) => anyhow::anyhow!("{name} failed: {error}"),
     }
 }
 
-fn engine_stats_exit_is_expected(
-    mode: Option<EngineStatsStreamMode>,
-    result: &std::result::Result<(), JoinError>,
-) -> bool {
+fn engine_stats_exit_is_expected(mode: Option<EngineStatsStreamMode>, result: &TaskExit) -> bool {
     mode == Some(EngineStatsStreamMode::Auto) && result.is_ok()
 }
 
 async fn start_pylon_runtime(args: &Args, plan: &PylonStartupPlan) -> Result<RunningPylon> {
-    let metrics = start_pylon_metrics()?;
-    let metrics_server = start_metrics_server(plan.metrics_addr, metrics.registry()).await?;
-    let stats_config =
-        stats_collector_config_from_args(args, &plan.upstream, plan.fixed_last_mean_input_tps);
-    let (runtime_state, request_observation_rx) = PylonRuntimeState::observed(
-        InferenceServerStatus::Active,
-        &args.model_name,
-        stats_config.observation_channel_capacity,
-        Some(metrics.clone()),
-    );
-    seed_runtime_state(
-        &runtime_state,
-        &args.model_name,
-        plan.fixed_last_mean_input_tps,
-    );
-    let (engine_stats_stream, stats_update_rx) =
-        start_engine_stats_runtime(args, plan, metrics.clone(), &stats_config);
-    let tls_cert_pem = args.tls_cert_path.as_ref().map(std::fs::read).transpose()?;
-    let tls_key_pem = args.tls_key_path.as_ref().map(std::fs::read).transpose()?;
-    let tunnel = start_direct_tunnel_from_plan(
-        args,
-        plan,
-        runtime_state.clone(),
-        metrics.clone(),
-        tls_cert_pem.clone(),
-        tls_key_pem,
-    )
-    .await?;
-    let registration_inference_server_url =
-        registration_inference_server_url_from_tunnel(plan, tunnel.as_ref());
-    let registration_config = registration_config_from_plan(
-        args,
-        plan,
-        runtime_state.clone(),
-        metrics,
-        registration_inference_server_url.clone(),
-        tls_cert_pem,
-    );
-    let mut registration_client = InferenceServerRegistrationClient::default();
-    registration_client.start(registration_config)?;
-    let stats_collector = start_stats_collector_with_engine_stats(
-        stats_config,
-        request_observation_rx,
-        stats_update_rx,
-        runtime_state,
-    );
-
-    Ok(RunningPylon {
-        registration_client,
-        engine_stats_stream,
-        stats_collector,
-        metrics_server,
-        tunnel,
-        registration_inference_server_url,
-    })
-}
-
-fn start_engine_stats_runtime(
-    args: &Args,
-    plan: &PylonStartupPlan,
-    metrics: Arc<PylonMetrics>,
-    stats_config: &StatsCollectorConfig,
-) -> (
-    Option<RunningEngineStatsStream>,
-    Option<flume::Receiver<pylon_lib::StatsAggregatorUpdate>>,
-) {
-    let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(stats_config);
-    let mut config = EngineStatsStreamConfig::new(
-        &plan.upstream,
-        &args.engine_stats_stream_path,
-        args.engine_stats_stream,
-    );
-    config.metrics = Some(metrics);
-    let mode = config.mode;
-    let engine_stats_stream = start_engine_stats_stream(config, stats_update_tx)
-        .map(|handle| RunningEngineStatsStream { mode, handle });
-    let stats_update_rx = engine_stats_stream.as_ref().map(|_| stats_update_rx);
-    (engine_stats_stream, stats_update_rx)
-}
-
-async fn start_direct_tunnel_from_plan(
-    args: &Args,
-    plan: &PylonStartupPlan,
-    runtime_state: PylonRuntimeState,
-    metrics: Arc<PylonMetrics>,
-    tls_cert_pem: Option<Vec<u8>>,
-    tls_key_pem: Option<Vec<u8>>,
-) -> Result<Option<QuicHttpTunnelHandle>> {
-    let Some(tunnel_config) = direct_tunnel_config_from_plan(
-        args,
-        plan,
-        runtime_state,
-        metrics,
-        tls_cert_pem,
-        tls_key_pem,
-    ) else {
-        return Ok(None);
-    };
-    let tunnel = start_quic_http_tunnel(tunnel_config).await?;
-    info!(addr = %tunnel.listen_addr(), url = %format!("quic://{}", tunnel.listen_addr()), "QUIC tunnel listening");
-    Ok(Some(tunnel))
-}
-
-fn registration_inference_server_url_from_tunnel(
-    plan: &PylonStartupPlan,
-    tunnel: Option<&QuicHttpTunnelHandle>,
-) -> String {
-    let direct_quic_url = tunnel
-        .map(|tunnel| format!("quic://{}", tunnel.listen_addr()))
-        .unwrap_or_default();
-    plan.registration_inference_server_url(&direct_quic_url)
-}
-
-fn seed_runtime_state(
-    runtime_state: &PylonRuntimeState,
-    model_names: &[String],
-    fixed_last_mean_input_tps: Option<f64>,
-) {
-    if let Some(last_mean_input_tps) = fixed_last_mean_input_tps {
-        for model_id in model_names {
-            runtime_state.set_model_stats(
-                model_id,
-                pylon_lib::CurrentModelStats {
-                    last_mean_input_tps,
-                    ..Default::default()
-                },
-            );
-        }
-    }
-}
-
-fn start_pylon_metrics() -> Result<Arc<PylonMetrics>> {
     let metrics = PylonMetrics::new()?;
     metrics.observe_target_info(
         env!("CARGO_PKG_VERSION"),
@@ -428,39 +297,160 @@ fn start_pylon_metrics() -> Result<Arc<PylonMetrics>> {
             .or(option_env!("GIT_COMMIT_SHA"))
             .unwrap_or(""),
     );
-    Ok(metrics)
+    let metrics_server = start_metrics_server(plan.metrics_addr, metrics.registry()).await?;
+    let (bootstrap_input_tps, pin_bootstrap_input_tps) =
+        bootstrap_input_tps(plan, metrics.clone()).await?;
+    let stats_config = stats_collector_config_from_args(
+        args,
+        &plan.upstream,
+        bootstrap_input_tps,
+        pin_bootstrap_input_tps,
+    );
+    let (runtime_state, request_observation_rx) = PylonRuntimeState::observed(
+        InferenceServerStatus::Active,
+        &plan.model_ids,
+        stats_config.observation_channel_capacity,
+        Some(metrics.clone()),
+    );
+    let (engine_stats_stream, stats_update_rx) =
+        start_engine_stats_runtime(args, plan, metrics.clone(), &stats_config).unzip();
+    let stats_collector = start_stats_collector_with_engine_stats(
+        stats_config,
+        request_observation_rx,
+        stats_update_rx,
+        runtime_state.clone(),
+    );
+    let tls_cert_pem = args.tls_cert_path.as_ref().map(std::fs::read).transpose()?;
+    let tls_key_pem = args.tls_key_path.as_ref().map(std::fs::read).transpose()?;
+    let forwarding =
+        tunnel_forwarding_config_from_plan(plan, runtime_state.clone(), metrics.clone());
+    let tunnel = start_direct_tunnel_from_plan(
+        args,
+        plan,
+        &forwarding,
+        tls_cert_pem.as_deref(),
+        tls_key_pem,
+    )
+    .await?;
+    let bringup = start_bringup(&plan.upstream, plan.bringup.clone(), runtime_state)
+        .await
+        .context("pylon initial bringup failed")?;
+    let registration_inference_server_url = registration_url(plan, tunnel.as_ref());
+    let registration_config = registration_config_from_plan(
+        args,
+        plan,
+        forwarding,
+        registration_inference_server_url.clone(),
+        tls_cert_pem,
+    );
+    let mut registration_client = InferenceServerRegistrationClient::default();
+    registration_client.start(registration_config)?;
+
+    Ok(RunningPylon {
+        registration_client,
+        engine_stats_stream,
+        stats_collector,
+        bringup,
+        metrics_server,
+        tunnel,
+        registration_inference_server_url,
+    })
 }
 
-fn direct_tunnel_config_from_plan(
+async fn bootstrap_input_tps(
+    plan: &PylonStartupPlan,
+    metrics: Arc<PylonMetrics>,
+) -> Result<(HashMap<String, f64>, bool)> {
+    match &plan.input_tps_bootstrap {
+        InputTpsBootstrap::Calibration(config) => {
+            warn!(
+                cluster_id = %plan.cluster_id,
+                "running local calibration; --do-calibration is valid only for a cluster with one pylon"
+            );
+            let input_tps =
+                run_startup_calibration(&plan.upstream, &plan.model_ids, config, Some(metrics))
+                    .await
+                    .context("local input-TPS calibration failed")?;
+            Ok((input_tps, false))
+        }
+        InputTpsBootstrap::Initial { input_tps, pin } => Ok((
+            plan.model_ids
+                .iter()
+                .cloned()
+                .map(|model_id| (model_id, *input_tps))
+                .collect(),
+            *pin,
+        )),
+    }
+}
+
+fn start_engine_stats_runtime(
     args: &Args,
     plan: &PylonStartupPlan,
-    runtime_state: PylonRuntimeState,
     metrics: Arc<PylonMetrics>,
-    tls_cert_pem: Option<Vec<u8>>,
+    stats_config: &StatsCollectorConfig,
+) -> Option<(
+    RunningEngineStatsStream,
+    flume::Receiver<pylon_lib::StatsAggregatorUpdate>,
+)> {
+    let (stats_update_tx, stats_update_rx) = stats_aggregator_update_channel(stats_config);
+    let mut config = EngineStatsStreamConfig::new(
+        &plan.upstream,
+        &args.engine_stats_stream_path,
+        args.engine_stats_stream,
+    );
+    config.metrics = Some(metrics);
+    let mode = config.mode;
+    start_engine_stats_stream(config, stats_update_tx)
+        .map(|handle| (RunningEngineStatsStream { mode, handle }, stats_update_rx))
+}
+
+async fn start_direct_tunnel_from_plan(
+    args: &Args,
+    plan: &PylonStartupPlan,
+    forwarding: &TunnelForwardingConfig,
+    tls_cert_pem: Option<&[u8]>,
+    tls_key_pem: Option<Vec<u8>>,
+) -> Result<Option<QuicHttpTunnelHandle>> {
+    let Some(tunnel_config) =
+        direct_tunnel_config(args, plan, forwarding, tls_cert_pem, tls_key_pem)
+    else {
+        return Ok(None);
+    };
+    let tunnel = start_quic_http_tunnel(tunnel_config).await?;
+    info!(addr = %tunnel.listen_addr(), url = %format!("quic://{}", tunnel.listen_addr()), "QUIC tunnel listening");
+    Ok(Some(tunnel))
+}
+
+fn registration_url(plan: &PylonStartupPlan, tunnel: Option<&QuicHttpTunnelHandle>) -> String {
+    tunnel
+        .map(|tunnel| format!("quic://{}", tunnel.listen_addr()))
+        .unwrap_or_else(|| plan.upstream.clone())
+}
+
+fn direct_tunnel_config(
+    args: &Args,
+    plan: &PylonStartupPlan,
+    forwarding: &TunnelForwardingConfig,
+    tls_cert_pem: Option<&[u8]>,
     tls_key_pem: Option<Vec<u8>>,
 ) -> Option<QuicHttpTunnelConfig> {
     let listen_addr = plan.direct_tunnel_listen_addr()?;
-    Some(build_direct_tunnel_config(DirectTunnelConfigParams {
+    Some(QuicHttpTunnelConfig {
         listen_addr,
         upstream_http_base_url: plan.upstream.clone(),
-        inference_server_id: args.inference_server_id.clone(),
-        tls_cert_pem,
+        inference_server_id: Some(args.inference_server_id.clone()),
+        forwarding: forwarding.clone(),
+        tls_cert_pem: tls_cert_pem.map(Vec::from),
         tls_key_pem,
-        quic_insecure: args.quic_insecure,
         tunnel_protocol: args.tunnel_protocol,
-        retry: plan.pylon_retry.clone(),
-        queue_mismatch_retry: plan.queue_mismatch_retry.clone(),
-        runtime_state,
-        request_quality_monitor: plan.request_quality_monitor.clone(),
-        metrics,
-    }))
+    })
 }
 
 fn registration_config_from_plan(
     args: &Args,
     plan: &PylonStartupPlan,
-    runtime_state: PylonRuntimeState,
-    metrics: Arc<PylonMetrics>,
+    forwarding: TunnelForwardingConfig,
     inference_server_url: String,
     tls_cert_pem: Option<Vec<u8>>,
 ) -> InferenceServerRegistrationConfig {
@@ -469,92 +459,52 @@ fn registration_config_from_plan(
         inference_server_id: args.inference_server_id.clone(),
         cluster_id: plan.cluster_id.clone(),
         inference_server_url,
-        upstream_http_base_url: Some(plan.upstream.clone()),
         min_update_interval: Duration::from_millis(args.min_update_interval_ms),
-        reverse_tunnel: plan.reverse_mode(),
+        reverse_tunnel: plan.backend_tunnel.is_reverse(),
         tls_cert_pem,
         quic_insecure: args.quic_insecure,
         tunnel_protocol: args.tunnel_protocol,
-        bringup: bringup_config_from_args(args),
-        output_token_parser_factory: OutputTokenParserFactory::vllm(),
+        forwarding,
+        auth_token_provider: plan.auth_token_provider.clone(),
+    }
+}
+
+fn tunnel_forwarding_config_from_plan(
+    plan: &PylonStartupPlan,
+    runtime_state: PylonRuntimeState,
+    metrics: Arc<PylonMetrics>,
+) -> TunnelForwardingConfig {
+    TunnelForwardingConfig {
         runtime_state,
         request_quality_monitor: plan.request_quality_monitor.clone(),
         metrics: Some(metrics),
         retry: plan.pylon_retry.clone(),
         queue_mismatch_retry: plan.queue_mismatch_retry.clone(),
-        auth_token_provider: plan.auth_token_provider.clone(),
+        ..Default::default()
     }
-}
-
-fn bringup_config_from_args(args: &Args) -> BringupConfig {
-    BringupConfig {
-        enabled: !args.disable_bringup,
-        active_canary_interval: Duration::from_millis(args.active_canary_interval_ms),
-        canary_timeout: Duration::from_millis(args.bringup_canary_timeout_ms),
-        canary_max_generation_threshold: args.canary_max_generation_threshold,
-        calibration_requests: args.calibration_requests,
-        calibration_prompt_units: args.calibration_prompt_units,
-        calibration_max_concurrency: args.calibration_max_concurrency,
-        calibration_timeout: Duration::from_millis(args.bringup_calibration_timeout_ms),
-    }
-}
-
-pub(crate) struct DirectTunnelConfigParams {
-    pub(crate) listen_addr: SocketAddr,
-    pub(crate) upstream_http_base_url: String,
-    pub(crate) inference_server_id: String,
-    pub(crate) tls_cert_pem: Option<Vec<u8>>,
-    pub(crate) tls_key_pem: Option<Vec<u8>>,
-    pub(crate) quic_insecure: bool,
-    pub(crate) tunnel_protocol: pylon_lib::TunnelTransportProtocol,
-    pub(crate) retry: PylonRetryConfig,
-    pub(crate) queue_mismatch_retry: PylonQueueMismatchRetryConfig,
-    pub(crate) runtime_state: PylonRuntimeState,
-    pub(crate) request_quality_monitor: RequestQualityMonitorConfig,
-    pub(crate) metrics: Arc<PylonMetrics>,
-}
-
-pub(crate) fn build_direct_tunnel_config(params: DirectTunnelConfigParams) -> QuicHttpTunnelConfig {
-    let mut tunnel_config =
-        QuicHttpTunnelConfig::new(params.listen_addr, params.upstream_http_base_url);
-    tunnel_config.inference_server_id = Some(params.inference_server_id);
-    tunnel_config.tls_cert_pem = params.tls_cert_pem;
-    tunnel_config.tls_key_pem = params.tls_key_pem;
-    tunnel_config.quic_insecure = params.quic_insecure;
-    tunnel_config.tunnel_protocol = params.tunnel_protocol;
-    tunnel_config.retry = params.retry;
-    tunnel_config.queue_mismatch_retry = params.queue_mismatch_retry;
-    tunnel_config.runtime_state = params.runtime_state;
-    tunnel_config.request_quality_monitor = params.request_quality_monitor;
-    tunnel_config.metrics = Some(params.metrics);
-    tunnel_config
 }
 
 pub(crate) fn stats_collector_config_from_args(
     args: &Args,
     upstream: &str,
-    fixed_last_mean_input_tps: Option<f64>,
+    bootstrap_input_tps: HashMap<String, f64>,
+    pin_bootstrap_input_tps: bool,
 ) -> StatsCollectorConfig {
-    let mut stats_config = StatsCollectorConfig {
-        configured_model_ids: args.model_name.clone(),
-        fixed_last_mean_input_tps,
+    StatsCollectorConfig {
+        bootstrap_input_tps,
+        pin_bootstrap_input_tps,
         openai_fallback_stats_enabled: args.engine_stats_stream == EngineStatsStreamMode::Off,
-        ..Default::default()
-    };
-    if let Some(path) = args.kv_cache_stats_path.as_deref() {
         // Mock benchmark backends can expose live KV-cache occupancy over HTTP;
         // real upstreams usually do not, so polling is explicit.
-        stats_config.kv_cache_stats_url = Some(join_base_url_path(upstream, path));
+        kv_cache_stats_url: args.kv_cache_stats_path.as_deref().map(|path| {
+            format!(
+                "{}/{}",
+                upstream.trim_end_matches('/'),
+                path.trim_start_matches('/')
+            )
+        }),
+        ..Default::default()
     }
-    stats_config
-}
-
-fn join_base_url_path(base_url: &str, path: &str) -> String {
-    format!(
-        "{}/{}",
-        base_url.trim_end_matches('/'),
-        path.trim_start_matches('/')
-    )
 }
 
 pub(crate) fn normalize_base_url(url: &str) -> String {
@@ -601,14 +551,40 @@ pub(crate) fn pylon_queue_mismatch_retry_config_from_args(
     })
 }
 
-pub(crate) fn benchmark_fixed_last_mean_input_tps_from_args(args: &Args) -> Result<Option<f64>> {
-    if let Some(last_mean_input_tps) = args.benchmark_fixed_last_mean_input_tps {
+fn input_tps_bootstrap_from_args(args: &Args) -> Result<InputTpsBootstrap> {
+    ensure!(
+        args.do_calibration ^ args.initial_input_tps.is_some(),
+        "exactly one of --do-calibration or --initial-input-tps is required"
+    );
+    ensure!(
+        args.initial_input_tps
+            .is_none_or(|input_tps| input_tps.is_finite() && input_tps > 0.0),
+        "initial input TPS must be finite and positive"
+    );
+    if args.do_calibration {
         ensure!(
-            last_mean_input_tps.is_finite() && last_mean_input_tps > 0.0,
-            "benchmark fixed last mean input TPS must be finite and positive"
+            args.calibration_requests > 0,
+            "--do-calibration requires --calibration-requests greater than zero"
         );
+        ensure!(
+            !args.benchmark_pin_input_tps,
+            "--benchmark-pin-input-tps requires --initial-input-tps"
+        );
+        return Ok(InputTpsBootstrap::Calibration(CalibrationConfig {
+            health_timeout: Duration::from_millis(args.bringup_canary_timeout_ms),
+            calibration_requests: args.calibration_requests,
+            calibration_prompt_units: args.calibration_prompt_units,
+            calibration_max_concurrency: args.calibration_max_concurrency,
+            calibration_timeout: Duration::from_millis(args.bringup_calibration_timeout_ms),
+        }));
     }
-    Ok(args.benchmark_fixed_last_mean_input_tps)
+
+    Ok(InputTpsBootstrap::Initial {
+        input_tps: args
+            .initial_input_tps
+            .expect("exactly one bootstrap source was validated"),
+        pin: args.benchmark_pin_input_tps,
+    })
 }
 
 pub(crate) fn parse_retryable_status_codes(value: &str) -> Result<Vec<reqwest::StatusCode>> {
@@ -640,31 +616,39 @@ pub(crate) fn request_quality_monitor_config_from_args(args: &Args) -> RequestQu
     }
 }
 
-fn auth_token_provider_from_args(args: &Args) -> Option<Arc<AuthTokenProvider>> {
-    if let Some(token) = args.auth_token.as_ref() {
-        Some(Arc::new(AuthTokenProvider::Static(token.clone())))
-    } else {
-        args.auth_token_file
-            .as_ref()
-            .map(|path| Arc::new(AuthTokenProvider::File(path.clone().into())))
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::{IntoResponse, Response as AxumResponse};
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
     use clap::Parser;
     use pylon_lib::{
         EngineStatsStreamMode, PylonMetrics, RequestObservation, RequestObservationEndpoint,
         RequestObservationState, TunnelTransportProtocol,
     };
-    use stargate_proto::pb::InferenceServerStatus;
+    use stargate_proto::pb::stargate_control_plane_server::{
+        StargateControlPlane, StargateControlPlaneServer,
+    };
+    use stargate_proto::pb::{
+        InferenceServerAck, InferenceServerRegistration, InferenceServerStatus, StargateInfo,
+        WatchStargatesRequest, WatchStargatesResponse,
+    };
+    use tokio::net::TcpListener;
+    use tokio::sync::{Semaphore, mpsc};
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tokio_stream::{Stream, StreamExt};
+    use tonic::{Request, Response, Status};
 
     use super::*;
 
-    fn parse_args(extra: &[&str]) -> Args {
+    fn startup(extra: &[&str]) -> (Args, PylonStartupPlan) {
         let mut args = vec![
             "pylon",
             "--upstream-http-base-url",
@@ -673,9 +657,248 @@ mod tests {
             "model-a",
             "--model-name",
             "model-b",
+            "--initial-input-tps",
+            "100",
         ];
         args.extend_from_slice(extra);
-        <Args as Parser>::try_parse_from(args).expect("args should parse")
+        let args = <Args as Parser>::try_parse_from(args).expect("args should parse");
+        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
+        (args, plan)
+    }
+
+    fn runtime_args(
+        upstream: &str,
+        stargate: SocketAddr,
+        model_ids: &[&str],
+        bootstrap_args: &[&str],
+    ) -> Args {
+        let mut args = vec![
+            "pylon".to_string(),
+            "--upstream-http-base-url".to_string(),
+            upstream.to_string(),
+            "--stargate-address".to_string(),
+            format!("http://{stargate}"),
+            "--inference-server-id".to_string(),
+            "pylon-a".to_string(),
+            "--cluster-id".to_string(),
+            "cluster-a".to_string(),
+            "--quic-listen-addr".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--metrics-host".to_string(),
+            "127.0.0.1".to_string(),
+            "--metrics-port".to_string(),
+            "0".to_string(),
+            "--engine-stats-stream".to_string(),
+            "off".to_string(),
+            "--disable-bringup".to_string(),
+            "--min-update-interval-ms".to_string(),
+            "10".to_string(),
+        ];
+        for model_id in model_ids {
+            args.push("--model-name".to_string());
+            args.push((*model_id).to_string());
+        }
+        args.extend(bootstrap_args.iter().map(|arg| (*arg).to_string()));
+        Args::try_parse_from(args).expect("runtime args should parse")
+    }
+
+    #[derive(Clone)]
+    struct TestUpstreamState {
+        calibration_requests: Arc<AtomicUsize>,
+        calibration_started: mpsc::UnboundedSender<String>,
+        calibration_release: Arc<Semaphore>,
+        fail_calibration: bool,
+    }
+
+    struct TestUpstream {
+        base_url: String,
+        calibration_requests: Arc<AtomicUsize>,
+        calibration_started: mpsc::UnboundedReceiver<String>,
+        calibration_release: Arc<Semaphore>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestUpstream {
+        async fn spawn(fail_calibration: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("test upstream should bind");
+            let addr = listener.local_addr().expect("test upstream address");
+            let calibration_requests = Arc::new(AtomicUsize::new(0));
+            let (calibration_started, calibration_started_rx) = mpsc::unbounded_channel();
+            let calibration_release = Arc::new(Semaphore::new(0));
+            let state = TestUpstreamState {
+                calibration_requests: calibration_requests.clone(),
+                calibration_started,
+                calibration_release: calibration_release.clone(),
+                fail_calibration,
+            };
+            let app = Router::new()
+                .route("/health", get(|| async { "ok" }))
+                .route("/v1/chat/completions", post(test_calibration_completion))
+                .with_state(state);
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("test upstream should serve");
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                calibration_requests,
+                calibration_started: calibration_started_rx,
+                calibration_release,
+                task,
+            }
+        }
+
+        async fn shutdown(self) {
+            self.task.abort();
+            let _ = self.task.await;
+        }
+    }
+
+    async fn test_calibration_completion(
+        State(state): State<TestUpstreamState>,
+        Json(request): Json<serde_json::Value>,
+    ) -> AxumResponse {
+        state.calibration_requests.fetch_add(1, Ordering::SeqCst);
+        let model_id = request["model"].as_str().unwrap_or_default().to_string();
+        state
+            .calibration_started
+            .send(model_id)
+            .expect("test should still observe calibration");
+        let permit = state
+            .calibration_release
+            .acquire()
+            .await
+            .expect("test calibration gate should remain open");
+        permit.forget();
+        if state.fail_calibration {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        Json(serde_json::json!({"usage": {"completion_tokens": 1}})).into_response()
+    }
+
+    type TestWatchStream =
+        Pin<Box<dyn Stream<Item = Result<WatchStargatesResponse, Status>> + Send + 'static>>;
+    type TestRegistrationStream =
+        Pin<Box<dyn Stream<Item = Result<InferenceServerAck, Status>> + Send + 'static>>;
+
+    #[derive(Clone)]
+    struct TestControlPlaneService {
+        address: String,
+        watch_calls: Arc<AtomicUsize>,
+        register_calls: Arc<AtomicUsize>,
+        registrations: mpsc::UnboundedSender<InferenceServerRegistration>,
+    }
+
+    #[tonic::async_trait]
+    impl StargateControlPlane for TestControlPlaneService {
+        type WatchStargatesStream = TestWatchStream;
+        type RegisterInferenceServerStream = TestRegistrationStream;
+
+        async fn watch_stargates(
+            &self,
+            _request: Request<WatchStargatesRequest>,
+        ) -> Result<Response<Self::WatchStargatesStream>, Status> {
+            self.watch_calls.fetch_add(1, Ordering::SeqCst);
+            let snapshot = WatchStargatesResponse {
+                stargates: vec![StargateInfo {
+                    stargate_id: "stargate-a".to_string(),
+                    advertise_addr: self.address.clone(),
+                    http_advertise_addr: String::new(),
+                    grpc_pylon_dial_addr: String::new(),
+                }],
+                watch_stargate_urls: Vec::new(),
+            };
+            Ok(Response::new(Box::pin(
+                tokio_stream::once(Ok(snapshot)).chain(tokio_stream::pending()),
+            )))
+        }
+
+        async fn register_inference_server(
+            &self,
+            request: Request<tonic::Streaming<InferenceServerRegistration>>,
+        ) -> Result<Response<Self::RegisterInferenceServerStream>, Status> {
+            self.register_calls.fetch_add(1, Ordering::SeqCst);
+            let mut registrations = request.into_inner();
+            let observed_registrations = self.registrations.clone();
+            tokio::spawn(async move {
+                if let Ok(Some(registration)) = registrations.message().await {
+                    let _ = observed_registrations.send(registration);
+                }
+            });
+            Ok(Response::new(Box::pin(
+                tokio_stream::once(Ok(InferenceServerAck::default()))
+                    .chain(tokio_stream::pending()),
+            )))
+        }
+    }
+
+    struct TestControlPlane {
+        addr: SocketAddr,
+        watch_calls: Arc<AtomicUsize>,
+        register_calls: Arc<AtomicUsize>,
+        registrations: mpsc::UnboundedReceiver<InferenceServerRegistration>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestControlPlane {
+        async fn spawn() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("test control plane should bind");
+            let addr = listener.local_addr().expect("test control plane address");
+            let watch_calls = Arc::new(AtomicUsize::new(0));
+            let register_calls = Arc::new(AtomicUsize::new(0));
+            let (registrations, registrations_rx) = mpsc::unbounded_channel();
+            let service = TestControlPlaneService {
+                address: format!("http://{addr}"),
+                watch_calls: watch_calls.clone(),
+                register_calls: register_calls.clone(),
+                registrations,
+            };
+            let task = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(StargateControlPlaneServer::new(service))
+                    .serve_with_incoming(TcpListenerStream::new(listener))
+                    .await
+                    .expect("test control plane should serve");
+            });
+            Self {
+                addr,
+                watch_calls,
+                register_calls,
+                registrations: registrations_rx,
+                task,
+            }
+        }
+
+        fn assert_no_calls(&self) {
+            assert_eq!(self.watch_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(self.register_calls.load(Ordering::SeqCst), 0);
+        }
+
+        async fn first_registration(&mut self) -> InferenceServerRegistration {
+            match tokio::time::timeout(Duration::from_secs(2), self.registrations.recv()).await {
+                Ok(Some(registration)) => registration,
+                result => panic!(
+                    "registration should arrive: result={result:?}, watch_calls={}, register_calls={}",
+                    self.watch_calls.load(Ordering::SeqCst),
+                    self.register_calls.load(Ordering::SeqCst),
+                ),
+            }
+        }
+
+        async fn shutdown(self) {
+            self.task.abort();
+            let _ = self.task.await;
+        }
+    }
+
+    fn test_forwarding(plan: &PylonStartupPlan) -> TunnelForwardingConfig {
+        let metrics = PylonMetrics::new().expect("metrics should initialize");
+        tunnel_forwarding_config_from_plan(plan, PylonRuntimeState::default(), metrics)
     }
 
     fn test_observation() -> RequestObservation {
@@ -726,6 +949,7 @@ mod tests {
             registration_client: InferenceServerRegistrationClient::default(),
             engine_stats_stream: None,
             stats_collector,
+            bringup: None,
             metrics_server: start_metrics_server(
                 "127.0.0.1:0".parse().expect("metrics address should parse"),
                 metrics.registry(),
@@ -750,32 +974,21 @@ mod tests {
 
     #[test]
     fn engine_stats_runtime_off_mode_leaves_stats_updates_unclaimed() {
-        let args = parse_args(&["--engine-stats-stream", "off"]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
+        let (args, plan) = startup(&["--engine-stats-stream", "off"]);
         let metrics = PylonMetrics::new().expect("metrics should initialize");
         let config = StatsCollectorConfig::default();
-        let (engine_stats_stream, stats_update_rx) =
-            start_engine_stats_runtime(&args, &plan, metrics, &config);
-
-        assert!(engine_stats_stream.is_none());
-        assert!(stats_update_rx.is_none());
+        assert!(start_engine_stats_runtime(&args, &plan, metrics, &config).is_none());
     }
 
     #[tokio::test]
     async fn engine_stats_runtime_required_mode_claims_stats_updates() {
-        let args = parse_args(&["--engine-stats-stream", "required"]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
+        let (args, plan) = startup(&["--engine-stats-stream", "required"]);
         let metrics = PylonMetrics::new().expect("metrics should initialize");
         let config = StatsCollectorConfig::default();
-        let (engine_stats_stream, stats_update_rx) =
-            start_engine_stats_runtime(&args, &plan, metrics, &config);
-
-        assert!(stats_update_rx.is_some());
-        engine_stats_stream
-            .expect("required engine stats should start a stream task")
-            .handle
-            .shutdown()
-            .await;
+        let (engine_stats_stream, _stats_update_rx) =
+            start_engine_stats_runtime(&args, &plan, metrics, &config)
+                .expect("required engine stats should start a stream task");
+        engine_stats_stream.handle.shutdown().await;
     }
 
     #[test]
@@ -795,52 +1008,32 @@ mod tests {
 
     #[tokio::test]
     async fn reverse_mode_direct_tunnel_startup_returns_no_tunnel_without_binding() {
-        let args = parse_args(&["--reverse-tunnel"]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let tunnel = start_direct_tunnel_from_plan(
-            &args,
-            &plan,
-            PylonRuntimeState::default(),
-            metrics,
-            None,
-            None,
-        )
-        .await
-        .expect("reverse mode should not start a direct tunnel");
+        let (args, plan) = startup(&["--backend-connectivity", "reverse"]);
+        let forwarding = test_forwarding(&plan);
+        let tunnel = start_direct_tunnel_from_plan(&args, &plan, &forwarding, None, None)
+            .await
+            .expect("reverse mode should not start a direct tunnel");
 
         assert!(tunnel.is_none());
-        assert_eq!(
-            registration_inference_server_url_from_tunnel(&plan, None),
-            "http://127.0.0.1:8090"
-        );
+        assert_eq!(registration_url(&plan, tunnel.as_ref()), plan.upstream);
     }
 
     #[tokio::test]
     async fn direct_mode_direct_tunnel_startup_binds_and_reports_quic_url() {
-        let args = parse_args(&["--quic-listen-addr", "127.0.0.1:0"]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let tunnel = start_direct_tunnel_from_plan(
-            &args,
-            &plan,
-            PylonRuntimeState::default(),
-            metrics,
-            None,
-            None,
-        )
-        .await
-        .expect("direct mode should bind a direct tunnel")
-        .expect("direct mode should return the tunnel handle");
+        let (args, plan) = startup(&["--quic-listen-addr", "127.0.0.1:0"]);
+        let forwarding = test_forwarding(&plan);
+        let tunnel = start_direct_tunnel_from_plan(&args, &plan, &forwarding, None, None)
+            .await
+            .expect("direct mode should bind a direct tunnel")
+            .expect("direct mode should return the tunnel handle");
 
-        let registration_url = registration_inference_server_url_from_tunnel(&plan, Some(&tunnel));
-        assert!(registration_url.starts_with("quic://127.0.0.1:"));
+        assert!(registration_url(&plan, Some(&tunnel)).starts_with("quic://127.0.0.1:"));
         tunnel.shutdown().await;
     }
 
     #[test]
     fn direct_tunnel_config_from_plan_preserves_runtime_inputs() {
-        let args = parse_args(&[
+        let (args, plan) = startup(&[
             "--inference-server-id",
             "pylon-a",
             "--quic-listen-addr",
@@ -851,16 +1044,14 @@ mod tests {
             "--pylon-queue-mismatch-retry-enabled=false",
             "--collect-quality-metrics",
         ]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let runtime_state = PylonRuntimeState::default();
+        let forwarding = test_forwarding(&plan);
+        let metrics = forwarding.metrics.clone().unwrap();
 
-        let config = direct_tunnel_config_from_plan(
+        let config = direct_tunnel_config(
             &args,
             &plan,
-            runtime_state,
-            metrics.clone(),
-            Some(b"cert".to_vec()),
+            &forwarding,
+            Some(b"cert"),
             Some(b"key".to_vec()),
         )
         .expect("direct mode should build tunnel config");
@@ -874,34 +1065,31 @@ mod tests {
             config.tunnel_protocol,
             TunnelTransportProtocol::WebTransport
         );
-        assert!(config.retry.local_connect_failures_retryable);
-        assert!(!config.queue_mismatch_retry.enabled);
-        assert!(config.request_quality_monitor.collect_quality_metrics);
-        assert!(Arc::ptr_eq(config.metrics.as_ref().unwrap(), &metrics));
+        assert!(config.forwarding.retry.local_connect_failures_retryable);
+        assert!(!config.forwarding.queue_mismatch_retry.enabled);
+        assert!(
+            config
+                .forwarding
+                .request_quality_monitor
+                .collect_quality_metrics
+        );
+        assert!(Arc::ptr_eq(
+            config.forwarding.metrics.as_ref().unwrap(),
+            &metrics
+        ));
     }
 
     #[test]
     fn direct_tunnel_config_is_absent_for_reverse_mode() {
-        let args = parse_args(&["--reverse-tunnel"]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
+        let (args, plan) = startup(&["--backend-connectivity", "reverse"]);
+        let forwarding = test_forwarding(&plan);
 
-        assert!(
-            direct_tunnel_config_from_plan(
-                &args,
-                &plan,
-                PylonRuntimeState::default(),
-                metrics,
-                None,
-                None,
-            )
-            .is_none()
-        );
+        assert!(direct_tunnel_config(&args, &plan, &forwarding, None, None).is_none());
     }
 
     #[test]
     fn registration_config_from_plan_preserves_direct_registration_contract() {
-        let args = parse_args(&[
+        let (args, plan) = startup(&[
             "--stargate-address",
             "http://stargate:50071",
             "--inference-server-id",
@@ -909,14 +1097,12 @@ mod tests {
             "--min-update-interval-ms",
             "250",
         ]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
+        let forwarding = test_forwarding(&plan);
 
         let config = registration_config_from_plan(
             &args,
             &plan,
-            PylonRuntimeState::default(),
-            metrics,
+            forwarding,
             "quic://127.0.0.1:4567".to_string(),
             None,
         );
@@ -924,18 +1110,15 @@ mod tests {
         assert_eq!(config.seeds, ["http://stargate:50071"]);
         assert_eq!(config.inference_server_id, "pylon-a");
         assert_eq!(config.inference_server_url, "quic://127.0.0.1:4567");
-        assert_eq!(
-            config.upstream_http_base_url.as_deref(),
-            Some("http://127.0.0.1:8090")
-        );
         assert_eq!(config.min_update_interval, Duration::from_millis(250));
         assert!(!config.reverse_tunnel);
     }
 
     #[test]
     fn registration_config_from_plan_preserves_reverse_registration_contract() {
-        let args = parse_args(&[
-            "--reverse-tunnel",
+        let (args, plan) = startup(&[
+            "--backend-connectivity",
+            "reverse",
             "--stargate-address",
             "http://stargate:50071",
             "--inference-server-id",
@@ -965,15 +1148,13 @@ mod tests {
             "--auth-token",
             "token-from-cli",
         ]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
-        let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let runtime_state = PylonRuntimeState::default();
+        let forwarding = test_forwarding(&plan);
+        let metrics = forwarding.metrics.clone().unwrap();
 
         let config = registration_config_from_plan(
             &args,
             &plan,
-            runtime_state,
-            metrics.clone(),
+            forwarding,
             "http://127.0.0.1:8090".to_string(),
             Some(b"trusted reverse cert".to_vec()),
         );
@@ -982,10 +1163,6 @@ mod tests {
         assert_eq!(config.inference_server_id, "pylon-a");
         assert_eq!(config.cluster_id, "shared-cluster");
         assert_eq!(config.inference_server_url, "http://127.0.0.1:8090");
-        assert_eq!(
-            config.upstream_http_base_url.as_deref(),
-            Some("http://127.0.0.1:8090")
-        );
         assert_eq!(config.min_update_interval, Duration::from_millis(250));
         assert!(config.reverse_tunnel);
         assert_eq!(
@@ -994,21 +1171,10 @@ mod tests {
         );
         assert!(config.quic_insecure);
         assert_eq!(config.tunnel_protocol, TunnelTransportProtocol::Http3);
-        assert!(!config.bringup.enabled);
-        assert_eq!(
-            config.bringup.active_canary_interval,
-            Duration::from_millis(123)
-        );
-        assert_eq!(config.bringup.canary_max_generation_threshold, 77);
-        assert_eq!(config.bringup.calibration_requests, 3);
-        assert_eq!(config.bringup.calibration_prompt_units, 512);
-        assert_eq!(config.bringup.calibration_max_concurrency, 2);
-        assert_eq!(config.bringup.canary_timeout, Duration::from_millis(456));
-        assert_eq!(
-            config.bringup.calibration_timeout,
-            Duration::from_millis(789)
-        );
-        assert!(Arc::ptr_eq(config.metrics.as_ref().unwrap(), &metrics));
+        assert!(Arc::ptr_eq(
+            config.forwarding.metrics.as_ref().unwrap(),
+            &metrics
+        ));
         assert!(matches!(
             config.auth_token_provider.as_deref(),
             Some(AuthTokenProvider::Static(token)) if token == "token-from-cli"
@@ -1016,21 +1182,27 @@ mod tests {
     }
 
     #[test]
-    fn stats_config_uses_normalized_upstream_and_fixed_rate() {
-        let args = parse_args(&[
+    fn stats_config_uses_normalized_upstream_and_bootstrap_rate() {
+        let (args, plan) = startup(&[
             "--engine-stats-stream",
             "required",
             "--kv-cache-stats-path",
             "kv/live",
-            "--benchmark-fixed-last-mean-input-tps",
-            "1200",
+            "--benchmark-pin-input-tps",
         ]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
-        let stats =
-            stats_collector_config_from_args(&args, &plan.upstream, plan.fixed_last_mean_input_tps);
+        let stats = stats_collector_config_from_args(
+            &args,
+            &plan.upstream,
+            HashMap::from([
+                ("model-a".to_string(), 100.0),
+                ("model-b".to_string(), 100.0),
+            ]),
+            true,
+        );
 
-        assert_eq!(stats.configured_model_ids, ["model-a", "model-b"]);
-        assert_eq!(stats.fixed_last_mean_input_tps, Some(1200.0));
+        assert_eq!(stats.bootstrap_input_tps.len(), 2);
+        assert_eq!(stats.bootstrap_input_tps["model-a"], 100.0);
+        assert!(stats.pin_bootstrap_input_tps);
         assert_eq!(
             stats.kv_cache_stats_url.as_deref(),
             Some("http://127.0.0.1:8090/kv/live")
@@ -1039,22 +1211,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fixed_input_tps_seeds_queue_estimates_before_engine_stats() {
-        let args = parse_args(&["--benchmark-fixed-last-mean-input-tps", "1000"]);
-        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
+    async fn bootstrap_input_tps_seeds_queue_estimates_before_engine_stats() {
+        let (args, plan) = startup(&[]);
         let metrics = PylonMetrics::new().expect("metrics should initialize");
-        let mut config = stats_collector_config_from_args(&args, &plan.upstream, None);
+        let mut config = stats_collector_config_from_args(
+            &args,
+            &plan.upstream,
+            HashMap::from([
+                ("model-a".to_string(), 1000.0),
+                ("model-b".to_string(), 1000.0),
+            ]),
+            false,
+        );
         config.openai_fallback_stats_enabled = true;
         let (runtime_state, request_observation_rx) = PylonRuntimeState::observed(
             InferenceServerStatus::Unknown,
             &args.model_name,
             config.observation_channel_capacity,
             Some(metrics),
-        );
-        seed_runtime_state(
-            &runtime_state,
-            &args.model_name,
-            plan.fixed_last_mean_input_tps,
         );
         let stats_collector = start_stats_collector_with_engine_stats(
             config,
@@ -1127,12 +1301,209 @@ mod tests {
         .expect("SIGTERM should be a clean runtime exit");
     }
 
+    #[tokio::test]
+    async fn every_model_finishes_local_calibration_before_the_first_stargate_rpc() {
+        let mut upstream = TestUpstream::spawn(false).await;
+        let mut control_plane = TestControlPlane::spawn().await;
+        let args = runtime_args(
+            &upstream.base_url,
+            control_plane.addr,
+            &["model-a", "model-b"],
+            &[
+                "--do-calibration",
+                "--calibration-requests",
+                "1",
+                "--calibration-prompt-units",
+                "256",
+                "--calibration-max-concurrency",
+                "1",
+            ],
+        );
+        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
+        let startup = tokio::spawn(async move { start_pylon_runtime(&args, &plan).await });
+
+        assert_eq!(
+            upstream.calibration_started.recv().await.as_deref(),
+            Some("model-a")
+        );
+        control_plane.assert_no_calls();
+        upstream.calibration_release.add_permits(1);
+        assert_eq!(
+            upstream.calibration_started.recv().await.as_deref(),
+            Some("model-b")
+        );
+        control_plane.assert_no_calls();
+        upstream.calibration_release.add_permits(1);
+
+        let registration = control_plane.first_registration().await;
+        assert_eq!(upstream.calibration_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(control_plane.watch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(control_plane.register_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(registration.models.len(), 2);
+        for model_id in ["model-a", "model-b"] {
+            let input_tps = registration.models[model_id]
+                .stats
+                .as_ref()
+                .expect("first heartbeat should contain stats")
+                .last_mean_input_tps;
+            assert!(input_tps.is_finite() && input_tps > 0.0);
+        }
+
+        startup
+            .await
+            .expect("pylon startup task should not panic")
+            .expect("pylon startup should succeed")
+            .shutdown()
+            .await;
+        upstream.shutdown().await;
+        control_plane.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_model_flags_run_one_calibration_plan() {
+        let mut upstream = TestUpstream::spawn(false).await;
+        let mut control_plane = TestControlPlane::spawn().await;
+        let args = runtime_args(
+            &upstream.base_url,
+            control_plane.addr,
+            &["model-a", "model-a"],
+            &[
+                "--do-calibration",
+                "--calibration-requests",
+                "1",
+                "--calibration-prompt-units",
+                "256",
+            ],
+        );
+        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
+        let startup = tokio::spawn(async move { start_pylon_runtime(&args, &plan).await });
+
+        assert_eq!(
+            upstream.calibration_started.recv().await.as_deref(),
+            Some("model-a")
+        );
+        upstream.calibration_release.add_permits(1);
+        let runtime = startup
+            .await
+            .expect("pylon startup task should not panic")
+            .expect("pylon startup should succeed");
+        let registration = control_plane.first_registration().await;
+
+        assert_eq!(upstream.calibration_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(registration.models.len(), 1);
+        assert!(registration.models.contains_key("model-a"));
+
+        runtime.shutdown().await;
+        upstream.shutdown().await;
+        control_plane.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_bootstrap_source_selection_makes_zero_stargate_calls() {
+        let upstream = TestUpstream::spawn(false).await;
+        let control_plane = TestControlPlane::spawn().await;
+
+        for bootstrap_args in [
+            Vec::<&str>::new(),
+            vec!["--do-calibration", "--initial-input-tps", "100"],
+        ] {
+            let args = runtime_args(
+                &upstream.base_url,
+                control_plane.addr,
+                &["model-a"],
+                &bootstrap_args,
+            );
+            assert!(PylonStartupPlan::from_args(&args).is_err());
+            control_plane.assert_no_calls();
+        }
+
+        upstream.shutdown().await;
+        control_plane.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn calibration_failure_returns_before_any_stargate_rpc() {
+        let mut upstream = TestUpstream::spawn(true).await;
+        let control_plane = TestControlPlane::spawn().await;
+        let args = runtime_args(
+            &upstream.base_url,
+            control_plane.addr,
+            &["model-a"],
+            &[
+                "--do-calibration",
+                "--calibration-requests",
+                "1",
+                "--calibration-prompt-units",
+                "256",
+            ],
+        );
+        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
+        let startup = tokio::spawn(async move { start_pylon_runtime(&args, &plan).await });
+
+        assert_eq!(
+            upstream.calibration_started.recv().await.as_deref(),
+            Some("model-a")
+        );
+        control_plane.assert_no_calls();
+        upstream.calibration_release.add_permits(1);
+        let error = match startup.await.expect("pylon startup task should not panic") {
+            Ok(runtime) => {
+                runtime.shutdown().await;
+                panic!("calibration failure must fail startup");
+            }
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("local input-TPS calibration failed")
+        );
+        control_plane.assert_no_calls();
+        upstream.shutdown().await;
+        control_plane.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn initial_input_tps_seeds_the_first_heartbeat_without_calibration_requests() {
+        let upstream = TestUpstream::spawn(false).await;
+        let mut control_plane = TestControlPlane::spawn().await;
+        let args = runtime_args(
+            &upstream.base_url,
+            control_plane.addr,
+            &["model-a", "model-b"],
+            &["--initial-input-tps", "123.5"],
+        );
+        let plan = PylonStartupPlan::from_args(&args).expect("startup plan should build");
+        let runtime = start_pylon_runtime(&args, &plan)
+            .await
+            .expect("pylon startup should succeed");
+
+        let registration = control_plane.first_registration().await;
+        assert_eq!(upstream.calibration_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(registration.models.len(), 2);
+        for model_id in ["model-a", "model-b"] {
+            assert_eq!(
+                registration.models[model_id]
+                    .stats
+                    .as_ref()
+                    .expect("first heartbeat should contain stats")
+                    .last_mean_input_tps,
+                123.5
+            );
+        }
+
+        runtime.shutdown().await;
+        upstream.shutdown().await;
+        control_plane.shutdown().await;
+    }
+
     #[test]
     fn auth_token_file_is_used_when_static_token_is_absent() {
-        let args = parse_args(&["--auth-token-file", "/tmp/pylon-token"]);
+        let (_, plan) = startup(&["--auth-token-file", "/tmp/pylon-token"]);
 
         assert!(matches!(
-            auth_token_provider_from_args(&args).as_deref(),
+            plan.auth_token_provider.as_deref(),
             Some(AuthTokenProvider::File(path)) if path == std::path::Path::new("/tmp/pylon-token")
         ));
     }

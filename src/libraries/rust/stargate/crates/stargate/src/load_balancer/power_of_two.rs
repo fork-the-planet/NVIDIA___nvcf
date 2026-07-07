@@ -13,13 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-
 use rand::Rng;
+use stargate_protocol::common::valid_last_mean_input_tps;
 use tracing::debug;
 
 #[cfg(test)]
-use super::LoadBalancerTestChoiceExt;
+use super::tests::LoadBalancerTestChoiceExt;
 use super::{LoadBalancer, LoadBalancerCandidateChoice, LoadBalancerRequest};
 use crate::routing_state::RoutedClusterSnapshot;
 
@@ -28,11 +27,7 @@ const REJECTION_SAMPLE_EXCLUSION_RATIO_DIVISOR: usize = 4;
 
 pub(super) struct PowerOfTwoLoadBalancer;
 
-impl fmt::Display for PowerOfTwoLoadBalancer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "power-of-two")
-    }
-}
+impl_display!(PowerOfTwoLoadBalancer, "power-of-two");
 
 impl LoadBalancer for PowerOfTwoLoadBalancer {
     fn choose_candidate(
@@ -80,14 +75,19 @@ fn sample_without_exclusions<R: Rng + ?Sized>(
             // First-attempt proxy routing normally has no failed clusters. Pick two
             // distinct indices directly so the default production algorithm is O(1)
             // instead of scanning every candidate on each request.
-            let a_index = rng.random_range(0..len);
-            let mut b_index = rng.random_range(0..len - 1);
-            if b_index >= a_index {
-                b_index += 1;
-            }
+            let (a_index, b_index) = sample_distinct_pair(len, rng);
             CandidateSample::Two(a_index, b_index)
         }
     }
+}
+
+fn sample_distinct_pair<R: Rng + ?Sized>(len: usize, rng: &mut R) -> (usize, usize) {
+    let a_index = rng.random_range(0..len);
+    let mut b_index = rng.random_range(0..len - 1);
+    if b_index >= a_index {
+        b_index += 1;
+    }
+    (a_index, b_index)
 }
 
 fn sample_with_exclusions<R: Rng + ?Sized>(
@@ -95,47 +95,31 @@ fn sample_with_exclusions<R: Rng + ?Sized>(
     candidates: &[RoutedClusterSnapshot],
     rng: &mut R,
 ) -> CandidateSample {
-    if let Some(sampled) = sample_with_rejections(request, candidates, rng) {
-        return sampled;
-    }
-
-    sample_with_reservoir(request, candidates, rng)
+    sample_sparse_pair(request, candidates, rng)
+        .unwrap_or_else(|| sample_with_reservoir(request, candidates, rng))
 }
 
-fn sample_with_rejections<R: Rng + ?Sized>(
+fn sample_sparse_pair<R: Rng + ?Sized>(
     request: &LoadBalancerRequest<'_>,
     candidates: &[RoutedClusterSnapshot],
     rng: &mut R,
 ) -> Option<CandidateSample> {
-    if !should_try_rejection_sampling(request, candidates.len()) {
+    let excluded = request.excluded_cluster_ids?;
+    if candidates.len() < 2
+        || excluded.len() > candidates.len() / REJECTION_SAMPLE_EXCLUSION_RATIO_DIVISOR
+    {
         return None;
     }
-
-    // Retry/failover usually excludes one backend. Sampling two distinct
-    // candidates from the full slice and rejecting pairs that touch the excluded
-    // set keeps the common path O(1). The fallback below is the same uniform
-    // reservoir sample used before, so bounded retries preserve the old uniform
-    // sample-without-replacement distribution over eligible candidates.
+    // Sparse retries use bounded O(1) pair sampling before uniform reservoir fallback.
     for _ in 0..EXCLUSION_REJECTION_ATTEMPTS {
-        let CandidateSample::Two(a_index, b_index) = sample_without_exclusions(candidates, rng)
-        else {
-            return None;
-        };
-        let a = &candidates[a_index];
-        let b = &candidates[b_index];
-        if !request.excludes_cluster(&a.cluster_id) && !request.excludes_cluster(&b.cluster_id) {
+        let (a_index, b_index) = sample_distinct_pair(candidates.len(), rng);
+        if !request.excludes_cluster(&candidates[a_index].cluster_id)
+            && !request.excludes_cluster(&candidates[b_index].cluster_id)
+        {
             return Some(CandidateSample::Two(a_index, b_index));
         }
     }
-
     None
-}
-
-fn should_try_rejection_sampling(request: &LoadBalancerRequest<'_>, candidates_len: usize) -> bool {
-    candidates_len >= 2
-        && request.excluded_cluster_ids.is_some_and(|excluded| {
-            excluded.len() <= candidates_len / REJECTION_SAMPLE_EXCLUSION_RATIO_DIVISOR
-        })
 }
 
 fn sample_with_reservoir<R: Rng + ?Sized>(
@@ -193,26 +177,26 @@ fn choose_less_loaded<R: Rng + ?Sized>(
         "sampled two clusters"
     );
 
-    if a_score < b_score {
-        LoadBalancerCandidateChoice::with_rank_depth_1(a_index)
+    let selected_index = if a_score < b_score {
+        a_index
     } else if b_score < a_score {
-        LoadBalancerCandidateChoice::with_rank_depth_1(b_index)
+        b_index
     } else if rng.random_bool(0.5) {
-        LoadBalancerCandidateChoice::with_rank_depth_1(a_index)
+        a_index
     } else {
-        LoadBalancerCandidateChoice::with_rank_depth_1(b_index)
-    }
+        b_index
+    };
+    LoadBalancerCandidateChoice::with_rank_depth_1(selected_index)
 }
 
 fn load_score(candidate: &RoutedClusterSnapshot, input_tokens: Option<u64>) -> f64 {
     let last_mean_input_tps = candidate.stats.last_mean_input_tps;
-    if last_mean_input_tps <= 0.0 || !last_mean_input_tps.is_finite() {
-        return f64::INFINITY;
+    if valid_last_mean_input_tps(last_mean_input_tps) {
+        (super::input_work_units(candidate) + input_tokens.unwrap_or_default() as f64)
+            / last_mean_input_tps
+    } else {
+        f64::INFINITY
     }
-
-    let input_work_units =
-        super::input_work_units(candidate) + input_tokens.unwrap_or_default() as f64;
-    input_work_units / last_mean_input_tps
 }
 
 #[cfg(test)]
@@ -232,14 +216,8 @@ mod tests {
         RoutedClusterSnapshot {
             cluster_id: id.to_string(),
             stats: ModelStats {
-                output_tps: 0.0,
                 last_mean_input_tps,
-                max_output_tps: 0.0,
-                queue_size: 0,
                 queued_input_size,
-                kv_cache_capacity_tokens: 0,
-                kv_cache_used_tokens: 0,
-                kv_cache_free_tokens: 0,
                 ..ModelStats::default()
             },
             rtt: Duration::from_millis(1),
@@ -249,19 +227,23 @@ mod tests {
         }
     }
 
-    fn request<'a>(
-        target: &'a crate::routing_state::RoutingTargetKey,
-        excluded_cluster_ids: Option<&'a HashSet<String>>,
-    ) -> LoadBalancerRequest<'a> {
-        LoadBalancerRequest {
-            routing_target: target,
+    fn selected_cluster_id(
+        candidates: &[RoutedClusterSnapshot],
+        excluded_cluster_ids: &HashSet<String>,
+    ) -> Option<String> {
+        let target = crate::routing_state::RoutingTargetKey::new(None, "model-a");
+        let request = LoadBalancerRequest {
+            routing_target: &target,
             cache_affinity_key: None,
             input_tokens: Some(1000),
             priority: 0,
             received_at: Instant::now(),
             request_slo: None,
-            excluded_cluster_ids,
-        }
+            excluded_cluster_ids: Some(excluded_cluster_ids),
+        };
+        PowerOfTwoLoadBalancer
+            .choose_for_test(&request, candidates)
+            .map(|choice| choice.candidate.cluster_id)
     }
 
     #[test]
@@ -293,64 +275,51 @@ mod tests {
     }
 
     #[test]
+    fn load_score_rejects_invalid_input_throughput() {
+        for input_tps in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(load_score(&candidate("invalid", input_tps, 0), Some(100)).is_infinite());
+        }
+    }
+
+    #[test]
     fn power_of_two_never_selects_excluded_clusters() {
-        let target = crate::routing_state::RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-a".to_string(),
-        };
         let candidates = vec![
             candidate("excluded-a", 1_000.0, 0),
             candidate("eligible", 1.0, 0),
             candidate("excluded-b", 1_000.0, 0),
         ];
         let excluded = HashSet::from(["excluded-a".to_string(), "excluded-b".to_string()]);
-        let request = request(&target, Some(&excluded));
 
         for _ in 0..64 {
-            let choice = PowerOfTwoLoadBalancer
-                .choose_for_test(&request, &candidates)
-                .expect("one eligible cluster should be selected");
-            assert_eq!(choice.candidate.cluster_id, "eligible");
+            assert_eq!(
+                selected_cluster_id(&candidates, &excluded).as_deref(),
+                Some("eligible")
+            );
         }
     }
 
     #[test]
     fn power_of_two_skips_single_excluded_cluster_in_retry_set() {
-        let target = crate::routing_state::RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-a".to_string(),
-        };
         let candidates = (0..64)
             .map(|index| candidate(&format!("cluster-{index:04}"), 1_000.0, 0))
             .collect::<Vec<_>>();
         let excluded = HashSet::from(["cluster-0000".to_string()]);
-        let request = request(&target, Some(&excluded));
 
         for _ in 0..512 {
-            let choice = PowerOfTwoLoadBalancer
-                .choose_for_test(&request, &candidates)
-                .expect("eligible cluster should be selected");
-            assert_ne!(choice.candidate.cluster_id, "cluster-0000");
+            let selected = selected_cluster_id(&candidates, &excluded)
+                .expect("an eligible cluster should be selected");
+            assert_ne!(selected, "cluster-0000");
         }
     }
 
     #[test]
     fn power_of_two_returns_none_when_all_candidates_are_excluded() {
-        let target = crate::routing_state::RoutingTargetKey {
-            routing_key: None,
-            model_id: "model-a".to_string(),
-        };
         let candidates = vec![
             candidate("excluded-a", 1_000.0, 0),
             candidate("excluded-b", 1_000.0, 0),
         ];
         let excluded = HashSet::from(["excluded-a".to_string(), "excluded-b".to_string()]);
-        let request = request(&target, Some(&excluded));
 
-        assert!(
-            PowerOfTwoLoadBalancer
-                .choose_for_test(&request, &candidates)
-                .is_none()
-        );
+        assert!(selected_cluster_id(&candidates, &excluded).is_none());
     }
 }

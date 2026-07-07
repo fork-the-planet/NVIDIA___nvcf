@@ -13,6 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+macro_rules! impl_display {
+    ($type:ty, $name:literal) => {
+        impl std::fmt::Display for $type {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str($name)
+            }
+        }
+    };
+}
+
 mod algorithm;
 mod config;
 mod factory;
@@ -31,10 +41,6 @@ mod tests;
 pub use algorithm::LoadBalancer;
 pub(crate) use algorithm::input_work_seconds_for_request;
 pub(super) use algorithm::{HashInputBuilder, cache_affinity_key_is_cacheable, input_work_units};
-#[cfg(test)]
-pub(super) use algorithm::{
-    LoadBalancerTestChoiceExt, SelectedCandidateForTest, SelectedClusterForTest, input_work_seconds,
-};
 pub use config::{
     GroqMultiregionAlgorithmConfig, LoadBalancerAlgorithm, LoadBalancerAlgorithmConfig,
     LoadBalancerAlgorithmOverride, LoadBalancerAlgorithmSettings, LoadBalancerConfig,

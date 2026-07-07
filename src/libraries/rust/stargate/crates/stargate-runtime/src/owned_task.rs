@@ -13,10 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
-use futures::future::join_all;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -85,36 +83,29 @@ impl OwnedTask {
         }
     }
 
-    fn request_stop(&self) {
-        self.stop.cancel();
-    }
-
     pub fn abort(&self) {
-        self.request_stop();
+        self.stop.cancel();
         if let Some(handle) = &self.handle {
             handle.abort();
         }
     }
 
-    async fn join(&mut self) -> Result<(), JoinError> {
-        self.handle
+    pub async fn wait_for_exit(&mut self) -> Result<(), JoinError> {
+        let result = self
+            .handle
             .as_mut()
             .expect("owned task should not be disarmed before join")
-            .await
-    }
-
-    pub async fn wait_for_exit(&mut self) -> Result<(), JoinError> {
-        let result = self.join().await;
-        self.disarm();
+            .await;
+        self.handle = None;
         result
     }
 
     pub async fn shutdown(mut self, timeout: Duration) {
-        self.request_stop();
-        if self.handle.is_none() {
+        self.stop.cancel();
+        let Some(handle) = self.handle.as_mut() else {
             return;
-        }
-        let result = match tokio::time::timeout(timeout, self.join()).await {
+        };
+        let result = match tokio::time::timeout(timeout, &mut *handle).await {
             Ok(result) => result,
             Err(_) => {
                 tracing::warn!(
@@ -122,32 +113,25 @@ impl OwnedTask {
                     timeout_ms = timeout.as_millis(),
                     "task did not stop before shutdown timeout"
                 );
-                self.abort();
-                self.join().await
+                handle.abort();
+                handle.await
             }
         };
-        self.disarm();
+        self.handle = None;
         finish_joined_task(self.name, result);
     }
 
     pub async fn shutdown_all(tasks: Vec<Self>, timeout: Duration) {
         for task in &tasks {
-            task.request_stop();
+            task.stop.cancel();
         }
-        let _: Vec<()> = join_all(tasks.into_iter().map(|task| task.shutdown(timeout))).await;
-    }
-
-    fn disarm(&mut self) {
-        let _completed = self.handle.take();
+        futures::future::join_all(tasks.into_iter().map(|task| task.shutdown(timeout))).await;
     }
 }
 
 impl Drop for OwnedTask {
     fn drop(&mut self) {
-        self.request_stop();
-        if let Some(handle) = &self.handle {
-            handle.abort();
-        }
+        self.abort();
     }
 }
 
@@ -172,6 +156,8 @@ mod tests {
 
     use super::OwnedTask;
 
+    const TEST_TIMEOUT: Duration = Duration::from_secs(1);
+
     struct DropNotifier(Option<oneshot::Sender<()>>);
 
     impl Drop for DropNotifier {
@@ -182,36 +168,45 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn owned_task_drop_aborts_pending_task() {
+    async fn expect_signal(rx: oneshot::Receiver<()>, message: &'static str) {
+        tokio::time::timeout(TEST_TIMEOUT, rx)
+            .await
+            .expect(message)
+            .expect("signal sender should remain alive");
+    }
+
+    async fn pending_task(
+        name: &'static str,
+        parent: Option<&CancellationToken>,
+    ) -> (OwnedTask, oneshot::Receiver<()>) {
         let (entered_tx, entered_rx) = oneshot::channel();
         let (dropped_tx, dropped_rx) = oneshot::channel();
-        let task = OwnedTask::spawn("pending owned task", |_| async move {
+        let task = move |_| async move {
             let _drop_notifier = DropNotifier(Some(dropped_tx));
             let _ = entered_tx.send(());
             pending::<()>().await;
-        });
+        };
+        let task = match parent {
+            Some(parent) => OwnedTask::spawn_child(name, parent, task),
+            None => OwnedTask::spawn(name, task),
+        };
         entered_rx.await.expect("owned task should start");
+        (task, dropped_rx)
+    }
+
+    #[tokio::test]
+    async fn owned_task_drop_aborts_pending_task() {
+        let (task, dropped) = pending_task("pending owned task", None).await;
 
         // Dropping the owner is the behavior under test.
         drop(task);
 
-        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
-            .await
-            .expect("dropping the owner should abort the task")
-            .expect("owned task drop notifier should send");
+        expect_signal(dropped, "dropping the owner should abort the task").await;
     }
 
     #[tokio::test]
     async fn cancelled_owned_task_shutdown_aborts_task() {
-        let (entered_tx, entered_rx) = oneshot::channel();
-        let (dropped_tx, dropped_rx) = oneshot::channel();
-        let task = OwnedTask::spawn("pending shutdown task", |_| async move {
-            let _drop_notifier = DropNotifier(Some(dropped_tx));
-            let _ = entered_tx.send(());
-            pending::<()>().await;
-        });
-        entered_rx.await.expect("owned task should start");
+        let (task, dropped) = pending_task("pending shutdown task", None).await;
 
         {
             let shutdown = task.shutdown(Duration::from_secs(30));
@@ -223,36 +218,22 @@ mod tests {
             }
         }
 
-        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
-            .await
-            .expect("cancelling shutdown should abort the owned task")
-            .expect("owned task drop notifier should send");
+        expect_signal(dropped, "cancelling shutdown should abort the owned task").await;
     }
 
     #[tokio::test]
     async fn owned_parent_drop_aborts_descendant() {
-        let (child_entered_tx, child_entered_rx) = oneshot::channel();
-        let (child_dropped_tx, child_dropped_rx) = oneshot::channel();
         let (parent_ready_tx, parent_ready_rx) = oneshot::channel();
         let parent = OwnedTask::spawn("parent with descendant", |parent_stop| async move {
-            let _child =
-                OwnedTask::spawn_child("pending descendant", &parent_stop, |_| async move {
-                    let _drop_notifier = DropNotifier(Some(child_dropped_tx));
-                    let _ = child_entered_tx.send(());
-                    pending::<()>().await;
-                });
-            child_entered_rx.await.expect("descendant should start");
-            let _ = parent_ready_tx.send(());
+            let (_child, dropped) = pending_task("pending descendant", Some(&parent_stop)).await;
+            let _ = parent_ready_tx.send(dropped);
             pending::<()>().await;
         });
-        parent_ready_rx.await.expect("parent should own descendant");
+        let dropped = parent_ready_rx.await.expect("parent should own descendant");
 
         drop(parent);
 
-        tokio::time::timeout(Duration::from_secs(1), child_dropped_rx)
-            .await
-            .expect("dropping parent should abort descendant")
-            .expect("descendant drop notifier should send");
+        expect_signal(dropped, "dropping parent should abort descendant").await;
     }
 
     #[tokio::test]
@@ -268,10 +249,10 @@ mod tests {
                 },
             );
             parent_stop.cancelled().await;
-            child.shutdown(Duration::from_secs(1)).await;
+            child.shutdown(TEST_TIMEOUT).await;
         });
 
-        parent.shutdown(Duration::from_secs(1)).await;
+        parent.shutdown(TEST_TIMEOUT).await;
 
         child_cancelled_rx
             .await
@@ -290,7 +271,7 @@ mod tests {
             let _ = sibling_cancelled_tx.send(());
         });
 
-        child.shutdown(Duration::from_secs(1)).await;
+        child.shutdown(TEST_TIMEOUT).await;
 
         assert!(!parent_stop.is_cancelled());
         let mut sibling_cancelled_rx = sibling_cancelled_rx;
@@ -302,7 +283,7 @@ mod tests {
         );
 
         parent_stop.cancel();
-        sibling.shutdown(Duration::from_secs(1)).await;
+        sibling.shutdown(TEST_TIMEOUT).await;
         sibling_cancelled_rx
             .await
             .expect("parent cancellation should reach sibling");
@@ -380,10 +361,10 @@ mod tests {
                 OwnedTask::spawn_child("unexpectedly finite descendant", &parent_stop, |_| async {
                 });
             parent_stop.cancelled().await;
-            child.shutdown(Duration::from_secs(1)).await;
+            child.shutdown(TEST_TIMEOUT).await;
         });
 
-        tokio::time::timeout(Duration::from_secs(1), parent.wait_for_exit())
+        tokio::time::timeout(TEST_TIMEOUT, parent.wait_for_exit())
             .await
             .expect("unexpected descendant exit should wake its waiting parent")
             .expect("waiting parent should stop cleanly");
@@ -399,7 +380,7 @@ mod tests {
             .await
             .expect("root should publish descendant token");
 
-        tokio::time::timeout(Duration::from_secs(1), descendant_stop.cancelled())
+        tokio::time::timeout(TEST_TIMEOUT, descendant_stop.cancelled())
             .await
             .expect("root exit must close the owned subtree before join");
         root.wait_for_exit()

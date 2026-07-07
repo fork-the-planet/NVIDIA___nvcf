@@ -75,9 +75,10 @@ pub(crate) fn validate_required_tunnel_headers(
     let routing_key = get_optional_header(request_headers, HEADER_ROUTING_KEY);
     let model_id = get_optional_header(request_headers, HEADER_MODEL)
         .ok_or_else(|| MissingRequiredHeaderError::new(HEADER_MODEL))?;
-    let input_tokens = parse_optional_u64_header(request_headers, HEADER_INPUT_TOKENS)?
+    let input_tokens = parse_optional_numeric_header(request_headers, HEADER_INPUT_TOKENS)?
         .ok_or_else(|| MissingRequiredHeaderError::new(HEADER_INPUT_TOKENS))?;
-    let priority = parse_optional_u32_header(request_headers, HEADER_PRIORITY)?.unwrap_or_default();
+    let priority =
+        parse_optional_numeric_header(request_headers, HEADER_PRIORITY)?.unwrap_or_default();
     Ok(RequiredTunnelHeaders {
         request_id,
         routing_key,
@@ -88,10 +89,13 @@ pub(crate) fn validate_required_tunnel_headers(
     })
 }
 
-fn parse_optional_u64_header(
+fn parse_optional_numeric_header<T>(
     headers: &HeaderMap,
     name: &'static str,
-) -> Result<Option<u64>, MissingRequiredHeaderError> {
+) -> Result<Option<T>, MissingRequiredHeaderError>
+where
+    T: std::str::FromStr,
+{
     let Some(value) = headers.get(name) else {
         return Ok(None);
     };
@@ -103,27 +107,7 @@ fn parse_optional_u64_header(
         return Err(MissingRequiredHeaderError::invalid(name));
     }
     value
-        .parse::<u64>()
-        .map(Some)
-        .map_err(|_| MissingRequiredHeaderError::invalid(name))
-}
-
-fn parse_optional_u32_header(
-    headers: &HeaderMap,
-    name: &'static str,
-) -> Result<Option<u32>, MissingRequiredHeaderError> {
-    let Some(value) = headers.get(name) else {
-        return Ok(None);
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| MissingRequiredHeaderError::invalid(name))?
-        .trim();
-    if value.is_empty() {
-        return Err(MissingRequiredHeaderError::invalid(name));
-    }
-    value
-        .parse::<u32>()
+        .parse()
         .map(Some)
         .map_err(|_| MissingRequiredHeaderError::invalid(name))
 }

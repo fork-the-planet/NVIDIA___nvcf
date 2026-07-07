@@ -20,10 +20,7 @@ use crate::AppState;
 use crate::openai::{ChatRequest, ResponsesRequest};
 
 pub(crate) fn request_input_tokens(headers: &HeaderMap, request: &ChatRequest) -> usize {
-    at_least_one_token(
-        header_usize(headers, "x-input-tokens")
-            .unwrap_or_else(|| estimate_prompt_tokens(&request.messages)),
-    )
+    input_tokens(headers, || estimate_prompt_tokens(&request.messages))
 }
 
 pub(crate) fn request_output_tokens(
@@ -31,21 +28,13 @@ pub(crate) fn request_output_tokens(
     request: &ChatRequest,
     default_tokens: usize,
 ) -> usize {
-    if let Some(tokens) = header_usize(headers, "x-output-tokens") {
-        return at_least_one_token(tokens);
-    }
-    let default_tokens = at_least_one_token(default_tokens);
-    request
-        .max_tokens
-        .map(|tokens| at_least_one_token(tokens.min(default_tokens)))
-        .unwrap_or(default_tokens)
+    output_tokens(headers, request.max_tokens, default_tokens)
 }
 
 pub(crate) fn response_input_tokens(headers: &HeaderMap, request: &ResponsesRequest) -> usize {
-    at_least_one_token(
-        header_usize(headers, "x-input-tokens")
-            .unwrap_or_else(|| estimate_response_input_tokens(request.input.as_ref())),
-    )
+    input_tokens(headers, || {
+        estimate_response_input_tokens(request.input.as_ref())
+    })
 }
 
 pub(crate) fn response_output_tokens(
@@ -53,59 +42,53 @@ pub(crate) fn response_output_tokens(
     request: &ResponsesRequest,
     default_tokens: usize,
 ) -> usize {
+    output_tokens(headers, request.max_output_tokens, default_tokens)
+}
+
+fn output_tokens(headers: &HeaderMap, requested: Option<usize>, default_tokens: usize) -> usize {
     if let Some(tokens) = header_usize(headers, "x-output-tokens") {
         return at_least_one_token(tokens);
     }
     let default_tokens = at_least_one_token(default_tokens);
-    request
-        .max_output_tokens
-        .map(|tokens| at_least_one_token(tokens.min(default_tokens)))
-        .unwrap_or(default_tokens)
+    at_least_one_token(requested.unwrap_or(default_tokens).min(default_tokens))
 }
 
 pub(crate) fn request_embedding_tokens(headers: &HeaderMap, input: &serde_json::Value) -> usize {
-    at_least_one_token(
-        header_usize(headers, "x-input-tokens").unwrap_or_else(|| estimate_embedding_tokens(input)),
-    )
+    input_tokens(headers, || estimate_embedding_tokens(input))
+}
+
+fn input_tokens(headers: &HeaderMap, estimate: impl FnOnce() -> usize) -> usize {
+    at_least_one_token(header_usize(headers, "x-input-tokens").unwrap_or_else(estimate))
 }
 
 pub(crate) fn embedding_item_count(input: &serde_json::Value) -> usize {
     match input {
         serde_json::Value::String(_) => 1,
-        serde_json::Value::Array(items) if items.is_empty() => 0,
-        serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_number) => 1,
+        serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_number) => {
+            items.len().min(1)
+        }
         serde_json::Value::Array(items) => items.len(),
         _ => 1,
     }
 }
 
 pub(crate) fn optional_header(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    let value = headers.get(name)?.to_str().ok()?;
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn header_usize(headers: &HeaderMap, name: &str) -> Option<usize> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
+    headers.get(name)?.to_str().ok()?.parse().ok()
 }
 
 fn estimate_prompt_tokens(messages: &[serde_json::Value]) -> usize {
-    let chars: usize = messages
+    messages
         .iter()
-        .map(|message| {
-            message
-                .get("content")
-                .and_then(|content| content.as_str())
-                .map(str::len)
-                .unwrap_or_default()
-        })
-        .sum();
-    at_least_one_token(chars.max(messages.len()))
+        .filter_map(|message| message.get("content")?.as_str())
+        .map(str::len)
+        .sum::<usize>()
+        .max(messages.len())
+        .max(1)
 }
 
 fn estimate_response_input_tokens(input: Option<&serde_json::Value>) -> usize {
@@ -128,13 +111,9 @@ fn estimate_response_input_tokens(input: Option<&serde_json::Value>) -> usize {
 fn estimate_embedding_tokens(input: &serde_json::Value) -> usize {
     match input {
         serde_json::Value::String(value) => value.len(),
-        serde_json::Value::Array(items) => estimate_embedding_array_tokens(items),
+        serde_json::Value::Array(items) => items.iter().map(estimate_embedding_item_tokens).sum(),
         _ => 1,
     }
-}
-
-fn estimate_embedding_array_tokens(items: &[serde_json::Value]) -> usize {
-    items.iter().map(estimate_embedding_item_tokens).sum()
 }
 
 fn estimate_embedding_item_tokens(item: &serde_json::Value) -> usize {
@@ -152,7 +131,7 @@ fn at_least_one_token(tokens: usize) -> usize {
 
 pub(crate) fn prefill_delay(input_tokens: usize, tokens_per_s: f64) -> Duration {
     if tokens_per_s > 0.0 && tokens_per_s.is_finite() {
-        Duration::from_secs_f64(input_tokens as f64 / tokens_per_s)
+        Duration::try_from_secs_f64(input_tokens as f64 / tokens_per_s).unwrap_or(Duration::MAX)
     } else {
         Duration::ZERO
     }
@@ -164,10 +143,10 @@ pub(crate) fn non_streaming_delay(
     first_token_delay: Duration,
     output_tokens: usize,
 ) -> Duration {
-    let decode_delay = (1..output_tokens)
-        .map(|token_index| token_delay(state, request_id, token_index))
-        .fold(Duration::ZERO, |total, delay| total + delay);
-    first_token_delay + decode_delay
+    first_token_delay
+        + (1..output_tokens)
+            .map(|token_index| token_delay(state, request_id, token_index))
+            .sum::<Duration>()
 }
 
 pub(crate) fn token_delay(state: &AppState, request_id: &str, token_index: usize) -> Duration {
@@ -184,14 +163,13 @@ pub(crate) fn jitter_ms(request_id: &str, salt: &str, max_jitter_ms: u64) -> u64
         return 0;
     }
 
-    let mut hash: u64 = 1469598103934665603;
-    for byte in request_id.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    for byte in salt.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    hash % (max_jitter_ms + 1)
+    let hash = request_id
+        .bytes()
+        .chain(salt.bytes())
+        .fold(1469598103934665603, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1099511628211)
+        });
+    max_jitter_ms
+        .checked_add(1)
+        .map_or(hash, |range| hash % range)
 }

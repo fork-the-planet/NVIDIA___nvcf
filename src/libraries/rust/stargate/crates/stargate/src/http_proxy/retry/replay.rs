@@ -65,7 +65,10 @@ impl ReplayableRequestBody {
 
         Ok(Self {
             first_body: Some(body),
-            buffer: Arc::new(ReplayBuffer::new(max_bytes)),
+            buffer: Arc::new(ReplayBuffer {
+                state: Mutex::new(ReplayBufferState::Buffering(Vec::new())),
+                max_bytes,
+            }),
         })
     }
 
@@ -77,14 +80,24 @@ impl ReplayableRequestBody {
     }
 
     pub(in crate::http_proxy) fn buffered_len(&self) -> usize {
-        self.buffer.buffered_len()
+        match &*self.buffer.state.lock() {
+            ReplayBufferState::Buffering(buffer) => buffer.len(),
+            ReplayBufferState::Complete(bytes) => bytes.len(),
+            ReplayBufferState::Unavailable | ReplayBufferState::PayloadTooLarge => 0,
+        }
     }
 
     pub(in crate::http_proxy) fn replay_readiness(&self) -> ReplayReadiness {
         if self.first_body.is_some() {
             ReplayReadiness::Ready
         } else {
-            self.buffer.readiness()
+            match &*self.buffer.state.lock() {
+                ReplayBufferState::Buffering(_) | ReplayBufferState::Unavailable => {
+                    ReplayReadiness::Incomplete
+                }
+                ReplayBufferState::Complete(_) => ReplayReadiness::Ready,
+                ReplayBufferState::PayloadTooLarge => ReplayReadiness::PayloadTooLarge,
+            }
         }
     }
 
@@ -113,101 +126,69 @@ impl ReplayableRequestBody {
 }
 
 impl ReplayBuffer {
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            state: Mutex::new(ReplayBufferState::Buffering(Vec::new())),
-            max_bytes,
-        }
-    }
-
     fn append(&self, chunk: &[u8]) {
         self.state.lock().append(chunk, self.max_bytes);
     }
-
     fn complete(&self) {
         self.state.lock().complete();
     }
 
     fn abandon(&self) {
-        self.state.lock().abandon();
+        let mut state = self.state.lock();
+        if matches!(*state, ReplayBufferState::Buffering(_)) {
+            *state = ReplayBufferState::Unavailable;
+        }
     }
 
     fn replay_body(&self) -> Result<Body, StatusCode> {
         match &*self.state.lock() {
-            ReplayBufferState::Buffering(_) => Err(StatusCode::BAD_GATEWAY),
+            ReplayBufferState::Buffering(_) | ReplayBufferState::Unavailable => {
+                Err(StatusCode::BAD_GATEWAY)
+            }
             ReplayBufferState::Complete(bytes) => Ok(Body::from(bytes.clone())),
-            ReplayBufferState::Unavailable => Err(StatusCode::BAD_GATEWAY),
             ReplayBufferState::PayloadTooLarge => Err(StatusCode::PAYLOAD_TOO_LARGE),
         }
     }
+}
 
-    fn buffered_len(&self) -> usize {
-        self.state.lock().buffered_len()
+impl ReplayBufferState {
+    fn append(&mut self, chunk: &[u8], max_bytes: usize) {
+        match self {
+            ReplayBufferState::Buffering(buffer)
+                if buffer
+                    .len()
+                    .checked_add(chunk.len())
+                    .is_some_and(|next_len| next_len <= max_bytes) =>
+            {
+                buffer.extend_from_slice(chunk);
+            }
+            ReplayBufferState::Buffering(_) => *self = ReplayBufferState::PayloadTooLarge,
+            ReplayBufferState::Complete(_) => {
+                panic!("completed replay buffer received another body chunk")
+            }
+            ReplayBufferState::Unavailable => {
+                panic!("unavailable replay buffer received another body chunk")
+            }
+            ReplayBufferState::PayloadTooLarge => {}
+        }
     }
 
-    fn readiness(&self) -> ReplayReadiness {
-        self.state.lock().readiness()
+    fn complete(&mut self) {
+        match self {
+            ReplayBufferState::Buffering(buffer) => {
+                let bytes = Bytes::from(std::mem::take(buffer));
+                *self = ReplayBufferState::Complete(bytes);
+            }
+            ReplayBufferState::Complete(_) => panic!("replay buffer completed more than once"),
+            ReplayBufferState::Unavailable => panic!("unavailable replay buffer completed"),
+            ReplayBufferState::PayloadTooLarge => {}
+        }
     }
 }
 
 impl Drop for ReplayBufferingGuard {
     fn drop(&mut self) {
         self.buffer.abandon();
-    }
-}
-
-impl ReplayBufferState {
-    fn append(&mut self, chunk: &[u8], max_bytes: usize) {
-        let should_overflow = match self {
-            Self::Buffering(buffer) => match buffer.len().checked_add(chunk.len()) {
-                Some(next_len) if next_len <= max_bytes => {
-                    buffer.extend_from_slice(chunk);
-                    false
-                }
-                _ => true,
-            },
-            Self::Complete(_) => panic!("completed replay buffer received another body chunk"),
-            Self::Unavailable => panic!("unavailable replay buffer received another body chunk"),
-            Self::PayloadTooLarge => return,
-        };
-        if should_overflow {
-            *self = Self::PayloadTooLarge;
-        }
-    }
-
-    fn complete(&mut self) {
-        match self {
-            Self::Buffering(buffer) => {
-                let bytes = Bytes::from(std::mem::take(buffer));
-                *self = Self::Complete(bytes);
-            }
-            Self::Complete(_) => panic!("replay buffer completed more than once"),
-            Self::Unavailable => panic!("unavailable replay buffer completed"),
-            Self::PayloadTooLarge => {}
-        }
-    }
-
-    fn abandon(&mut self) {
-        if matches!(self, Self::Buffering(_)) {
-            *self = Self::Unavailable;
-        }
-    }
-
-    fn buffered_len(&self) -> usize {
-        match self {
-            Self::Buffering(buffer) => buffer.len(),
-            Self::Complete(bytes) => bytes.len(),
-            Self::Unavailable | Self::PayloadTooLarge => 0,
-        }
-    }
-
-    fn readiness(&self) -> ReplayReadiness {
-        match self {
-            Self::Buffering(_) => ReplayReadiness::Incomplete,
-            Self::Complete(_) => ReplayReadiness::Ready,
-            Self::Unavailable => ReplayReadiness::Incomplete,
-            Self::PayloadTooLarge => ReplayReadiness::PayloadTooLarge,
-        }
     }
 }
 

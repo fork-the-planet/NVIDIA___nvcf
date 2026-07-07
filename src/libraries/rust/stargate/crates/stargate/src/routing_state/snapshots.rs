@@ -100,7 +100,6 @@ impl RoutingTargetSnapshot {
                         inference_server_url: "quic://127.0.0.1:5000".to_string(),
                         routing_key: None,
                         reverse_tunnel: false,
-                        coordinated_calibration: false,
                     });
                 let owner = Arc::new(RoutedClusterState::new(
                     registration.cluster_generation.clone(),
@@ -191,21 +190,16 @@ impl RoutedInferenceServerSnapshot {
         snapshot_updated_at: Instant,
         status: InferenceServerStatus,
     ) -> Self {
-        let identity = &registration.identity;
-        let cluster_id = identity.cluster_id.clone();
-        let inference_server_id = identity.inference_server_id.clone();
-        let inference_server_url = identity.inference_server_url.clone();
-        let reverse_tunnel = identity.reverse_tunnel;
         Self {
-            registration,
-            cluster_id,
-            inference_server_id,
-            inference_server_url,
+            cluster_id: registration.identity.cluster_id.clone(),
+            inference_server_id: registration.identity.inference_server_id.clone(),
+            inference_server_url: registration.identity.inference_server_url.clone(),
             stats,
             rtt,
             snapshot_updated_at,
             status,
-            reverse_tunnel,
+            reverse_tunnel: registration.identity.reverse_tunnel,
+            registration,
         }
     }
 
@@ -242,9 +236,9 @@ pub struct RoutedClusterSnapshot {
 
 #[derive(Debug)]
 pub(super) struct ClusterSnapshotState {
-    // Calibration and pending reservations are external inputs applied when a
-    // routing snapshot is read. Keeping this base unprojected prevents stale
-    // derived values from becoming another source of truth.
+    // Pending reservations are applied when a routing snapshot is read.
+    // Keeping this base unprojected prevents stale derived values from becoming
+    // another source of truth.
     pub(super) base_snapshot: RoutedClusterSnapshot,
     // Retain source identity so the latest processed heartbeat wins even when
     // receive timestamps tie; its stats remain owned by `backends`.

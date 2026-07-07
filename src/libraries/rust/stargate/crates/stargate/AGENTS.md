@@ -15,6 +15,9 @@ Server-side stargate code owns registration state, load-balancer routing, HTTP p
 - Direct backends use the exact live registration generation's QUIC
   connection set; `--direct-quic-connections` controls the set size and
   defaults to `1`.
+- Keep `--backend-connectivity=direct|reverse` consistent with listener
+  ownership: direct rejects reverse-listener settings, while reverse requires
+  the Stargate reverse listener.
 - Only route to backends with an open QUIC path and successful forwarded `/health` RTT sample.
 - Keep HTTP proxy requests local to the serving stargate. Do not forward HTTP proxy requests between peer stargates.
 - Keep built-in backend gRPC/reverse-QUIC peer relay behind the explicit, default-off `--enable-dev-peer-forwarding` development flag. Production deployment paths use `stargate-k8s-router` or supported load balancers, never this relay.
@@ -33,16 +36,17 @@ Server-side stargate code owns registration state, load-balancer routing, HTTP p
   application, and cleanup. Do not reintroduce partial running states or
   external cleanup choreography.
 - Overlapping registrations in one `(routing_key, cluster_id)` scope share one
-  `RegistrationClusterGeneration`. That generation owns local coordinated
-  calibration and retires only after its final exact registration is removed.
+  `RegistrationClusterGeneration`. That generation owns Stargate's local
+  cluster lifetime and retires only after its final exact registration is
+  removed. It must not own calibration or capacity-floor state.
 - One short-held registration registry owns exact-id membership, active
   cluster generations, model-advertisement lifecycle, and registered-target
   advertiser counts. Keep its indexes atomic, keep its guards out of
   `.await`s, and do not reintroduce full-registration membership scans or
   per-registration model locks.
 - Registration and routing cleanup must be conditional on exact registration
-  and cluster-generation identity. Do not reintroduce id-only cleanup, a global
-  calibration index, or scans that reconstruct cluster lifetime.
+  and cluster-generation identity. Do not reintroduce id-only cleanup or scans
+  that reconstruct cluster lifetime.
 - Keep tunnel connection state on the exact `RegistrationGeneration` and make
   retirement downward-only. Do not reintroduce a proxy-global tunnel registry,
   id-keyed tunnel ownership, or an ended-generation reclaim path.

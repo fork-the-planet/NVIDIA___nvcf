@@ -46,12 +46,48 @@ const (
 	ArtifactTypeResource ArtifactType = "resource"
 )
 
+type ManifestPlane string
+type ManifestKind string
+type ManifestRequirement string
+
+const (
+	ManifestPlaneControl ManifestPlane = "control"
+	ManifestPlaneCompute ManifestPlane = "compute"
+	ManifestPlaneShared  ManifestPlane = "shared"
+
+	ManifestKindChart        ManifestKind = "chart"
+	ManifestKindServiceImage ManifestKind = "service-image"
+	ManifestKindEACVE        ManifestKind = "ea-cve"
+	ManifestKindResource     ManifestKind = "resource"
+
+	ManifestRequired ManifestRequirement = "required"
+	ManifestOptional ManifestRequirement = "optional"
+)
+
+type ManifestMetadata struct {
+	Entries []ManifestEntry `yaml:"entries"`
+}
+
+type ManifestEntry struct {
+	ArtifactID   string              `yaml:"artifact_id,omitempty"`
+	Name         string              `yaml:"name,omitempty"`
+	Version      string              `yaml:"version,omitempty"`
+	Distribution string              `yaml:"distribution,omitempty"`
+	Plane        ManifestPlane       `yaml:"plane"`
+	Kind         ManifestKind        `yaml:"kind"`
+	Requirement  ManifestRequirement `yaml:"requirement,omitempty"`
+	Description  string              `yaml:"description"`
+	GitHubURL    string              `yaml:"github_url,omitempty"`
+	UpstreamURL  string              `yaml:"upstream_url,omitempty"`
+}
+
 type Catalog struct {
 	Version               int                 `yaml:"version"`
 	Target                string              `yaml:"target"`
 	Registries            map[string]Registry `yaml:"registries"`
 	Publications          []Publication       `yaml:"publications,omitempty"`
 	VersionOverrides      []VersionOverride   `yaml:"version_overrides,omitempty"`
+	Manifest              ManifestMetadata    `yaml:"manifest,omitempty"`
 	Stack                 StackMetadata       `yaml:"stack"`
 	Denylist              []DenylistEntry     `yaml:"denylist,omitempty"`
 	Artifacts             []Artifact          `yaml:"artifacts"`
@@ -274,6 +310,9 @@ func ValidateCatalog(catalog *Catalog) error {
 	if _, exists := seen[catalog.Stack.Name]; exists {
 		return fmt.Errorf("duplicate artifact id %s", catalog.Stack.Name)
 	}
+	if err := validateManifestMetadata(catalog.Manifest); err != nil {
+		return err
+	}
 
 	for _, output := range catalog.Outputs {
 		if err := validateOutputPath(output.Path); err != nil {
@@ -285,6 +324,79 @@ func ValidateCatalog(catalog *Catalog) error {
 			}
 			if strings.TrimSpace(block.Renderer) == "" {
 				return fmt.Errorf("output %s has block with empty renderer", output.Path)
+			}
+		}
+	}
+	return nil
+}
+
+func validateManifestMetadata(metadata ManifestMetadata) error {
+	seen := map[string]struct{}{}
+	// Changing the EA-CVE allowlist requires an explicit documentation decision.
+	allowedEACVE := map[string]struct{}{
+		"bitnami-cassandra":         {},
+		"nvcf-cassandra-migrations": {},
+	}
+	for _, entry := range metadata.Entries {
+		identifier := entry.ArtifactID
+		if identifier == "" {
+			identifier = entry.Name
+		}
+		switch entry.Plane {
+		case ManifestPlaneControl, ManifestPlaneCompute, ManifestPlaneShared:
+		default:
+			return fmt.Errorf("manifest entry %q has unsupported plane %q", identifier, entry.Plane)
+		}
+		switch entry.Kind {
+		case ManifestKindChart, ManifestKindServiceImage, ManifestKindEACVE, ManifestKindResource:
+		default:
+			return fmt.Errorf("manifest entry %q has unsupported kind %q", identifier, entry.Kind)
+		}
+		if entry.Kind == ManifestKindResource {
+			if entry.Plane != ManifestPlaneShared {
+				return fmt.Errorf("manifest resource entry %q must use plane %q", identifier, ManifestPlaneShared)
+			}
+			if entry.Requirement != "" {
+				return fmt.Errorf("manifest resource entry %q cannot set requirement", identifier)
+			}
+		} else {
+			switch entry.Requirement {
+			case ManifestRequired, ManifestOptional:
+			default:
+				return fmt.Errorf("manifest entry %q has unsupported requirement %q", identifier, entry.Requirement)
+			}
+		}
+		if strings.TrimSpace(entry.Description) == "" {
+			return fmt.Errorf("manifest entry %q has empty description", identifier)
+		}
+		for field, value := range map[string]string{
+			"github_url":   entry.GitHubURL,
+			"upstream_url": entry.UpstreamURL,
+		} {
+			if value != "" && !strings.HasPrefix(value, "https://github.com/") {
+				return fmt.Errorf("manifest entry %q %s must use https://github.com/", identifier, field)
+			}
+		}
+
+		key := entry.ArtifactID
+		if key != "" {
+			if entry.Name != "" || entry.Version != "" || entry.Distribution != "" {
+				return fmt.Errorf("manifest entry %q catalog-backed entry cannot set static fields", key)
+			}
+		} else {
+			if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Version) == "" || strings.TrimSpace(entry.Distribution) == "" {
+				return fmt.Errorf("manifest static entry requires name, version, and distribution")
+			}
+			key = "static:" + entry.Name
+		}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate manifest entry %s", key)
+		}
+		seen[key] = struct{}{}
+
+		if entry.Kind == ManifestKindEACVE {
+			if _, allowed := allowedEACVE[entry.ArtifactID]; !allowed {
+				return fmt.Errorf("manifest EA-CVE entry %q is not an approved Cassandra artifact", entry.ArtifactID)
 			}
 		}
 	}
@@ -459,6 +571,7 @@ func BuildCatalogFromArtifactsWithBase(stackVersion string, artifacts []Artifact
 	catalog.Publications = append(catalog.Publications, base.Publications...)
 	catalog.VersionOverrides = append(catalog.VersionOverrides, base.VersionOverrides...)
 	catalog.Denylist = append(catalog.Denylist, base.Denylist...)
+	catalog.Manifest = base.Manifest
 
 	manifestNames := map[string]struct{}{}
 	for _, artifact := range catalog.Artifacts {

@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use stargate_proto::pb::ModelStats;
+use stargate_protocol::common::valid_last_mean_input_tps;
 
-use super::calibration::valid_last_mean_input_tps;
 use super::registration::{RegistrationClusterGeneration, RegistrationGeneration};
 use super::reservations::{
     PendingClusterReservation, RoutingReservation, apply_pending_cluster_reservations,
@@ -31,19 +31,7 @@ use super::snapshots::{
     RoutedClusterSnapshot, RoutedClusterState, RoutedInferenceServerSnapshot,
 };
 
-pub(super) fn set_backend_scoped_stats(stats: &mut ModelStats, src: &ModelStats) {
-    stats.last_mean_input_tps = src.last_mean_input_tps;
-    stats.output_tps = src.output_tps;
-    stats.queue_size = src.queue_size;
-    stats.queued_input_size = src.queued_input_size;
-    stats.input_processing_queries = src.input_processing_queries;
-    stats.output_generation_queries = src.output_generation_queries;
-    stats.stats_observed_at_unix_ms = src.stats_observed_at_unix_ms;
-    stats.stats_capabilities = src.stats_capabilities.clone();
-    stats.stats_sources = src.stats_sources.clone();
-}
-
-pub(super) fn set_cluster_scoped_stats(stats: &mut ModelStats, src: &ModelStats) {
+fn set_cluster_scoped_stats(stats: &mut ModelStats, src: &ModelStats) {
     stats.max_output_tps = src.max_output_tps;
     stats.kv_cache_capacity_tokens = src.kv_cache_capacity_tokens;
     stats.kv_cache_used_tokens = src.kv_cache_used_tokens;
@@ -54,29 +42,9 @@ pub(super) fn set_cluster_scoped_stats(stats: &mut ModelStats, src: &ModelStats)
     stats.queue_time_estimate_ms_by_priority = src.queue_time_estimate_ms_by_priority.clone();
 }
 
-fn build_cluster_snapshot_base(
-    cluster_id: &str,
-    source_backend: &RoutedInferenceServerSnapshot,
-    backend_stats: &ModelStats,
-    rtt: Duration,
-    active_backend_count: usize,
-) -> RoutedClusterSnapshot {
-    let mut snapshot = RoutedClusterSnapshot {
-        cluster_id: cluster_id.to_string(),
-        stats: ModelStats::default(),
-        rtt,
-        snapshot_updated_at: source_backend.snapshot_updated_at,
-        status: source_backend.status,
-        active_backend_count,
-    };
-    set_backend_scoped_stats(&mut snapshot.stats, backend_stats);
-    set_cluster_scoped_stats(&mut snapshot.stats, &source_backend.stats);
-    snapshot
-}
-
-pub(super) fn append_unique_strings(target: &mut Vec<String>, values: &[String]) {
+fn append_unique_strings(target: &mut Vec<String>, values: &[String]) {
     for value in values {
-        if !target.iter().any(|existing| existing == value) {
+        if !target.contains(value) {
             target.push(value.clone());
         }
     }
@@ -129,8 +97,14 @@ impl ClusterRoutingGeneration {
     }
 
     fn backend_aggregate(&self) -> Option<(ModelStats, Duration, usize)> {
+        let active_backend_count = self.backends.len();
+        if active_backend_count == 0 {
+            return None;
+        }
+        let backend_count = active_backend_count as u128;
         let mut backend_stats = ModelStats::default();
-        let mut rtt: Option<Duration> = None;
+        let mut rtt_mean_nanos = 0_u128;
+        let mut rtt_remainder_nanos = 0_u128;
 
         for backend in &self.backends {
             backend_stats.output_tps += backend.stats.output_tps;
@@ -152,13 +126,25 @@ impl ClusterRoutingGeneration {
                 &mut backend_stats.stats_sources,
                 &backend.stats.stats_sources,
             );
-            rtt = Some(match rtt {
-                Some(current) => current.min(backend.rtt),
-                None => backend.rtt,
-            });
+            // Divide each sample before adding it so the mean cannot overflow.
+            // Carrying the remainder after every sample also makes fractional
+            // nanoseconds truncate deterministically after the final sample.
+            let rtt_nanos = backend.rtt.as_nanos();
+            rtt_mean_nanos += rtt_nanos / backend_count;
+            rtt_remainder_nanos += rtt_nanos % backend_count;
+            rtt_mean_nanos += rtt_remainder_nanos / backend_count;
+            rtt_remainder_nanos %= backend_count;
         }
 
-        Some((backend_stats, rtt?, self.backends.len()))
+        // The loop maintains backend_count * mean + remainder = processed sum,
+        // so the final mean is floor(total / backend_count). It cannot exceed
+        // the largest input or Duration::MAX, and both casts are lossless.
+        let rtt = Duration::new(
+            (rtt_mean_nanos / 1_000_000_000) as u64,
+            (rtt_mean_nanos % 1_000_000_000) as u32,
+        );
+
+        Some((backend_stats, rtt, active_backend_count))
     }
 
     fn refresh_snapshot(&mut self, updated_backend_id: Option<&str>) {
@@ -166,39 +152,26 @@ impl ClusterRoutingGeneration {
             self.snapshot_state = None;
             return;
         };
-        let cluster_id = self
-            .backends
-            .first()
-            .expect("non-empty cluster generation should have a backend")
-            .cluster_id
-            .clone();
         if self.snapshot_state.is_none() && updated_backend_id.is_none() {
             return;
         }
-        let present_backend_ids = self
-            .backends
-            .iter()
-            .map(|backend| backend.inference_server_id.as_str())
-            .collect::<HashSet<_>>();
-
-        let retained_source_backend_id = self
-            .snapshot_state
-            .as_ref()
-            .map(|state| state.cluster_stats_source_backend_id.as_str())
-            .filter(|backend_id| present_backend_ids.contains(backend_id));
-        let source_backend_id = updated_backend_id
-            .filter(|backend_id| present_backend_ids.contains(backend_id))
-            .or(retained_source_backend_id)
+        let source_backend_index = updated_backend_id
+            .and_then(|backend_id| backend_index(&self.backends, backend_id).ok())
+            .or_else(|| {
+                self.snapshot_state.as_ref().and_then(|state| {
+                    backend_index(&self.backends, &state.cluster_stats_source_backend_id).ok()
+                })
+            })
             .or_else(|| {
                 self.backends
                     .iter()
-                    .max_by_key(|backend| backend.snapshot_updated_at)
-                    .map(|backend| backend.inference_server_id.as_str())
+                    .enumerate()
+                    .max_by_key(|(_, backend)| backend.snapshot_updated_at)
+                    .map(|(index, _)| index)
             })
-            .expect("non-empty cluster generation should have a source backend")
-            .to_string();
-        let source_backend_index = backend_index(&self.backends, &source_backend_id)
-            .expect("selected cluster source backend should be present");
+            .expect("non-empty cluster generation should have a source backend");
+        let source_backend = &self.backends[source_backend_index];
+        let source_backend_id = source_backend.inference_server_id.clone();
         let mut pending_cluster_reservations = self
             .snapshot_state
             .take()
@@ -206,19 +179,22 @@ impl ClusterRoutingGeneration {
             .unwrap_or_default();
         pending_cluster_reservations.retain(|pending| {
             pending.is_active()
-                && present_backend_ids.contains(pending.inference_server_id.as_str())
+                && backend_index(&self.backends, &pending.inference_server_id).is_ok()
         });
         if let Some(updated_backend_id) = updated_backend_id {
             pending_cluster_reservations
                 .retain(|pending| pending.inference_server_id != updated_backend_id);
         }
-        let base_snapshot = build_cluster_snapshot_base(
-            &cluster_id,
-            &self.backends[source_backend_index],
-            &backend_stats,
+        let mut stats = backend_stats;
+        set_cluster_scoped_stats(&mut stats, &source_backend.stats);
+        let base_snapshot = RoutedClusterSnapshot {
+            cluster_id: source_backend.cluster_id.clone(),
+            stats,
             rtt,
+            snapshot_updated_at: source_backend.snapshot_updated_at,
+            status: source_backend.status,
             active_backend_count,
-        );
+        };
 
         self.snapshot_state = Some(ClusterSnapshotState {
             base_snapshot,
@@ -227,21 +203,12 @@ impl ClusterRoutingGeneration {
         });
     }
 
-    fn routing_snapshot(
-        &mut self,
-        calibrated_last_mean_input_tps: Option<f64>,
-    ) -> Option<RoutedClusterSnapshot> {
+    fn routing_snapshot(&mut self) -> Option<RoutedClusterSnapshot> {
         let snapshot_state = self.snapshot_state.as_mut()?;
         snapshot_state
             .pending_cluster_reservations
             .retain(|pending| pending.is_active());
         let mut snapshot = snapshot_state.base_snapshot.clone();
-        if let Some(calibrated_last_mean_input_tps) = calibrated_last_mean_input_tps {
-            snapshot.stats.last_mean_input_tps = snapshot
-                .stats
-                .last_mean_input_tps
-                .max(calibrated_last_mean_input_tps);
-        }
         apply_pending_cluster_reservations(
             &mut snapshot.stats,
             &snapshot_state.pending_cluster_reservations,
@@ -267,7 +234,7 @@ impl ClusterRoutingGeneration {
         snapshot_state
             .pending_cluster_reservations
             .push(pending.clone());
-        Some(RoutingReservation::new(pending))
+        Some(RoutingReservation(pending))
     }
 }
 
@@ -278,14 +245,6 @@ impl RoutedClusterState {
             generation: Mutex::default(),
             round_robin_counter: AtomicUsize::default(),
         }
-    }
-
-    pub(super) fn cluster_generation(&self) -> &Arc<RegistrationClusterGeneration> {
-        &self.cluster_generation
-    }
-
-    pub(super) fn backend_count(&self) -> usize {
-        self.generation.lock().backends.len()
     }
 
     pub(super) fn upsert_backend(
@@ -323,25 +282,14 @@ impl RoutedClusterState {
         }
     }
 
-    pub(super) fn routing_snapshot(
-        &self,
-        calibrated_last_mean_input_tps: Option<f64>,
-    ) -> Option<RoutedClusterSnapshot> {
-        self.generation
-            .lock()
-            .routing_snapshot(calibrated_last_mean_input_tps)
+    pub(super) fn routing_snapshot(&self) -> Option<RoutedClusterSnapshot> {
+        self.generation.lock().routing_snapshot()
     }
 
     pub(super) fn backend_snapshot_values(&self) -> Vec<RoutedInferenceServerSnapshot> {
-        let backends = self
-            .generation
-            .lock()
-            .backends
-            .iter()
-            .map(Arc::clone)
-            .collect::<Vec<_>>();
+        let backends = self.generation.lock().backends.clone();
         backends
-            .iter()
+            .into_iter()
             .map(|backend| backend.as_ref().clone())
             .collect()
     }
@@ -360,21 +308,16 @@ impl RoutedClusterState {
             return Some(Arc::clone(&generation.backends[index]));
         }
 
-        let eligible_count = generation
+        let mut eligible = generation
             .backends
             .iter()
-            .filter(|backend| !failed_backend_ids.contains(&backend.inference_server_id))
-            .count();
+            .filter(|backend| !failed_backend_ids.contains(&backend.inference_server_id));
+        let eligible_count = eligible.clone().count();
         if eligible_count == 0 {
             return None;
         }
         let index = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % eligible_count;
-        generation
-            .backends
-            .iter()
-            .filter(|backend| !failed_backend_ids.contains(&backend.inference_server_id))
-            .nth(index)
-            .map(Arc::clone)
+        eligible.nth(index).map(Arc::clone)
     }
 
     pub(super) fn reserve_backend(

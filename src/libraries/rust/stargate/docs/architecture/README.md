@@ -12,14 +12,12 @@ Read only the documents that match the behavior you are changing.
 - [API gateway integration contract](../api-gateway-contract.md): public
   frontend responsibilities, `ListModels`, proxy headers, supported endpoints,
   retry guidance, and security boundaries.
-- [Tunnel transport selection](../tunnel-transports.md): when to use `custom`,
+- [Tunnel transport selection](../tunnel-transports.md): when to use `raw-quic`,
   `http3`, or `webtransport`; direct and reverse tunnel requirements; L4/L7
   load-balancer constraints.
 - [Runtime stats interface](../runtime-stats-interface.md): engine-to-pylon
   NDJSON stats stream, OpenAI fallback, KV polling, aggregation, labels, and
   metrics.
-- [Coordinated calibration state machine](../coordinated-calibration-state-machine.md):
-  local Stargate calibration ownership and pylon assignment behavior.
 - [Multi-backend cluster routing design](../multi-backend-clusters.md):
   current cluster-level routing, stats aggregation, retry semantics, and
   observability.

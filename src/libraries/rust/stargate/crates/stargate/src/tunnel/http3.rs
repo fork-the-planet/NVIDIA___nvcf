@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use axum::http::HeaderName;
 use futures::future;
 use quinn::Connection;
+use stargate_protocol::common::is_hop_by_hop_header;
 use tracing::warn;
 
 use super::body::{OpenStreamingRequest, OpenStreamingRequestInner};
@@ -133,17 +134,7 @@ pub(super) async fn build_h3_client_connection(
 }
 
 pub(super) fn should_forward_h3_tunnel_request_header(name: &HeaderName) -> bool {
-    !matches!(
-        name.as_str(),
-        "connection"
-            | "proxy-connection"
-            | "keep-alive"
-            | "transfer-encoding"
-            | "te"
-            | "trailer"
-            | "upgrade"
-            | "host"
-    )
+    !is_hop_by_hop_header(name) && name != "host"
 }
 
 pub(super) fn h3_error<E>(error: E) -> anyhow::Error

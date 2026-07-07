@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use stargate_proto::gateway_pb::llm_gateway_server::{LlmGateway, LlmGatewayServer};
 use stargate_proto::gateway_pb::{AuthLlmWorkerRequest, AuthLlmWorkerResponse};
@@ -37,9 +37,7 @@ impl FromStr for WorkerMapping {
         let (token, routing_key) = value
             .split_once('=')
             .context("worker mapping must use TOKEN=ROUTING_KEY")?;
-        if token.is_empty() {
-            bail!("worker token must not be empty");
-        }
+        ensure!(!token.is_empty(), "worker token must not be empty");
         Ok(Self {
             token: token.to_string(),
             routing_key: routing_key.to_string(),
@@ -50,7 +48,7 @@ impl FromStr for WorkerMapping {
 #[derive(Debug, Parser)]
 struct Args {
     /// TCP address for the LlmGateway gRPC fixture.
-    #[arg(long, default_value = "0.0.0.0:50051")]
+    #[arg(long, default_value = "0.0.0.0:50051", value_name = "ADDR")]
     listen_addr: SocketAddr,
 
     /// Worker token to routing-key mapping. Repeat for each worker.
@@ -74,38 +72,16 @@ impl WorkerAuthGateway {
         gateway_auth_token: Option<String>,
     ) -> Result<Self> {
         let mut routing_keys = HashMap::new();
-        for worker in workers {
-            if routing_keys
-                .insert(worker.token.clone(), worker.routing_key)
-                .is_some()
-            {
-                bail!("duplicate worker token {}", worker.token);
-            }
+        for WorkerMapping { token, routing_key } in workers {
+            ensure!(
+                routing_keys.insert(token.clone(), routing_key).is_none(),
+                "duplicate worker token {token}"
+            );
         }
         Ok(Self {
             routing_keys,
             gateway_auth_token,
         })
-    }
-
-    fn validate_gateway_authorization(
-        &self,
-        request: &Request<AuthLlmWorkerRequest>,
-    ) -> Result<(), Status> {
-        let Some(expected) = self.gateway_auth_token.as_deref() else {
-            return Ok(());
-        };
-        let actual = request
-            .metadata()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok());
-        if actual == Some(&format!("Bearer {expected}")) {
-            Ok(())
-        } else {
-            Err(Status::unauthenticated(
-                "missing or invalid gateway authorization",
-            ))
-        }
     }
 }
 
@@ -115,7 +91,18 @@ impl LlmGateway for WorkerAuthGateway {
         &self,
         request: Request<AuthLlmWorkerRequest>,
     ) -> Result<Response<AuthLlmWorkerResponse>, Status> {
-        self.validate_gateway_authorization(&request)?;
+        if !self.gateway_auth_token.as_deref().is_none_or(|expected| {
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                == Some(expected)
+        }) {
+            return Err(Status::unauthenticated(
+                "missing or invalid gateway authorization",
+            ));
+        }
         let routing_key = self
             .routing_keys
             .get(&request.get_ref().worker_token)

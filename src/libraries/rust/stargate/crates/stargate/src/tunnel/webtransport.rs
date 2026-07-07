@@ -29,29 +29,24 @@ use super::request::OpenTunnelRequest;
 
 #[derive(Clone)]
 pub(super) struct WebTransportConnectionHandle {
-    connection: Connection,
     bidi_header: Bytes,
-    _lifetime: Arc<WebTransportConnectionLifetime>,
+    lifetime: Arc<WebTransportConnectionLifetime>,
 }
 
-enum WebTransportH3Connection {
+enum WebTransportH3Lifetime {
     Client {
         _connection: Box<H3ClientConnection>,
+        _stream: Box<H3ClientRequestStream>,
     },
     Server {
         _connection: Box<H3ServerConnection>,
+        _stream: Box<H3ServerRequestStream>,
     },
-}
-
-enum WebTransportConnectStream {
-    Client { _stream: Box<H3ClientRequestStream> },
-    Server { _stream: Box<H3ServerRequestStream> },
 }
 
 struct WebTransportConnectionLifetime {
     connection: Connection,
-    _h3_connection: tokio::sync::Mutex<Option<WebTransportH3Connection>>,
-    _connect_stream: tokio::sync::Mutex<Option<WebTransportConnectStream>>,
+    _h3: tokio::sync::Mutex<WebTransportH3Lifetime>,
 }
 
 impl Drop for WebTransportConnectionLifetime {
@@ -64,17 +59,29 @@ impl Drop for WebTransportConnectionLifetime {
 }
 
 impl WebTransportConnectionHandle {
+    fn new(connection: Connection, session_id: u64, h3: WebTransportH3Lifetime) -> Result<Self> {
+        Ok(Self {
+            bidi_header: stargate_protocol::WebTransportBidiHeader::new(session_id)
+                .context("precompute WebTransport bidi stream header")?
+                .to_bytes(),
+            lifetime: Arc::new(WebTransportConnectionLifetime {
+                connection,
+                _h3: tokio::sync::Mutex::new(h3),
+            }),
+        })
+    }
+
     pub(super) fn is_healthy(&self) -> bool {
-        self.connection.close_reason().is_none()
+        self.lifetime.connection.close_reason().is_none()
     }
 
     pub(super) fn stable_id(&self) -> usize {
-        self.connection.stable_id()
+        self.lifetime.connection.stable_id()
     }
 
     #[cfg(test)]
     pub(super) fn connection(&self) -> &Connection {
-        &self.connection
+        &self.lifetime.connection
     }
 
     pub(super) async fn open_streaming_request(
@@ -82,6 +89,7 @@ impl WebTransportConnectionHandle {
         request: OpenTunnelRequest<'_>,
     ) -> Result<OpenStreamingRequest> {
         let (mut send_stream, recv_stream) = self
+            .lifetime
             .connection
             .open_bi()
             .await
@@ -158,21 +166,14 @@ pub(super) async fn build_webtransport_client_connection(
         );
     }
 
-    Ok(WebTransportConnectionHandle {
-        connection: connection.clone(),
-        bidi_header: stargate_protocol::WebTransportBidiHeader::new(session_id)
-            .context("precompute WebTransport bidi stream header")?
-            .to_bytes(),
-        _lifetime: Arc::new(WebTransportConnectionLifetime {
-            connection,
-            _h3_connection: tokio::sync::Mutex::new(Some(WebTransportH3Connection::Client {
-                _connection: Box::new(h3_connection),
-            })),
-            _connect_stream: tokio::sync::Mutex::new(Some(WebTransportConnectStream::Client {
-                _stream: Box::new(connect_stream),
-            })),
-        }),
-    })
+    WebTransportConnectionHandle::new(
+        connection,
+        session_id,
+        WebTransportH3Lifetime::Client {
+            _connection: Box::new(h3_connection),
+            _stream: Box::new(connect_stream),
+        },
+    )
 }
 
 pub(super) async fn build_webtransport_server_connection(
@@ -191,19 +192,12 @@ pub(super) async fn build_webtransport_server_connection(
         .map_err(h3_error)
         .context("send WebTransport CONNECT response")?;
 
-    Ok(WebTransportConnectionHandle {
-        connection: connection.clone(),
-        bidi_header: stargate_protocol::WebTransportBidiHeader::new(session_id)
-            .context("precompute WebTransport bidi stream header")?
-            .to_bytes(),
-        _lifetime: Arc::new(WebTransportConnectionLifetime {
-            connection,
-            _h3_connection: tokio::sync::Mutex::new(Some(WebTransportH3Connection::Server {
-                _connection: Box::new(h3_connection),
-            })),
-            _connect_stream: tokio::sync::Mutex::new(Some(WebTransportConnectStream::Server {
-                _stream: Box::new(connect_stream),
-            })),
-        }),
-    })
+    WebTransportConnectionHandle::new(
+        connection,
+        session_id,
+        WebTransportH3Lifetime::Server {
+            _connection: Box::new(h3_connection),
+            _stream: Box::new(connect_stream),
+        },
+    )
 }

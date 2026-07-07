@@ -82,7 +82,6 @@ RUN --mount=type=bind,source=.,target=/build-context,readonly \
     cargo build -p stargate -p stargate-k8s-router -p mock-dynamo -p pylon \
       --profile "${CARGO_PROFILE}" --target "${rust_target}"; \
     cp "target/${rust_target}/${CARGO_PROFILE}/stargate" \
-       "target/${rust_target}/${CARGO_PROFILE}/stargate-webtransport-l7-proxy" \
        "target/${rust_target}/${CARGO_PROFILE}/stargate-worker-auth-gateway" \
        "target/${rust_target}/${CARGO_PROFILE}/stargate-k8s-router" \
        "target/${rust_target}/${CARGO_PROFILE}/mock-dynamo" \
@@ -130,7 +129,6 @@ ARG TARGETARCH
 # Health probe changes less often than the binary, so copy it first for layer caching.
 COPY --from=health-probe-downloader /usr/local/bin/grpc_health_probe /usr/local/bin/grpc_health_probe
 COPY --from=binary-builder /out/stargate /usr/local/bin/stargate
-COPY --from=binary-builder /out/stargate-webtransport-l7-proxy /usr/local/bin/stargate-webtransport-l7-proxy
 
 ENTRYPOINT ["stargate"]
 CMD []

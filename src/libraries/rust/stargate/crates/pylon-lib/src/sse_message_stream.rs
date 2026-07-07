@@ -18,15 +18,15 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, StreamExt};
-use sonic_rs::JsonValueTrait;
+use sonic_rs::{JsonValueTrait, Value};
 
 const SSE_DONE_SENTINEL: &str = "[DONE]";
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum SseMessage {
     Done,
-    ChatCompletionChunk { raw_data: String },
-    OtherData { raw_data: String },
+    ChatCompletionChunk { parsed: Option<Value> },
+    OtherData,
 }
 
 impl SseMessage {
@@ -35,7 +35,7 @@ impl SseMessage {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct ParsedSseMessage {
     pub(crate) raw_event: Bytes,
     pub(crate) message: SseMessage,
@@ -51,17 +51,10 @@ impl SseMessageBuffer {
         self.buffer.extend_from_slice(chunk);
     }
 
-    fn push_bytes_limited(
-        &mut self,
-        chunk: &[u8],
-        max_buffer_bytes: usize,
-    ) -> Result<(), SseMessageBufferLimitExceeded> {
+    fn push_bytes_limited(&mut self, chunk: &[u8], max_buffer_bytes: usize) -> Option<usize> {
         self.push_bytes(chunk);
         let buffered_bytes = self.unterminated_event_bytes();
-        if buffered_bytes > max_buffer_bytes {
-            return Err(SseMessageBufferLimitExceeded { buffered_bytes });
-        }
-        Ok(())
+        (buffered_bytes > max_buffer_bytes).then_some(buffered_bytes)
     }
 
     fn unterminated_event_bytes(&self) -> usize {
@@ -71,11 +64,6 @@ impl SseMessageBuffer {
         }
         remaining.len()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SseMessageBufferLimitExceeded {
-    buffered_bytes: usize,
 }
 
 impl Iterator for SseMessageBuffer {
@@ -138,10 +126,10 @@ where
                 continue;
             }
 
-            let timeout = if has_seen_output {
-                output_chunk_timeout
+            let (timeout, timeout_phase) = if has_seen_output {
+                (output_chunk_timeout, SseReadTimeoutPhase::SubsequentOutput)
             } else {
-                first_output_timeout
+                (first_output_timeout, SseReadTimeoutPhase::FirstOutput)
             };
 
             match tokio::time::timeout(timeout, byte_stream.next()).await {
@@ -149,12 +137,12 @@ where
                     if chunk.is_empty() {
                         continue;
                     }
-                    if let Err(error) =
+                    if let Some(buffered_bytes) =
                         sse_messages.push_bytes_limited(chunk.as_ref(), max_buffer_bytes)
                     {
                         Err(UpstreamSseReadError::BufferLimitExceeded {
                             max_buffer_bytes,
-                            buffered_bytes: error.buffered_bytes,
+                            buffered_bytes,
                         })?;
                     }
                 }
@@ -168,12 +156,7 @@ where
                     break;
                 }
                 Err(_) => {
-                    let phase = if has_seen_output {
-                        SseReadTimeoutPhase::SubsequentOutput
-                    } else {
-                        SseReadTimeoutPhase::FirstOutput
-                    };
-                    Err(UpstreamSseReadError::Timeout(phase))?;
+                    Err(UpstreamSseReadError::Timeout(timeout_phase))?;
                 }
             }
         }
@@ -186,18 +169,18 @@ fn classify_sse_message(event_name: Option<&str>, data: String) -> SseMessage {
         return SseMessage::Done;
     }
 
-    if trimmed.is_empty() || is_responses_non_output_event(event_name, trimmed) {
-        SseMessage::OtherData { raw_data: data }
-    } else {
-        SseMessage::ChatCompletionChunk { raw_data: data }
+    let parsed = (!trimmed.is_empty() && event_name != Some("response.created"))
+        .then(|| sonic_rs::from_str::<Value>(trimmed).ok())
+        .flatten();
+    if trimmed.is_empty()
+        || event_name == Some("response.created")
+        || parsed
+            .as_ref()
+            .is_some_and(|value| value["type"].as_str() == Some("response.created"))
+    {
+        return SseMessage::OtherData;
     }
-}
-
-fn is_responses_non_output_event(event_name: Option<&str>, data: &str) -> bool {
-    event_name == Some("response.created")
-        || sonic_rs::get(data.as_bytes(), &["type"])
-            .ok()
-            .is_some_and(|value| value.as_str() == Some("response.created"))
+    SseMessage::ChatCompletionChunk { parsed }
 }
 
 fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
@@ -205,21 +188,12 @@ fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
         return None;
     }
 
-    for idx in 0..(buffer.len() - 1) {
-        if buffer[idx] == b'\n' && buffer[idx + 1] == b'\n' {
-            return Some(idx + 2);
-        }
-        if idx + 3 < buffer.len()
-            && buffer[idx] == b'\r'
-            && buffer[idx + 1] == b'\n'
-            && buffer[idx + 2] == b'\r'
-            && buffer[idx + 3] == b'\n'
-        {
-            return Some(idx + 4);
-        }
-    }
-
-    None
+    (0..buffer.len() - 1).find_map(|idx| {
+        buffer[idx..]
+            .starts_with(b"\n\n")
+            .then_some(idx + 2)
+            .or_else(|| buffer[idx..].starts_with(b"\r\n\r\n").then_some(idx + 4))
+    })
 }
 
 #[derive(Debug, Default)]
@@ -234,18 +208,19 @@ fn extract_sse_fields(event_bytes: &[u8]) -> ExtractedSseFields {
     let mut saw_data = false;
     // Classify only standard SSE data/event fields. Comments remain part of
     // the raw event forwarded to the caller.
-    for raw_line in text.lines() {
-        let line = raw_line.trim_end_matches('\r');
-        if let Some(rest) = line.strip_prefix("data:") {
-            if saw_data {
-                fields.data.push('\n');
+    for line in text.lines().map(|line| line.trim_end_matches('\r')) {
+        match line.split_once(':') {
+            Some(("data", rest)) => {
+                if saw_data {
+                    fields.data.push('\n');
+                }
+                fields.data.push_str(rest.trim_start());
+                saw_data = true;
             }
-            fields.data.push_str(rest.trim_start());
-            saw_data = true;
-        } else if fields.event_name.is_none()
-            && let Some(rest) = line.strip_prefix("event:")
-        {
-            fields.event_name = Some(rest.trim_start().to_string());
+            Some(("event", rest)) if fields.event_name.is_none() => {
+                fields.event_name = Some(rest.trim_start().to_string());
+            }
+            _ => {}
         }
     }
     fields
@@ -266,9 +241,7 @@ mod tests {
         assert_eq!(
             messages.next(),
             Some(ParsedSseMessage {
-                message: SseMessage::ChatCompletionChunk {
-                    raw_data: "first".to_string()
-                },
+                message: SseMessage::ChatCompletionChunk { parsed: None },
                 raw_event: Bytes::from_static(b"data: first\n\n"),
             })
         );
@@ -278,9 +251,7 @@ mod tests {
         assert_eq!(
             messages.next(),
             Some(ParsedSseMessage {
-                message: SseMessage::ChatCompletionChunk {
-                    raw_data: "second".to_string()
-                },
+                message: SseMessage::ChatCompletionChunk { parsed: None },
                 raw_event: Bytes::from_static(b"data: second\n\n"),
             })
         );
@@ -324,11 +295,12 @@ mod tests {
             parsed.message,
             SseMessage::ChatCompletionChunk { .. }
         ));
-        let SseMessage::ChatCompletionChunk { raw_data } = parsed.message else {
+        let SseMessage::ChatCompletionChunk { .. } = parsed.message else {
             unreachable!("message kind asserted above");
         };
+        let fields = extract_sse_fields(parsed.raw_event.as_ref());
         assert_eq!(
-            raw_data,
+            fields.data,
             "{\n\"object\":\"chat.completion.chunk\",\n\"choices\":[{\"delta\":{\"content\":\"hi\"}}]\n}"
         );
         assert_eq!(messages.next(), None);
@@ -407,9 +379,7 @@ mod tests {
                 .expect("first complete SSE event should be emitted")
                 .expect("first complete SSE event should not fail"),
             ParsedSseMessage {
-                message: SseMessage::ChatCompletionChunk {
-                    raw_data: "one".to_string(),
-                },
+                message: SseMessage::ChatCompletionChunk { parsed: None },
                 raw_event: Bytes::from_static(b"data: one\n\n"),
             }
         );
@@ -420,9 +390,7 @@ mod tests {
                 .expect("second complete SSE event should be emitted")
                 .expect("second complete SSE event should not fail"),
             ParsedSseMessage {
-                message: SseMessage::ChatCompletionChunk {
-                    raw_data: "two".to_string(),
-                },
+                message: SseMessage::ChatCompletionChunk { parsed: None },
                 raw_event: Bytes::from_static(b"data: two\n\n"),
             }
         );
@@ -514,11 +482,10 @@ mod tests {
                 messages.push_bytes(black_box(chunk.as_ref()));
                 for parsed in messages.by_ref() {
                     black_box(parsed.raw_event.len());
-                    if let SseMessage::ChatCompletionChunk { raw_data } = parsed.message {
+                    if let SseMessage::ChatCompletionChunk { parsed, .. } = parsed.message {
                         peeked.output_messages += 1;
-                        if let Some(delta) = token_parser.parse_incremental_output_tokens(&raw_data)
-                        {
-                            peeked.output_tokens += delta;
+                        if let Some(progress) = token_parser.observe_json(parsed.as_ref()) {
+                            peeked.output_tokens += progress.delta();
                         }
                     }
                 }
@@ -541,17 +508,18 @@ mod tests {
                 messages.push_bytes(black_box(chunk.as_ref()));
                 for parsed in messages.by_ref() {
                     peeked.forwarded_bytes += parsed.raw_event.len();
-                    if let SseMessage::ChatCompletionChunk { raw_data } = parsed.message {
+                    if let SseMessage::ChatCompletionChunk { parsed, .. } = parsed.message {
                         peeked.output_messages += 1;
-                        let output_token_delta =
-                            token_parser.parse_incremental_output_tokens(&raw_data);
-                        if let Some(delta) = output_token_delta {
-                            peeked.output_tokens += delta;
+                        let output_progress = token_parser.observe_json(parsed.as_ref());
+                        if let Some(progress) = output_progress {
+                            peeked.output_tokens += progress.delta();
                         }
                         if let Some(recorder) = quality_recorder.as_mut() {
-                            recorder.observe_sse_chunk_with_token_progress(
-                                &raw_data,
-                                output_token_delta.map(RequestOutputTokenProgress::Delta),
+                            recorder.observe_json_chunk(
+                                parsed.as_ref(),
+                                output_progress.map(|progress| {
+                                    RequestOutputTokenProgress::Delta(progress.delta())
+                                }),
                             );
                         }
                     }

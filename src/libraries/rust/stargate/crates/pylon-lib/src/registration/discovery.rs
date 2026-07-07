@@ -13,10 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
-use anyhow::Context;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -25,56 +25,26 @@ use stargate_proto::pb::{WatchStargatesRequest, WatchStargatesResponse};
 
 use stargate_runtime::{OwnedTask, TASK_SHUTDOWN_TIMEOUT};
 
-use super::grpc_endpoint::{
-    StargateGrpcConnectTarget, StargateGrpcEndpoint, log_stargate_grpc_connect_attempt,
-    stargate_grpc_channel_endpoint,
-};
-use super::normalize_addr;
+use super::grpc_endpoint::{StargateGrpcEndpoint, log_stargate_grpc_connect_attempt};
 use super::topology::{RegistrationRouterTopology, publish_registration_router_topology};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct WatchEndpointSnapshot {
-    pub(super) registration_routers: BTreeSet<StargateGrpcEndpoint>,
+    pub(super) registration_routers: BTreeMap<String, StargateGrpcEndpoint>,
     pub(super) watch_urls: BTreeSet<String>,
-}
-
-#[derive(Debug)]
-pub(super) enum WatchEndpointEvent {
-    Snapshot(WatchEndpointSnapshot),
-    Disconnected,
 }
 
 #[derive(Debug)]
 pub(super) struct WatchEndpointUpdate {
     pub(super) watch_url: String,
     pub(super) generation: u64,
-    pub(super) event: WatchEndpointEvent,
-}
-
-#[derive(Debug)]
-pub(super) enum WatchEndpointState {
-    Connecting,
-    Live(WatchEndpointSnapshot),
-    Disconnected,
-}
-
-impl WatchEndpointState {
-    pub(super) fn snapshot(&self) -> Option<&WatchEndpointSnapshot> {
-        match self {
-            WatchEndpointState::Live(snapshot) => Some(snapshot),
-            WatchEndpointState::Connecting | WatchEndpointState::Disconnected => None,
-        }
-    }
-
-    pub(super) fn has_snapshot(&self) -> bool {
-        matches!(self, WatchEndpointState::Live(_))
-    }
+    pub(super) snapshot: Option<WatchEndpointSnapshot>,
 }
 
 pub(super) struct WatchedEndpoint {
     pub(super) generation: u64,
     pub(super) task: OwnedTask,
-    pub(super) state: WatchEndpointState,
+    pub(super) snapshot: Option<WatchEndpointSnapshot>,
 }
 
 const INITIAL_WATCH_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -97,21 +67,23 @@ pub(super) async fn run_watch_stargate_discovery(
             break;
         }
 
-        let desired_watch_urls = desired_watch_urls(&seeds, &watched);
-        let current_watch_urls: Vec<String> = watched.keys().cloned().collect();
-        for watch_url in current_watch_urls {
-            if desired_watch_urls.contains(&watch_url) {
-                continue;
-            }
-            if let Some(endpoint) = watched.remove(&watch_url) {
-                stop_watched_endpoint(endpoint).await;
-            }
+        let desired_watch_urls = desired_watch_urls_from_snapshot_lookup(&seeds, |watch_url| {
+            watched
+                .get(watch_url)
+                .and_then(|endpoint| endpoint.snapshot.as_ref())
+        });
+        let removed_endpoints = watched
+            .extract_if(|watch_url, _| !desired_watch_urls.contains(watch_url))
+            .map(|(_, endpoint)| endpoint)
+            .collect::<Vec<_>>();
+        for endpoint in removed_endpoints {
+            stop_watched_endpoint(endpoint).await;
         }
 
         for watch_url in &desired_watch_urls {
-            if watched.contains_key(watch_url) {
+            let Entry::Vacant(entry) = watched.entry(watch_url.clone()) else {
                 continue;
-            }
+            };
             let generation = next_generation;
             next_generation = next_generation
                 .checked_add(1)
@@ -128,14 +100,11 @@ pub(super) async fn run_watch_stargate_discovery(
                     )
                 }
             });
-            watched.insert(
-                watch_url.clone(),
-                WatchedEndpoint {
-                    generation,
-                    task,
-                    state: WatchEndpointState::Connecting,
-                },
-            );
+            entry.insert(WatchedEndpoint {
+                generation,
+                task,
+                snapshot: None,
+            });
         }
 
         let active_routers = active_registration_routers(watched_endpoint_snapshots(&watched));
@@ -143,7 +112,7 @@ pub(super) async fn run_watch_stargate_discovery(
             all_desired_watch_urls_have_snapshots(&desired_watch_urls, |watch_url| {
                 watched
                     .get(watch_url)
-                    .is_some_and(|endpoint| endpoint.state.has_snapshot())
+                    .is_some_and(|endpoint| endpoint.snapshot.is_some())
             });
         // A bad redundant seed must not block registration to already discovered routers.
         let initial_publish_ready =
@@ -153,13 +122,8 @@ pub(super) async fn run_watch_stargate_discovery(
             !initial_discovery_timed_out && topology_tx.borrow().published_routers().is_none();
 
         tokio::select! {
-            maybe_update = endpoint_updates_rx.recv() => {
-                match maybe_update {
-                    Some(update) => {
-                        apply_watch_endpoint_update(&mut watched, update);
-                    }
-                    None => break,
-                }
+            Some(update) = endpoint_updates_rx.recv() => {
+                apply_watch_endpoint_update(&mut watched, update);
             }
             _ = stop.cancelled() => break,
             _ = &mut initial_discovery_timeout, if awaiting_initial_timeout => {
@@ -168,14 +132,11 @@ pub(super) async fn run_watch_stargate_discovery(
         }
     }
 
-    OwnedTask::shutdown_all(
-        watched
-            .into_values()
-            .map(|endpoint| endpoint.task)
-            .collect(),
-        TASK_SHUTDOWN_TIMEOUT,
-    )
-    .await;
+    let tasks = watched
+        .into_values()
+        .map(|endpoint| endpoint.task)
+        .collect();
+    OwnedTask::shutdown_all(tasks, TASK_SHUTDOWN_TIMEOUT).await;
 }
 
 pub(super) async fn stop_watched_endpoint(endpoint: WatchedEndpoint) {
@@ -188,81 +149,60 @@ async fn watch_stargate_endpoint(
     endpoint_updates_tx: mpsc::Sender<WatchEndpointUpdate>,
     stop: CancellationToken,
 ) {
+    let target = StargateGrpcEndpoint::new(watch_url.clone(), "")
+        .expect("normalized watch URL should be non-empty");
     loop {
         if stop.is_cancelled() {
             return;
         }
 
-        let target = StargateGrpcConnectTarget::direct(normalize_addr(&watch_url));
         log_stargate_grpc_connect_attempt(&target, "watch_stargates", "lazy");
-        let channel = stargate_grpc_channel_endpoint(&target)
-            .context("invalid watch endpoint")
-            .map(|endpoint| endpoint.connect_lazy());
-        let Ok(channel) = channel else {
-            if watch_endpoint_sleep_or_stop(&stop, Duration::from_secs(1)).await {
-                return;
-            }
-            continue;
-        };
-        let mut client = StargateControlPlaneClient::new(channel);
-        let response = tokio::select! {
-            response = client.watch_stargates(WatchStargatesRequest {}) => response,
-            _ = stop.cancelled() => return,
-        };
-        let Ok(response) = response else {
-            if watch_endpoint_sleep_or_stop(&stop, Duration::from_secs(1)).await {
-                return;
-            }
-            continue;
-        };
-        let mut stream = response.into_inner();
-
-        loop {
-            tokio::select! {
-                message = stream.message() => {
-                    match message {
-                        Ok(Some(event)) => {
-                            let update = WatchEndpointUpdate {
-                                watch_url: watch_url.clone(),
-                                generation,
-                                event: WatchEndpointEvent::Snapshot(
-                                    watch_endpoint_snapshot_from_response(&watch_url, event),
-                                ),
-                            };
-                            if !send_watch_endpoint_update(
-                                &endpoint_updates_tx,
-                                update,
-                                &stop,
-                            )
-                            .await
-                            {
-                                return;
-                            }
-                        }
-                        Ok(None) | Err(_) => {
-                            let update = WatchEndpointUpdate {
-                                watch_url: watch_url.clone(),
-                                generation,
-                                event: WatchEndpointEvent::Disconnected,
-                            };
-                            if !send_watch_endpoint_update(
-                                &endpoint_updates_tx,
-                                update,
-                                &stop,
-                            )
-                            .await
-                            {
-                                return;
-                            }
-                            break;
-                        }
+        let stream = match target.channel_endpoint() {
+            Ok(endpoint) => {
+                let mut client = StargateControlPlaneClient::new(endpoint.connect_lazy());
+                tokio::select! {
+                    response = client.watch_stargates(WatchStargatesRequest {}) => {
+                        response.ok().map(|response| response.into_inner())
                     }
+                    _ = stop.cancelled() => return,
                 }
-                _ = stop.cancelled() => return,
+            }
+            Err(_) => None,
+        };
+        if let Some(mut stream) = stream {
+            loop {
+                let Some(message) = stop.run_until_cancelled(stream.message()).await else {
+                    return;
+                };
+                let snapshot = message
+                    .ok()
+                    .flatten()
+                    .map(|response| watch_endpoint_snapshot_from_response(&watch_url, response));
+                let disconnected = snapshot.is_none();
+                if !send_watch_endpoint_update(
+                    &endpoint_updates_tx,
+                    WatchEndpointUpdate {
+                        watch_url: watch_url.clone(),
+                        generation,
+                        snapshot,
+                    },
+                    &stop,
+                )
+                .await
+                {
+                    return;
+                }
+                if disconnected {
+                    break;
+                }
             }
         }
 
-        if watch_endpoint_sleep_or_stop(&stop, Duration::from_secs(1)).await {
+        if stop
+            .run_until_cancelled(tokio::time::sleep(Duration::from_secs(1)))
+            .await
+            .is_none()
+        {
             return;
         }
     }
@@ -273,33 +213,24 @@ pub(super) async fn send_watch_endpoint_update(
     update: WatchEndpointUpdate,
     stop: &CancellationToken,
 ) -> bool {
-    let Some(permit) = stop
-        .run_until_cancelled(endpoint_updates_tx.reserve())
-        .await
-    else {
-        return false;
-    };
-    let Ok(permit) = permit else {
-        return false;
-    };
-    permit.send(update);
-    true
+    matches!(
+        stop.run_until_cancelled(endpoint_updates_tx.send(update))
+            .await,
+        Some(Ok(()))
+    )
 }
 
 pub(super) fn apply_watch_endpoint_update(
     watched: &mut HashMap<String, WatchedEndpoint>,
     update: WatchEndpointUpdate,
 ) -> bool {
-    let Some(endpoint) = watched.get_mut(&update.watch_url) else {
+    let Some(endpoint) = watched
+        .get_mut(&update.watch_url)
+        .filter(|endpoint| endpoint.generation == update.generation)
+    else {
         return false;
     };
-    if endpoint.generation != update.generation {
-        return false;
-    }
-    endpoint.state = match update.event {
-        WatchEndpointEvent::Snapshot(snapshot) => WatchEndpointState::Live(snapshot),
-        WatchEndpointEvent::Disconnected => WatchEndpointState::Disconnected,
-    };
+    endpoint.snapshot = update.snapshot;
     true
 }
 
@@ -311,32 +242,27 @@ pub(super) fn watch_endpoint_snapshot_from_response(
         registration_routers: response
             .stargates
             .into_iter()
-            .filter_map(stargate_info_registration_endpoint)
+            .filter_map(stargate_info_registration_router)
             .collect(),
         watch_urls: normalize_string_set(response.watch_stargate_urls),
     }
 }
 
-fn stargate_info_registration_endpoint(
+fn stargate_info_registration_router(
     info: stargate_proto::pb::StargateInfo,
-) -> Option<StargateGrpcEndpoint> {
+) -> Option<(String, StargateGrpcEndpoint)> {
+    let stargate_id = if info.stargate_id.trim().is_empty() {
+        info.advertise_addr.trim().to_string()
+    } else {
+        info.stargate_id.trim().to_string()
+    };
     let authority_addr = if !info.advertise_addr.trim().is_empty() {
         info.advertise_addr
     } else {
-        info.stargate_id
+        stargate_id.clone()
     };
     StargateGrpcEndpoint::new(authority_addr, info.grpc_pylon_dial_addr)
-}
-
-fn desired_watch_urls(
-    seeds: &BTreeSet<String>,
-    watched: &HashMap<String, WatchedEndpoint>,
-) -> BTreeSet<String> {
-    desired_watch_urls_from_snapshot_lookup(seeds, |watch_url| {
-        watched
-            .get(watch_url)
-            .and_then(|endpoint| endpoint.state.snapshot())
-    })
+        .map(|endpoint| (stargate_id, endpoint))
 }
 
 #[cfg(test)]
@@ -371,7 +297,7 @@ pub(super) fn active_registration_routers<'a>(
 ) -> BTreeSet<StargateGrpcEndpoint> {
     snapshots
         .into_iter()
-        .flat_map(|snapshot| snapshot.registration_routers.iter().cloned())
+        .flat_map(|snapshot| snapshot.registration_routers.values().cloned())
         .collect()
 }
 
@@ -389,7 +315,7 @@ pub(super) fn watched_endpoint_snapshots(
 ) -> impl Iterator<Item = &WatchEndpointSnapshot> {
     watched
         .values()
-        .filter_map(|endpoint| endpoint.state.snapshot())
+        .filter_map(|endpoint| endpoint.snapshot.as_ref())
 }
 
 fn normalize_string_set(values: Vec<String>) -> BTreeSet<String> {
@@ -398,10 +324,4 @@ fn normalize_string_set(values: Vec<String>) -> BTreeSet<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect()
-}
-
-async fn watch_endpoint_sleep_or_stop(stop: &CancellationToken, duration: Duration) -> bool {
-    stop.run_until_cancelled(tokio::time::sleep(duration))
-        .await
-        .is_none()
 }

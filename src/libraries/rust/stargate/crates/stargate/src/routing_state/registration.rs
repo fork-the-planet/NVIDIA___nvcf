@@ -13,12 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::calibration::{ClusterCalibrations, validate_cluster_calibration_submission};
 use super::keys::{RegistrationIdentity, RoutingTargetKey};
 use super::*;
 use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tunnel::RegistrationConnections;
@@ -36,10 +34,7 @@ struct RegistrationMembership {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RegistrationClusterKey {
-    routing_key: Option<String>,
-    cluster_id: String,
-}
+struct RegistrationClusterKey(Option<String>, String);
 
 #[derive(Debug)]
 struct RegistrationRecord {
@@ -53,10 +48,9 @@ struct ActiveRegistrationCluster {
     registration_count: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct RegistrationClusterGeneration {
     retired: AtomicBool,
-    pub(super) calibrations: ClusterCalibrations,
 }
 
 #[derive(Debug)]
@@ -75,14 +69,7 @@ enum RegisteredModelState {
     },
 }
 
-struct AdvertisedModelDelta {
-    added: BTreeSet<String>,
-    removed: BTreeSet<String>,
-}
-
-pub(crate) struct RunningRegistration {
-    state: Arc<RegistrationGeneration>,
-}
+pub(crate) struct RunningRegistration(Arc<RegistrationGeneration>);
 
 pub(super) struct EndedRegistration {
     pub(super) registration: Arc<RegistrationGeneration>,
@@ -91,20 +78,16 @@ pub(super) struct EndedRegistration {
 
 impl RunningRegistration {
     pub(crate) fn identity(&self) -> &RegistrationIdentity {
-        &self.state.identity
+        &self.0.identity
     }
 
     #[cfg(test)]
     pub(super) fn cluster_generation(&self) -> &Arc<RegistrationClusterGeneration> {
-        &self.state.cluster_generation
+        &self.0.cluster_generation
     }
 
     pub(crate) fn generation(&self) -> Arc<RegistrationGeneration> {
-        self.state.clone()
-    }
-
-    fn into_registration_generation(self) -> Arc<RegistrationGeneration> {
-        self.state
+        self.0.clone()
     }
 }
 
@@ -131,13 +114,6 @@ impl RegistrationGeneration {
 }
 
 impl RegistrationClusterGeneration {
-    fn new() -> Self {
-        Self {
-            retired: AtomicBool::new(false),
-            calibrations: ClusterCalibrations::default(),
-        }
-    }
-
     fn retire(&self) {
         assert!(
             !self.retired.swap(true, Ordering::AcqRel),
@@ -151,7 +127,10 @@ impl RegistrationClusterGeneration {
 }
 
 impl RegisteredModelState {
-    fn begin_update(&mut self, advertised: BTreeSet<String>) -> AdvertisedModelDelta {
+    fn begin_update(
+        &mut self,
+        advertised: BTreeSet<String>,
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
         let Self::Stable(previous) = self else {
             panic!("registration model update started while another update is applying");
         };
@@ -162,7 +141,7 @@ impl RegisteredModelState {
             previous,
             advertised,
         };
-        AdvertisedModelDelta { added, removed }
+        (added, removed)
     }
 
     fn finish_update(&mut self) {
@@ -171,12 +150,6 @@ impl RegisteredModelState {
         };
         let advertised = std::mem::take(advertised);
         *self = Self::Stable(advertised);
-    }
-
-    fn advertised_models(&self) -> &BTreeSet<String> {
-        match self {
-            Self::Stable(advertised) | Self::Applying { advertised, .. } => advertised,
-        }
     }
 
     fn cleanup_model_ids(&self) -> BTreeSet<String> {
@@ -190,39 +163,105 @@ impl RegisteredModelState {
     }
 }
 
-impl RegistrationClusterKey {
-    fn from_identity(identity: &RegistrationIdentity) -> Self {
-        Self {
-            routing_key: identity.routing_key.clone(),
-            cluster_id: identity.cluster_id.clone(),
-        }
+impl RegistrationRegistry {
+    pub(super) fn begin_registration(
+        &self,
+        identity: &RegistrationIdentity,
+    ) -> Result<RunningRegistration, Status> {
+        self.membership.write().begin(identity)
     }
 
-    fn from_submission(
-        routing_key: Option<String>,
-        request: &SubmitClusterCalibrationRequest,
-    ) -> Self {
-        Self {
-            routing_key,
-            cluster_id: request.cluster_id.clone(),
-        }
+    pub(super) fn end_registration(
+        &self,
+        running: RunningRegistration,
+    ) -> Option<EndedRegistration> {
+        self.membership.write().end(running)
+    }
+
+    pub(super) fn begin_advertised_model_update(
+        &self,
+        running: &RunningRegistration,
+        advertised_models: BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let mut membership = self.membership.write();
+        let registration = &running.0;
+        let (added, removed) = {
+            let record = membership.running_record_mut(registration);
+            record.models.begin_update(advertised_models)
+        };
+        membership.remove_advertised_targets(&registration.identity.routing_key, &removed);
+        membership.add_advertised_targets(&registration.identity.routing_key, &added);
+        removed
+    }
+
+    pub(super) fn finish_advertised_model_update(&self, running: &RunningRegistration) {
+        let mut membership = self.membership.write();
+        let record = membership.running_record_mut(&running.0);
+        record.models.finish_update();
+    }
+
+    #[cfg(test)]
+    pub(super) fn cleanup_model_ids(&self, running: &RunningRegistration) -> BTreeSet<String> {
+        let membership = self.membership.read();
+        let record = membership
+            .registrations_by_id
+            .get(&running.0.identity.inference_server_id)
+            .expect("running registration must remain indexed for cleanup inspection");
+        assert!(
+            Arc::ptr_eq(&record.state, &running.0),
+            "cleanup inspection must target the exact running registration"
+        );
+        record.models.cleanup_model_ids()
+    }
+
+    pub(super) fn has_registered_model_for_target(&self, target: &RoutingTargetKey) -> bool {
+        self.membership
+            .read()
+            .advertised_targets
+            .contains_key(target)
+    }
+
+    pub(super) fn reverse_tunnel_registration(
+        &self,
+        inference_server_id: &str,
+    ) -> Option<Arc<RegistrationGeneration>> {
+        let membership = self.membership.read();
+        membership
+            .registrations_by_id
+            .get(inference_server_id)
+            .filter(|record| record.state.identity.reverse_tunnel)
+            .map(|record| record.state.clone())
     }
 }
 
 impl RegistrationMembership {
-    fn begin_registration(
-        &mut self,
-        identity: &RegistrationIdentity,
-    ) -> Result<RunningRegistration, Status> {
-        if let Some(existing) = self.registrations_by_id.get(&identity.inference_server_id) {
-            return Err(duplicate_registration_status(
-                &identity.inference_server_id,
-                &existing.state,
-            ));
-        }
+    fn begin(&mut self, identity: &RegistrationIdentity) -> Result<RunningRegistration, Status> {
+        let RegistrationMembership {
+            registrations_by_id,
+            active_clusters,
+            ..
+        } = self;
+        let registration_entry =
+            match registrations_by_id.entry(identity.inference_server_id.clone()) {
+                Entry::Occupied(existing) => {
+                    let existing = &existing.get().state;
+                    warn!(
+                        inference_server_id = %identity.inference_server_id,
+                        existing_url = %existing.identity.inference_server_url,
+                        existing_reverse_tunnel = existing.identity.reverse_tunnel,
+                        "duplicate inference_server_id: another stream already registered this id"
+                    );
+                    return Err(Status::already_exists(format!(
+                        "inference_server_id '{}' is already registered",
+                        identity.inference_server_id
+                    )));
+                }
+                Entry::Vacant(vacant) => vacant,
+            };
 
-        let cluster_key = RegistrationClusterKey::from_identity(identity);
-        let cluster_generation = match self.active_clusters.entry(cluster_key) {
+        let cluster_key =
+            RegistrationClusterKey(identity.routing_key.clone(), identity.cluster_id.clone());
+        let cluster_generation = match active_clusters.entry(cluster_key) {
             Entry::Occupied(mut existing) => {
                 let cluster = existing.get_mut();
                 cluster.registration_count = cluster
@@ -232,7 +271,7 @@ impl RegistrationMembership {
                 cluster.generation.clone()
             }
             Entry::Vacant(vacant) => {
-                let generation = Arc::new(RegistrationClusterGeneration::new());
+                let generation = Arc::new(RegistrationClusterGeneration::default());
                 vacant.insert(ActiveRegistrationCluster {
                     generation: generation.clone(),
                     registration_count: 1,
@@ -245,71 +284,57 @@ impl RegistrationMembership {
             cluster_generation,
             tunnel_connections: RegistrationConnections::new(),
         });
-        let replaced = self.registrations_by_id.insert(
-            identity.inference_server_id.clone(),
-            RegistrationRecord {
-                state: state.clone(),
-                models: RegisteredModelState::Stable(BTreeSet::new()),
-            },
-        );
-        assert!(
-            replaced.is_none(),
-            "duplicate registration inserted after exact-id check"
-        );
-        Ok(RunningRegistration { state })
+        registration_entry.insert(RegistrationRecord {
+            state: state.clone(),
+            models: RegisteredModelState::Stable(BTreeSet::new()),
+        });
+        Ok(RunningRegistration(state))
     }
 
-    fn end_registration(&mut self, running: RunningRegistration) -> Option<EndedRegistration> {
-        let registration = running.into_registration_generation();
+    fn end(&mut self, running: RunningRegistration) -> Option<EndedRegistration> {
+        let registration = running.0;
         let inference_server_id = &registration.identity.inference_server_id;
-        let current = self.registrations_by_id.get(inference_server_id)?;
-        if !Arc::ptr_eq(&current.state, &registration) {
-            return None;
-        }
+        self.registrations_by_id
+            .get(inference_server_id)
+            .filter(|current| Arc::ptr_eq(&current.state, &registration))?;
 
         let removed = self
             .registrations_by_id
             .remove(inference_server_id)
             .expect("exact registration should remain present until removal");
+
         self.remove_advertised_targets(
             &registration.identity.routing_key,
-            removed.models.advertised_models(),
+            match &removed.models {
+                RegisteredModelState::Stable(models)
+                | RegisteredModelState::Applying {
+                    advertised: models, ..
+                } => models,
+            },
         );
         let cleanup_model_ids = removed.models.cleanup_model_ids();
 
-        let cluster_key = RegistrationClusterKey::from_identity(&registration.identity);
-        let remove_cluster = {
-            let cluster = self
-                .active_clusters
-                .get_mut(&cluster_key)
-                .expect("live registration must retain its active cluster generation");
-            assert!(
-                Arc::ptr_eq(&cluster.generation, &registration.cluster_generation),
-                "active cluster entry must match exact registration generation"
-            );
-            if cluster.registration_count == 1 {
-                cluster.generation.retire();
-                true
-            } else {
-                cluster.registration_count = cluster
-                    .registration_count
-                    .checked_sub(1)
-                    .expect("registration cluster generation count underflow");
-                false
-            }
+        let cluster_key = RegistrationClusterKey(
+            registration.identity.routing_key.clone(),
+            registration.identity.cluster_id.clone(),
+        );
+        let Entry::Occupied(mut cluster_entry) = self.active_clusters.entry(cluster_key) else {
+            panic!("live registration must retain its active cluster generation");
         };
-        if remove_cluster {
-            let removed_cluster = self
-                .active_clusters
-                .remove(&cluster_key)
-                .expect("final registration must remove its active cluster entry");
-            assert!(
-                Arc::ptr_eq(
-                    &removed_cluster.generation,
-                    &registration.cluster_generation
-                ),
-                "removed cluster entry must match exact registration generation"
-            );
+
+        let cluster = cluster_entry.get_mut();
+        assert!(
+            Arc::ptr_eq(&cluster.generation, &registration.cluster_generation),
+            "active cluster entry must match exact registration generation"
+        );
+        if cluster.registration_count == 1 {
+            cluster.generation.retire();
+            cluster_entry.remove();
+        } else {
+            cluster.registration_count = cluster
+                .registration_count
+                .checked_sub(1)
+                .expect("registration cluster generation count underflow");
         }
 
         Some(EndedRegistration {
@@ -317,74 +342,19 @@ impl RegistrationMembership {
             cleanup_model_ids,
         })
     }
-
-    fn begin_advertised_model_update(
+    fn running_record_mut(
         &mut self,
         registration: &Arc<RegistrationGeneration>,
-        advertised_models: BTreeSet<String>,
-    ) -> BTreeSet<String> {
-        let inference_server_id = &registration.identity.inference_server_id;
-        let update = {
-            let record = self
-                .registrations_by_id
-                .get_mut(inference_server_id)
-                .expect("running registration must remain indexed during model update");
-            assert!(
-                Arc::ptr_eq(&record.state, registration),
-                "model update must target the exact running registration"
-            );
-            record.models.begin_update(advertised_models)
-        };
-        self.remove_advertised_targets(&registration.identity.routing_key, &update.removed);
-        self.add_advertised_targets(&registration.identity.routing_key, &update.added);
-        update.removed
-    }
-
-    fn finish_advertised_model_update(&mut self, registration: &Arc<RegistrationGeneration>) {
-        let inference_server_id = &registration.identity.inference_server_id;
+    ) -> &mut RegistrationRecord {
         let record = self
             .registrations_by_id
-            .get_mut(inference_server_id)
-            .expect("running registration must remain indexed when model update finishes");
+            .get_mut(&registration.identity.inference_server_id)
+            .expect("running registration must remain indexed during model update");
         assert!(
             Arc::ptr_eq(&record.state, registration),
-            "finished model update must target the exact running registration"
+            "model update must target the exact running registration"
         );
-        record.models.finish_update();
-    }
-
-    fn cluster_generation_for_submission(
-        &self,
-        routing_key: Option<String>,
-        request: &SubmitClusterCalibrationRequest,
-    ) -> Option<Arc<RegistrationClusterGeneration>> {
-        if let Some(record) = self.registrations_by_id.get(&request.inference_server_id)
-            && record.state.identity.routing_key == routing_key
-            && record.state.identity.cluster_id == request.cluster_id
-        {
-            return Some(record.state.cluster_generation.clone());
-        }
-        self.active_clusters
-            .get(&RegistrationClusterKey::from_submission(
-                routing_key,
-                request,
-            ))
-            .map(|cluster| cluster.generation.clone())
-    }
-
-    fn has_registered_model_for_target(&self, target: &RoutingTargetKey) -> bool {
-        self.advertised_targets.contains_key(target)
-    }
-
-    fn reverse_tunnel_registration(
-        &self,
-        inference_server_id: &str,
-    ) -> Option<Arc<RegistrationGeneration>> {
-        let registration = &self.registrations_by_id.get(inference_server_id)?.state;
-        registration
-            .identity
-            .reverse_tunnel
-            .then(|| registration.clone())
+        record
     }
 
     fn add_advertised_targets(
@@ -393,10 +363,7 @@ impl RegistrationMembership {
         model_ids: &BTreeSet<String>,
     ) {
         for model_id in model_ids {
-            let target = RoutingTargetKey {
-                routing_key: routing_key.clone(),
-                model_id: model_id.clone(),
-            };
+            let target = RoutingTargetKey::new(routing_key.clone(), model_id);
             let advertiser_count = self.advertised_targets.entry(target).or_default();
             *advertiser_count = advertiser_count
                 .checked_add(1)
@@ -410,107 +377,17 @@ impl RegistrationMembership {
         model_ids: &BTreeSet<String>,
     ) {
         for model_id in model_ids {
-            let target = RoutingTargetKey {
-                routing_key: routing_key.clone(),
-                model_id: model_id.clone(),
-            };
-            match self.advertised_targets.entry(target) {
-                Entry::Occupied(existing) if *existing.get() == 1 => {
-                    existing.remove();
-                }
-                Entry::Occupied(mut existing) => {
-                    *existing.get_mut() = existing
-                        .get()
-                        .checked_sub(1)
-                        .expect("registered target advertiser count underflow");
-                }
-                Entry::Vacant(_) => {
-                    panic!("registered target advertiser removed without active membership");
-                }
+            let target = RoutingTargetKey::new(routing_key.clone(), model_id);
+            let advertiser_count = self.advertised_targets.get_mut(&target).unwrap_or_else(|| {
+                panic!("registered target advertiser removed without active membership")
+            });
+            *advertiser_count = advertiser_count
+                .checked_sub(1)
+                .expect("registered target advertiser count underflow");
+            if *advertiser_count == 0 {
+                self.advertised_targets.remove(&target);
             }
         }
-    }
-}
-
-impl RegistrationRegistry {
-    pub(super) fn begin_registration(
-        &self,
-        identity: &RegistrationIdentity,
-    ) -> Result<RunningRegistration, Status> {
-        self.membership.write().begin_registration(identity)
-    }
-
-    pub(super) fn end_registration(
-        &self,
-        running: RunningRegistration,
-    ) -> Option<EndedRegistration> {
-        self.membership.write().end_registration(running)
-    }
-
-    pub(super) fn begin_advertised_model_update(
-        &self,
-        running: &RunningRegistration,
-        advertised_models: BTreeSet<String>,
-    ) -> BTreeSet<String> {
-        self.membership
-            .write()
-            .begin_advertised_model_update(&running.state, advertised_models)
-    }
-
-    pub(super) fn finish_advertised_model_update(&self, running: &RunningRegistration) {
-        self.membership
-            .write()
-            .finish_advertised_model_update(&running.state);
-    }
-
-    #[cfg(test)]
-    pub(super) fn cleanup_model_ids(&self, running: &RunningRegistration) -> BTreeSet<String> {
-        let membership = self.membership.read();
-        let record = membership
-            .registrations_by_id
-            .get(&running.state.identity.inference_server_id)
-            .expect("running registration must remain indexed for cleanup inspection");
-        assert!(
-            Arc::ptr_eq(&record.state, &running.state),
-            "cleanup inspection must target the exact running registration"
-        );
-        record.models.cleanup_model_ids()
-    }
-
-    pub(super) async fn submit_cluster_calibration(
-        &self,
-        routing_key: Option<String>,
-        request: &SubmitClusterCalibrationRequest,
-    ) -> Result<(), Status> {
-        validate_cluster_calibration_submission(request)?;
-        let cluster_generation = {
-            let membership = self.membership.read();
-            membership.cluster_generation_for_submission(routing_key, request)
-        };
-        let Some(cluster_generation) = cluster_generation else {
-            return Err(Status::failed_precondition(
-                "cluster calibration has no active local assignment",
-            ));
-        };
-        cluster_generation
-            .calibrations
-            .submit_validated(request)
-            .await
-    }
-
-    pub(super) fn has_registered_model_for_target(&self, target: &RoutingTargetKey) -> bool {
-        self.membership
-            .read()
-            .has_registered_model_for_target(target)
-    }
-
-    pub(super) fn reverse_tunnel_registration(
-        &self,
-        inference_server_id: &str,
-    ) -> Option<Arc<RegistrationGeneration>> {
-        self.membership
-            .read()
-            .reverse_tunnel_registration(inference_server_id)
     }
 }
 
@@ -520,7 +397,7 @@ pub(crate) fn test_registration_generation(
 ) -> Arc<RegistrationGeneration> {
     test_registration_generation_in_cluster(
         identity,
-        Arc::new(RegistrationClusterGeneration::new()),
+        Arc::new(RegistrationClusterGeneration::default()),
     )
 }
 
@@ -534,20 +411,4 @@ pub(super) fn test_registration_generation_in_cluster(
         cluster_generation,
         tunnel_connections: RegistrationConnections::new(),
     })
-}
-
-pub(super) fn duplicate_registration_status(
-    inference_server_id: &str,
-    existing: &Arc<RegistrationGeneration>,
-) -> Status {
-    warn!(
-        inference_server_id = %inference_server_id,
-        existing_url = %existing.identity.inference_server_url,
-        existing_reverse_tunnel = existing.identity.reverse_tunnel,
-        "duplicate inference_server_id: another stream already registered this id"
-    );
-    Status::already_exists(format!(
-        "inference_server_id '{}' is already registered",
-        inference_server_id
-    ))
 }
