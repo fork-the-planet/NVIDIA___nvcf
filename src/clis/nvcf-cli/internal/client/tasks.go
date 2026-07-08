@@ -263,6 +263,13 @@ func (c *Client) makeNVCTRequest(ctx context.Context, method, endpoint string, b
 	}
 	req.Header.Set("Accept", "application/json")
 
+	// Host header override for hostname-based gateway routing (self-hosted),
+	// letting base_nvct_url use a bare gateway address while the gateway still
+	// routes on Host: tasks.<domain>.
+	if c.config.NVCTHost != "" {
+		req.Host = c.config.NVCTHost
+	}
+
 	httpClient := c.httpClient
 	if c.nvctHTTPClient != nil {
 		httpClient = c.nvctHTTPClient

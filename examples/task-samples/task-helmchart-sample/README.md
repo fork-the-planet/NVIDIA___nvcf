@@ -12,7 +12,7 @@ Build and push the `task-simple-sample` container to an OCI registry your self-h
 helm package task-helmchart-test/
 ```
 
-Push the resulting `task-helmchart-test-<version>.tgz` to a chart registry your cluster can pull from (for example `nvcr.io`) and register Helm pull credentials with `nvcf-cli registry add --artifact-type HELM`.
+Push the resulting `task-helmchart-test-<version>.tgz` to a chart registry your cluster can pull from (for example `nvcr.io`) and register Helm pull credentials with `nvcf-cli registry-credential add --artifact-type HELM`.
 
 ## Launch on self-hosted NVCF
 

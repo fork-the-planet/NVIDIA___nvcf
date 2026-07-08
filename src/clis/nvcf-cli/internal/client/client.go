@@ -89,6 +89,7 @@ type Config struct {
 	APIHost    string // Host header for NVCF API requests (e.g., "api.gateway.example.com")
 	InvokeHost string // Host header for invocation requests (e.g., "invocation.gateway.example.com")
 	ICMSHost   string // Host header for SIS/ICMS requests; allows pairing icms_url=http://<bare-elb> with Host: sis.<elb> for gateway-routed self-hosted deployments where sis.<elb> does not DNS-resolve.
+	NVCTHost   string // Host header for NVCT (task) API requests; allows pairing base_nvct_url=http://<bare-gateway> with Host: tasks.<domain> for gateway-routed self-hosted deployments where tasks.<domain> does not DNS-resolve.
 
 	// TLSConfig, when set, establishes the management-API TLS trust (R-4):
 	// system roots or a configured CA bundle. It is applied to the HTTP transport
@@ -222,6 +223,7 @@ func LoadConfig() (*Config, error) {
 		APIHost:    getConfigValue("api_host"),
 		InvokeHost: getConfigValue("invoke_host"),
 		ICMSHost:   getConfigValue("icms_host"),
+		NVCTHost:   getConfigValue("nvct_host"),
 
 		// Cluster mode configuration (deprecated, always false)
 		ClusterMode:    false,
@@ -380,6 +382,7 @@ func LoadConfigWithoutAuth() (*Config, error) {
 		APIHost:    getConfigValue("api_host"),
 		InvokeHost: getConfigValue("invoke_host"),
 		ICMSHost:   getConfigValue("icms_host"),
+		NVCTHost:   getConfigValue("nvct_host"),
 
 		// Cluster mode configuration (deprecated, always false)
 		ClusterMode:    false,

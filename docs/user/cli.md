@@ -160,6 +160,10 @@ base_grpc_url: "<GRPC_GATEWAY_ADDR>:10081"
 # API Keys service endpoint
 api_keys_service_url: "http://<GATEWAY_ADDR>"
 
+# NVCT (task) API endpoint. Required for `nvcf-cli task` commands; without it the
+# CLI falls back to the production URL and requests fail with 403.
+base_nvct_url: "http://<GATEWAY_ADDR>"
+
 # ==============================================================================
 # Host Header Overrides (Required for Hostname-Based Routing)
 # ==============================================================================
@@ -178,6 +182,9 @@ api_host: "api.<STACK_DOMAIN>"
 
 # Host header for Invocation service
 invoke_host: "invocation.<STACK_DOMAIN>"
+
+# Host header for NVCT (task) API
+nvct_host: "tasks.<STACK_DOMAIN>"
 
 # ==============================================================================
 # API Keys Service Configuration

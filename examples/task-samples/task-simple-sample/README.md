@@ -8,7 +8,7 @@ Minimal NVCT task that writes progress updates to `${NVCT_PROGRESS_FILE_PATH}` u
 docker buildx build --platform linux/amd64,linux/arm64 -t task-simple-sample .
 ```
 
-Push the image to an OCI registry your self-hosted NVCF cluster can access and register pull credentials with `nvcf-cli registry add`. See [examples/README.md](../../README.md#publishing-container-images) for the full flow.
+Push the image to an OCI registry your self-hosted NVCF cluster can access and register pull credentials with `nvcf-cli registry-credential add`. See [examples/README.md](../../README.md#publishing-container-images) for the full flow.
 
 ## Run the sample locally
 

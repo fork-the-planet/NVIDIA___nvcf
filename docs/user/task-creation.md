@@ -29,15 +29,13 @@ different purposes:
 
 ## Result handling
 
-Tasks can upload outputs to a model registry location when they complete.
-Set `resultHandlingStrategy` to `UPLOAD` and provide a `resultsLocation` in
-the form `org/[team/]model-name`. The results are then accessible via
-`nvcf-cli task results`.
+Result upload to a model registry is not supported on self-hosted NVCF in this
+release.
 
-Set `resultHandlingStrategy` to `NONE` (the default) when the task writes
-outputs elsewhere or does not need registry upload.
-
-Note: result upload is not yet supported in this release.
+`resultHandlingStrategy` defaults to `UPLOAD` when it is omitted, not `NONE`.
+Because `UPLOAD` requires registry secrets and a `resultsLocation`, a task
+created without those is rejected with a missing-secrets error. On self-hosted,
+set `resultHandlingStrategy` to `NONE` so the task runs without registry upload.
 
 ## Authentication
 

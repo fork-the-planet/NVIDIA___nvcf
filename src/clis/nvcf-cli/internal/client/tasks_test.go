@@ -133,6 +133,48 @@ func TestMakeNVCTRequestFallsBackToDefaultClient(t *testing.T) {
 	}
 }
 
+// TestMakeNVCTRequestSetsHostHeaderOverride verifies that nvct_host rewrites the
+// Host header so base_nvct_url can point at a bare gateway address.
+func TestMakeNVCTRequestSetsHostHeaderOverride(t *testing.T) {
+	var gotHost string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"tasks":[]}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{
+		config:     &Config{BaseNVCTURL: srv.URL, NVCTHost: "tasks.example.com"},
+		httpClient: srv.Client(),
+	}
+	_, _ = c.makeNVCTRequest(context.Background(), "GET", "/v1/nvct/tasks", nil)
+	if gotHost != "tasks.example.com" {
+		t.Errorf("expected Host override 'tasks.example.com', got %q", gotHost)
+	}
+}
+
+// TestMakeNVCTRequestNoHostOverride verifies the Host header is left as the URL
+// host when nvct_host is not set.
+func TestMakeNVCTRequestNoHostOverride(t *testing.T) {
+	var gotHost string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"tasks":[]}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{
+		config:     &Config{BaseNVCTURL: srv.URL},
+		httpClient: srv.Client(),
+	}
+	_, _ = c.makeNVCTRequest(context.Background(), "GET", "/v1/nvct/tasks", nil)
+	if wantHost := strings.TrimPrefix(srv.URL, "http://"); gotHost != wantHost {
+		t.Errorf("expected Host %q, got %q", wantHost, gotHost)
+	}
+}
+
 func TestCreateTaskValidation(t *testing.T) {
 	c := newNVCTTestClient(httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("server should not be invoked when validation fails: %s %s", r.Method, r.URL.Path)
