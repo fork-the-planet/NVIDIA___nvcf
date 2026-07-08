@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("//rules/oci:defs.bzl", "go_oci_image")
 
 go_binary(
     name = "cmd",
@@ -12,4 +13,12 @@ go_library(
     importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/worker-llm-credentials/cmd",
     visibility = ["//visibility:private"],
     deps = ["//service"],
+)
+
+go_oci_image(
+    name = "image",
+    base = "@distroless_go",
+    binary = ":cmd",
+    tags = ["nvcf-worker-llm-credentials"],
+    visibility = ["//visibility:public"],
 )
