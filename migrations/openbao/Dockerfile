@@ -34,7 +34,7 @@ RUN apk add --no-cache "kubectl=${KUBECTL_APK_VERSION}" && \
     cp /usr/bin/kubectl /out/kubectl && \
     chmod +x /out/kubectl
 
-FROM openbao/openbao:2.5.4
+FROM openbao/openbao:2.5.5
 
 # Install runtime dependencies and copy verified tools from downloader stages.
 RUN apk add --no-cache openssl uuidgen helm curl bash jq

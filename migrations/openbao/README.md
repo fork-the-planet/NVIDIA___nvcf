@@ -40,7 +40,7 @@ The shipped `job.yaml` sets a default placeholder value for this variable so the
 
 ## Building the container
 
-The `Dockerfile` uses the public upstream OpenBao image (`openbao/openbao:2.5.4`) as the base. To use a different base, edit the `FROM` line directly.
+The `Dockerfile` uses the public upstream OpenBao image (`openbao/openbao:2.5.5`) as the base. To use a different base, edit the `FROM` line directly.
 `kubectl` is installed from Alpine's signed package repository and pinned with `KUBECTL_APK_VERSION`.
 
 ```bash
