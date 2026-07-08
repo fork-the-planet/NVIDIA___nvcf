@@ -113,7 +113,7 @@ register_toolchains(
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(
     name = "distroless_go",
-    digest = "sha256:6be4473eca4e8a5fdf8d7103a4d35708f5538bb5f7a58f0d12a257bdf362334f",
+    digest = "sha256:d8dce9196ddb44921bc018cc240992850e7b7a46e76cc982555f8c80763507b6",
     image = "urm.nvidia.com/sw-gpu-ucs-hardened-docker/distroless/go",
     platforms = [
         "linux/amd64",

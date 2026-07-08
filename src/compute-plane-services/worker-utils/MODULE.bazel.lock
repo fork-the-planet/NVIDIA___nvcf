@@ -295,7 +295,7 @@
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
         "bzlTransitiveDigest": "qGzrjxshR+J4OqW/IYdHPjWbclbeUFswL6msJ9ALGOg=",
-        "usagesDigest": "x2LuGWou1MqMADnYyfrtyeqUDQwEBsEVLylPXtGyWpI=",
+        "usagesDigest": "LvaQg43NG0lyzSfy+f0wlzo0NNH32C2YqZ0NWPwDPMw=",
         "recordedInputs": [
           "REPO_MAPPING:aspect_bazel_lib+,bazel_tools bazel_tools",
           "REPO_MAPPING:bazel_features+,bazel_tools bazel_tools",
@@ -313,7 +313,7 @@
               "scheme": "https",
               "registry": "urm.nvidia.com",
               "repository": "sw-gpu-ucs-hardened-docker/distroless/go",
-              "identifier": "sha256:6be4473eca4e8a5fdf8d7103a4d35708f5538bb5f7a58f0d12a257bdf362334f",
+              "identifier": "sha256:d8dce9196ddb44921bc018cc240992850e7b7a46e76cc982555f8c80763507b6",
               "platform": "linux/amd64",
               "target_name": "distroless_go_linux_amd64",
               "bazel_tags": []
@@ -328,7 +328,7 @@
               "scheme": "https",
               "registry": "urm.nvidia.com",
               "repository": "sw-gpu-ucs-hardened-docker/distroless/go",
-              "identifier": "sha256:6be4473eca4e8a5fdf8d7103a4d35708f5538bb5f7a58f0d12a257bdf362334f",
+              "identifier": "sha256:d8dce9196ddb44921bc018cc240992850e7b7a46e76cc982555f8c80763507b6",
               "platform": "linux/arm64/v8",
               "target_name": "distroless_go_linux_arm64_v8",
               "bazel_tags": []
@@ -344,7 +344,7 @@
               "scheme": "https",
               "registry": "urm.nvidia.com",
               "repository": "sw-gpu-ucs-hardened-docker/distroless/go",
-              "identifier": "sha256:6be4473eca4e8a5fdf8d7103a4d35708f5538bb5f7a58f0d12a257bdf362334f",
+              "identifier": "sha256:d8dce9196ddb44921bc018cc240992850e7b7a46e76cc982555f8c80763507b6",
               "platforms": {
                 "@@platforms//cpu:x86_64": "@distroless_go_linux_amd64",
                 "@@platforms//cpu:arm64": "@distroless_go_linux_arm64_v8"
