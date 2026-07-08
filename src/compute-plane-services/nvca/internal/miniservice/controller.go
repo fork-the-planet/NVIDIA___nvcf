@@ -61,6 +61,7 @@ import (
 	nvcav1alpha1 "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/apis/nvca/v1alpha1"
 	nvcav2beta1 "github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/apis/nvca/v2beta1"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/featureflag"
+	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/miniservice"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nodefeatures"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/nvca/enforce"
 	"github.com/NVIDIA/nvcf/src/compute-plane-services/nvca/pkg/profiling"
@@ -191,8 +192,7 @@ func BuildController(ctx context.Context,
 		gvkCache:          gvkc,
 		now:               time.Now,
 		newImpersonatingClient: func(namespace string) (client.Client, error) {
-			const userNameFormat = "system:serviceaccount:%s:" + serviceAccountName
-			username := fmt.Sprintf(userNameFormat, namespace)
+			username := miniservice.InstanceServiceAccountUsername(namespace)
 			cfg := rest.CopyConfig(mgr.GetConfig())
 			cfg.Impersonate = rest.ImpersonationConfig{UserName: username}
 			c, err := client.New(cfg, client.Options{

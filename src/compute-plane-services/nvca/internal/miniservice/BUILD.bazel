@@ -39,6 +39,7 @@ go_library(
         "//pkg/apis/nvca/v2beta1",
         "//pkg/dra",
         "//pkg/featureflag",
+        "//pkg/miniservice",
         "//pkg/nodefeatures",
         "//pkg/nvca/enforce",
         "//pkg/nvca/enforce/kaischeduler",
