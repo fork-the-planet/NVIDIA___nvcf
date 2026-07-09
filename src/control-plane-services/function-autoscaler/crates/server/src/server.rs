@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tracing_settings = config.server.tracing.clone();
     if let Some(tracing_key) = tracing_key {
-        // Ensure headers is initialized to a default HashMap if None
+        // Preserve configured tracing headers while replacing the token placeholder.
         let headers = tracing_settings.headers.get_or_insert_with(HashMap::new);
         headers.insert("lightstep-access-token".to_string(), tracing_key.access_key);
     }
