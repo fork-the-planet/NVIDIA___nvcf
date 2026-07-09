@@ -81,7 +81,10 @@ pub struct NodeHealth {
 pub struct DistributedLockResult {
     #[scylla(rename = "[applied]")]
     pub applied: bool,
-    pub lock_name: String,
-    pub node_id: String,
-    pub acquired_at: DateTime<Utc>,
+    // Conditional writes return the existing row when they are not applied.
+    // Lock columns carry independent TTLs in Cassandra and can therefore be
+    // null while a different column still keeps the row alive.
+    pub lock_name: Option<String>,
+    pub node_id: Option<String>,
+    pub acquired_at: Option<DateTime<Utc>>,
 }

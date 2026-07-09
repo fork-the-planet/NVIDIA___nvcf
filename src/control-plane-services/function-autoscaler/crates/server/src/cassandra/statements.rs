@@ -165,12 +165,13 @@ pub(crate) fn get_stmt_insert_to_locks(keyspace: &str) -> String {
 }
 
 // LWT conditional update — only refreshes TTL if node_id still matches this node.
-// CQL UPDATE requires a SET clause; we set node_id to itself as a no-op.
+// Refresh every non-key lock column so Cassandra's per-cell TTL semantics
+// cannot leave a partially expired row behind.
 // Returns [applied]=true if the row was updated, false if another node now owns the lock.
-// Bind order: (ttl_seconds, node_id, lock_name, node_id)
+// Bind order: (ttl_seconds, node_id, acquired_at, lock_name, node_id)
 pub(crate) fn get_stmt_refresh_lock(keyspace: &str) -> String {
     format!(
-        "UPDATE {}.locks USING TTL ? SET node_id = ? WHERE lock_name = ? IF node_id = ?",
+        "UPDATE {}.locks USING TTL ? SET node_id = ?, acquired_at = ? WHERE lock_name = ? IF node_id = ?",
         keyspace,
     )
 }
@@ -241,4 +242,17 @@ pub(crate) fn get_stmt_str_insert_to_running_functions_without_invocations_histo
          VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL {}",
         keyspace, ttl_seconds
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_stmt_refresh_lock;
+
+    #[test]
+    fn refresh_lock_renews_every_non_key_column() {
+        let statement = get_stmt_refresh_lock("test_keyspace");
+
+        assert!(statement.contains("SET node_id = ?, acquired_at = ?"));
+        assert!(statement.contains("IF node_id = ?"));
+    }
 }

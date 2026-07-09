@@ -244,7 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timeseries_db_env_discover = config.timeseries_db.env.clone();
     let timeseries_db_ignore_env = config.timeseries_db.ignore_env;
     let lock_manager_discover = Arc::clone(&lock_manager);
-    tokio::spawn(async move {
+    let discovery_task = tokio::spawn(async move {
         let jitter_millis = rand::rng().random_range(0..5000);
         let discovery_interval =
             config.scaling.discover_new_functions_interval + Duration::from_millis(jitter_millis);
@@ -340,9 +340,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Listening on {}", addr);
 
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    let server =
+        axum::serve(listener, app.into_make_service()).with_graceful_shutdown(shutdown_signal);
+
+    tokio::select! {
+        result = server => result?,
+        result = discovery_task => {
+            let message = match result {
+                Ok(()) => "function discovery task exited unexpectedly".to_string(),
+                Err(error) => format!("function discovery task failed: {error}"),
+            };
+            tracing::error!("{message}");
+            return Err(std::io::Error::other(message).into());
+        }
+    }
 
     tracing::warn!("Server terminated");
     Ok(())
