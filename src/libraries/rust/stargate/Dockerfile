@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG GRPC_HEALTH_PROBE_VERSION=v0.4.38
+ARG GRPC_HEALTH_PROBE_VERSION=v0.4.53
 
 ##########################################
 ##### COMMON BUILDER STAGE (BUILDPLATFORM)
