@@ -1,5 +1,43 @@
 # NVSNAP Checkpoint/Restore Benchmarks
 
+## Warm cache restore (cachedir), June 2026
+
+Cluster: GKE, H100 80GB (1-8x per workload), kernel 6.x. Restore reads the
+captured model and JIT/compile cache from a ReadOnlyMany volume. The cache
+directory is set to one canonical path (`/opt/nvsnap`) identically at capture
+and restore, so engines reuse prebuilt kernels and graphs instead of
+recompiling.
+
+| Model | Engine | Cold | Restore | Speedup |
+|---|---|---:|---:|---:|
+| DeepSeek-V4-Flash | SGLang TP=8 | 1162 s | 289 s | 4.0x |
+| gemma-4-31B-it | SGLang | 492 s | 109 s | 4.5x |
+| gpt-oss-120b | vLLM TP=4 | ~550 s | 171 s | 3.2x |
+| Qwen3.6-35B-A3B (NVFP4) | vLLM TP=4 | 410 s | 218 s | 1.9x |
+| Nemotron-3-Nano-30B-A3B (FP8) | vLLM TP=2 | 370 s | 144 s | 2.6x |
+| Qwen-Image-2512 | vLLM | 198 s | 114 s | 1.7x |
+| e5-mistral-7b-instruct | vLLM | 73 s | 90 s | -- |
+| whisper-large-v3 | NIM (Riva) | 72 s | 74 s | -- |
+
+Wins scale with the cold JIT/compile cost; neutral on compile-light and
+framework-bound workloads. Two implementation details enable the cache reuse:
+
+- Preserve file mtimes on the capture copy (`internal/treecopy`): ninja-based
+  SGLang kernel caches key reuse on mtime, so a normalized copy forces a full
+  kernel recompile (DeepSeek CUDA-graph capture 383 s vs 38 s with mtimes
+  preserved).
+- Do not set `HF_HUB_OFFLINE` on restore: it makes vLLM rewrite `--model` to
+  the resolved path, which changes the `torch.compile` config hash relative to
+  capture and misses the compile cache (gpt-oss torch.compile 19.8 s vs 4.6 s).
+
+Phase breakdown, Qwen3.6-35B-A3B (cold vs warm): model download 269 s to ~5 s,
+model init 128 s to ~32 s (torch.compile 53.5 s to 5.8 s, "directly load
+compiled graph from cache"). The remaining warm time is the fixed process
+bring-up floor (scheduling, framework import, CUDA init, tensor-parallel
+worker spawn) that both cold and warm starts pay; cachedir compresses the
+disk work, not live process initialization.
+
+
 ## Environment
 
 - **Cluster**: example-gpu-cluster (GKE)
@@ -108,8 +146,8 @@
 
 ### Llama-3.1-70B-Instruct (TP=4, 4x H100)
 
-Multi-GPU uses the rootfs cache-distribution path (process-level multi-GPU
-restore is blocked upstream). Measured: cold start 332 s; rootfs capture
-133 GiB; cache-warm restore 180 s (~1.8× vs cold). See the
-[README benchmarks](../README.md#benchmarks) and
-[PDF-BENCH-RESULTS.md](PDF-BENCH-RESULTS.md) for the current matrix.
+Multi-GPU uses the cachedir path (process-level multi-GPU restore is
+blocked upstream). Measured: cold start 332 s; cache capture 133 GiB;
+cache-warm restore 180 s (~1.8x vs cold). Superseded by the June 2026
+warm-cache matrix at the top of this document; see also
+[PDF-BENCH-RESULTS.md](PDF-BENCH-RESULTS.md).

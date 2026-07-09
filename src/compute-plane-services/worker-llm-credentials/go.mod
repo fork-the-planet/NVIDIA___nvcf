@@ -3,8 +3,8 @@ module github.com/NVIDIA/nvcf/src/compute-plane-services/worker-llm-credentials
 go 1.25.0
 
 require (
-	github.com/NVIDIA/nvcf/src/libraries/go/lib v0.0.0-20260709073524-72781c61e05c
-	github.com/NVIDIA/nvcf/src/libraries/go/worker v0.0.0-20260709073524-72781c61e05c
+	github.com/NVIDIA/nvcf/src/libraries/go/lib v0.0.0-20260709144535-101417ace355
+	github.com/NVIDIA/nvcf/src/libraries/go/worker v0.0.0-20260709144535-101417ace355
 	github.com/samber/lo v1.51.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10

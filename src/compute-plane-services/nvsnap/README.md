@@ -1,19 +1,26 @@
 # NvSnap
 
-**Application-transparent GPU checkpoint/restore for Kubernetes.**
+**GPU checkpoint/restore for Kubernetes. Start large models warm, not cold.**
 
-NvSnap captures a running GPU inference pod — process state *and* GPU
-memory — and restores it on another node with a fully warm engine: no
-model reload, no compilation-cache rebuild, no warm-up queries. It works
-on **unmodified** inference containers (NVIDIA NIM, vLLM, SGLang,
-TensorRT-LLM) — no application changes, no custom images.
+NvSnap captures a warmed GPU inference pod and restores it on any node with
+the expensive work already done: no model download, no weight reload, no
+kernel or graph recompilation, and, for single-GPU workloads, no engine
+re-initialization at all. It works on **unmodified** inference containers
+(NVIDIA NIM, vLLM, SGLang, TensorRT-LLM): no application changes, no custom
+images, no SDK.
 
-The goal is faster cold starts for large GPU workloads. Restoring a warm
-checkpoint avoids the model download, weight load, CUDA-graph capture, and
-JIT/compile costs that dominate a cold start.
+> **DeepSeek-V4-Flash (SGLang, TP=8): serving in 289 s instead of 1162 s.**
+> gemma-4-31B 4.5x, gpt-oss-120b 3.2x, NVFP4/FP8 MoE models 1.9-2.6x.
+> [Benchmarks](#benchmarks).
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Kubernetes](https://img.shields.io/badge/kubernetes-1.25%2B-326ce5.svg)
+
+**Why it works:** GPU cold starts are dominated by repeatable work: weight
+download, model load, CUDA graph capture, JIT and torch.compile. NvSnap does
+that work once, captures the result, and distributes it: same-node cache,
+shared ReadOnlyMany volume, peer-to-peer cascade (every node that restores
+becomes a source), and object store for cross-cluster.
 
 ---
 
@@ -22,16 +29,17 @@ JIT/compile costs that dominate a cold start.
 NvSnap picks one of two capture paths automatically, based on the
 workload:
 
-- **Single-GPU — full process checkpoint/restore.** CRIU plus NVIDIA
+- **Warm cache restore (cachedir), any GPU count.** NvSnap captures the
+  warm pod's model and JIT/compile caches into one canonical cache
+  directory and mounts it read-only on restore. Engines skip the weight
+  download and reuse prebuilt kernels, graphs, and compile caches. This is
+  the path behind the headline numbers above.
+- **Full process checkpoint/restore, single GPU.** CRIU plus NVIDIA
   `cuda-checkpoint` snapshot the whole process (CPU state, open FDs,
   io_uring/epoll, and GPU memory). The restored pod resumes a live,
-  already-serving engine.
-- **Multi-GPU / large models — cache distribution.** Process-level
-  multi-GPU restore is blocked upstream (a `libcudart` per-process
-  GPU-state replay limitation). Instead NvSnap captures the warm pod's
-  model + cache directory and distributes it to other nodes, so restored
-  pods skip the model fetch and first-time compile even though the engine
-  starts fresh.
+  already-serving engine with no re-initialization at all. Multi-GPU
+  process restore is currently blocked upstream by a `libcudart`
+  per-process GPU-state replay limitation.
 
 A node-level **agent** (DaemonSet) performs capture/restore using
 `/proc` + cgroup inspection — runtime-agnostic, not tied to any container
@@ -50,31 +58,32 @@ Deeper design docs:
 
 ## Benchmarks
 
-Measured on H100 80GB, GKE A3-Mega. All workloads pass end-to-end
-(checkpoint + restore + verified inference). "Speedup" is
-`cold_start / restore`.
+### Warm cache restore (cachedir)
 
-### Single-GPU (CRIU + cuda-checkpoint)
+Measured June 2026 on H100 80GB (GKE, 1-8x H100 per workload). The capture
+records the warmed model plus JIT/compile caches into a canonical cache
+directory; restore mounts it ReadOnlyMany, so engines skip the weight
+download and reuse prebuilt kernels, graphs, and compile caches instead of
+recompiling. "Speedup" is `cold_start / restore` for time-to-ready.
 
-| Engine | Model | Ckpt size | Cold start | Capture | Restore | Speedup |
-|---|---|---|---|---|---|---|
-| NIM (TRT-LLM) | Qwen3-32B | 111 GB | 4m 03s | 3m 27s | 1m 40s | 2.4× |
-| vLLM | TinyLlama 1.1B | 28 GB | 2m 11s | 1m 32s | 46 s | 2.9× |
-| vLLM | Llama-3.1-8B | 76 GB | 1m 50s | 2m 41s | 1m 41s | 1.1× |
-| TRT-LLM | TinyLlama 1.1B | 29 GB | 1m 21s | 1m 54s | 49 s | 1.7× |
-| SGLang | TinyLlama 1.1B | 57 GB | 1m 01s | 6m 36s | 2m 51s | — |
-| SGLang | Llama-3.1-8B | 88 GB | 1m 40s | 6m 52s | 3m 42s | — |
+| Model | Engine | Cold | Restore | Speedup |
+|---|---|---:|---:|---:|
+| DeepSeek-V4-Flash | SGLang TP=8 | 1162 s | **289 s** | 4.0x |
+| gemma-4-31B-it | SGLang | 492 s | **109 s** | 4.5x |
+| gpt-oss-120b | vLLM TP=4 | ~550 s | **171 s** | 3.2x |
+| Qwen3.6-35B-A3B (NVFP4) | vLLM TP=4 | 410 s | **218 s** | 1.9x |
+| Nemotron-3-Nano-30B-A3B (FP8) | vLLM TP=2 | 370 s | **144 s** | 2.6x |
+| Qwen-Image-2512 | vLLM | 198 s | **114 s** | 1.7x |
 
-"—" where restore is not faster than a cold start (SGLang's init is fast
-enough that CRIU overhead doesn't pay back at these sizes).
+Wins scale with the cold start's download + JIT/compile cost (the full
+measured matrix, including compile-light workloads that see little change,
+is in [docs/BENCHMARK.md](docs/BENCHMARK.md)). Phase breakdown for
+Qwen3.6-35B-A3B: model download 269 s to ~5 s (loads from the cache volume),
+model init 128 s to ~32 s (torch.compile 53.5 s to 5.8 s on cache hit).
 
-### Multi-GPU (rootfs cache distribution — Llama-3.1-70B, TP=4)
-
-| Stage | Value |
-|---|---|
-| Cold start | 332 s |
-| Rootfs capture size | 133 GiB (weights + HF cache + engine cache) |
-| Restore (cache-warm) | 180 s — 1.8× vs cold start |
+What cachedir compresses is the avoidable disk work: weight download and
+recompilation. Process bring-up (scheduling, framework import, CUDA init,
+tensor-parallel worker spawn) is a fixed floor paid by cold and warm alike.
 
 ### Cross-node distribution (peer cascade)
 
@@ -82,10 +91,30 @@ Every node that fetches a checkpoint becomes a source for the next, so
 aggregate bandwidth scales with peer count instead of bottlenecking on the
 origin node.
 
-| Workload | Size | Per receiver |
+| Payload | Size | Per receiver |
 |---|---|---|
-| vllm-small CRIU dump | 30 GiB | 25 s (1.20 GB/s) |
-| vllm-70b rootfs | 133 GiB | 415 s (0.32 GB/s, many-files HTTP overhead) |
+| CRIU dump (vLLM 1.1B) | 30 GiB | 25 s (1.20 GB/s) |
+| Cache capture (Llama-70B) | 133 GiB | 415 s (0.32 GB/s, many-files HTTP overhead) |
+
+### Process checkpoint/restore (CRIU + cuda-checkpoint, single GPU)
+
+The full process-restore path resumes a live, already-serving engine
+(no engine re-init at all). Currently single-GPU only.
+
+| Engine | Model | Ckpt size | Cold start | Capture | Restore | Speedup |
+|---|---|---|---|---|---|---|
+| NIM (TRT-LLM) | Qwen3-32B | 111 GB | 4m 03s | 3m 27s | 1m 40s | 2.4x |
+| vLLM | TinyLlama 1.1B | 28 GB | 2m 11s | 1m 32s | 46 s | 2.9x |
+| vLLM | Llama-3.1-8B | 76 GB | 1m 50s | 2m 41s | 1m 41s | 1.1x |
+| TRT-LLM | TinyLlama 1.1B | 29 GB | 1m 21s | 1m 54s | 49 s | 1.7x |
+| SGLang | TinyLlama 1.1B | 57 GB | 1m 01s | 6m 36s | 2m 51s | -- |
+| SGLang | Llama-3.1-8B | 88 GB | 1m 40s | 6m 52s | 3m 42s | -- |
+
+"--" where restore is not faster than a cold start (SGLang's init is fast
+enough that CRIU overhead doesn't pay back at these sizes).
+
+We are actively working on improving the performance of the pure
+CRIU + cuda-checkpoint workflow; expect these numbers to improve.
 
 See [docs/BENCHMARK.md](docs/BENCHMARK.md) for methodology and the full
 measured matrix.
@@ -125,7 +154,7 @@ optional webhook). Full guide, options, and troubleshooting:
 ```bash
 ./scripts/test-e2e.sh vllm-small   # TinyLlama 1.1B on vLLM (single-GPU)
 ./scripts/test-e2e.sh vllm-8b      # Llama-3.1-8B on vLLM
-./scripts/test-e2e.sh vllm-70b     # Llama-3.1-70B TP=4 (rootfs path)
+./scripts/test-e2e.sh vllm-70b     # Llama-3.1-70B TP=4 (cachedir path)
 ```
 
 ---
@@ -139,7 +168,7 @@ optional webhook). Full guide, options, and troubleshooting:
 │  catalog (SQLite)│     │   ├─ process discovery (/proc+cgroup) │
 │  metrics + audit │     │   ├─ CRIU orchestration (go-criu RPC) │
 └──────────────────┘     │   ├─ cuda-checkpoint integration      │
-                         │   ├─ rootfs capture watcher           │
+                         │   ├─ cachedir capture watcher           │
                          │   └─ peer-cascade HTTP server         │
                          │                                       │
                          │  GPU Pod (unmodified image)           │
