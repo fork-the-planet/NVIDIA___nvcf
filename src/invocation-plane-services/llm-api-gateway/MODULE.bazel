@@ -125,21 +125,25 @@ register_toolchains(
 )
 
 # ============================================================================
-# OCI base image.
+# OCI base image. NVIDIA distroless/go: a minimal hardened Debian userland
+# with NVIDIA-patched glibc/OpenSSL and CA certs. The CGO_ENABLED=0 binaries
+# do not link against those libraries; the CVE posture comes from the newer
+# patched packages, not from their absence. The image's non-root user is
+# nvs (uid 1000). The digest pins v4.0.8.
 # ============================================================================
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(
-    name = "distroless_cc",
-    digest = "sha256:80e21701e5253088ee8ca22f2ad8fc5d08ca5bf730a6eea5d68ea268c33e9831",
-    image = "nvcr.io/nvidia/distroless/cc",
+    name = "distroless_go",
+    digest = "sha256:938bd28ce4ddb800118a951774203e7563c2067a72b20ae6b85d2c7da165a178",
+    image = "nvcr.io/nvidia/distroless/go",
     platforms = [
         "linux/amd64",
-        "linux/arm64",
+        "linux/arm64/v8",
     ],
 )
 use_repo(
     oci,
-    "distroless_cc",
-    "distroless_cc_linux_amd64",
-    "distroless_cc_linux_arm64",
+    "distroless_go",
+    "distroless_go_linux_amd64",
+    "distroless_go_linux_arm64_v8",
 )

@@ -19,27 +19,37 @@ conventions, see [GitHub Release Automation](github-release-process.md).
 | 1. Author commit | Conventional Commits format. The commit `type` decides whether (and how) the next release version bumps | Local |
 | 2. Open MR | Pre-merge gates run: per-service Bazel build, image-push build-only, license, and other public-safe validation. | MR pipeline |
 | 3. Merge to main | Default-branch pipeline runs: `compute-next-release-version-<svc>` -> `<svc>-bazel` -> `<svc>-image-push` -> (if helm) `helm-package-<svc>` + `helm-push-<svc>-*` -> `semantic-release-<svc>` -> `<svc>-slack-notify` | Default-branch pipeline |
-| 4. Tag created | `semantic-release-<svc>` creates the git tag `<service-name>-v<X.Y.Z>` and a GitLab Release | End of step 3 |
+| 4. Tag created | `semantic-release-<svc>` creates the configured path-scoped git tag, for example `src/compute-plane-services/nvca/v<X.Y.Z>`, and a GitLab Release | End of step 3 |
 | 5. Tag pipeline | A new pipeline runs against the tag ref. Same publish jobs re-run. NGC chart pushes are NOT idempotent (helm-registry rejects republishing the same version); the cds-component swallows the failure when `ngc-duplicate: skip` is set. OCI image pushes overwrite the tag pointer if the org allows it; some orgs reject. See "Known shortcomings and follow-ups" below. | Tag pipeline |
 
 No human `git tag` step. Steps 3-5 are automatic once the MR merges.
 
 ## Versioning
 
-Each service has its own version line. The git tag format is:
+Each service has its own version line. The git tag format is the
+repo-relative service path plus `v<X.Y.Z>`:
 
 ```
-<service-name>-v<X.Y.Z>
+<service-path>/v<X.Y.Z>
 ```
 
-e.g. `nvcf-unbound-v0.7.18`, `nvcf-ratelimiter-v1.13.0`,
-`nvcf-grpc-proxy-v0.4.2`.
+Examples:
 
-The prefix is required because all services share one repo's tag
+```text
+src/compute-plane-services/nvcf-unbound/v0.7.18
+src/invocation-plane-services/ratelimiter/v1.13.0
+deploy/helm/grpc-proxy/v1.6.7
+```
+
+The path prefix is required because all services share one repo's tag
 namespace: a bare `v0.7.18` from nvcf-unbound would collide with the
-next `v0.7.18` from ratelimiter. `semantic-release-monorepo` uses
-this prefix to know which commits belong to which service when
-computing the next version (it scopes by subtree path).
+next `v0.7.18` from ratelimiter. `semantic-release-monorepo` scopes
+commit analysis by subtree path; the tag path keeps the release ref
+namespace aligned with that subtree. During the POR transition, each
+release entry may also declare `legacy_tag_prefix` so old
+`<service-name>-v` tags remain valid anchors for version continuity.
+New tags are created with the service release path by default, or with
+`release.tag_format` only when an explicit override is configured.
 
 The version itself is computed by `semantic-release` from
 Conventional Commits since the previous tag. The release rules per
@@ -87,7 +97,7 @@ The version stamps every release artifact in lockstep:
 - Helm chart: `Chart.yaml`'s `version` and `appVersion` both stamp
   to `<X.Y.Z>` at package time (the in-tree `Chart.yaml` carries a
   placeholder; the packaged `.tgz` gets the real semver)
-- Git tag and GitLab Release: `<service-name>-v<X.Y.Z>`
+- Git tag and GitLab Release: `<service-path>/v<X.Y.Z>`
 
 ## Pipeline lanes per service
 
@@ -103,9 +113,10 @@ consume. Runs on:
 
 - MR pipelines whose change paths touch the service
 - Default-branch pipeline with the same change paths
-- Tag pipelines (`$CI_COMMIT_TAG =~ /^<service-name>-v/`); the
-  script falls back to `${CI_COMMIT_TAG#<service-name>-v}` when
-  there is no new release-worthy commit
+- Tag pipelines that match the configured path-scoped tag prefix, or
+  the configured `legacy_tag_prefix` during the transition. The script
+  derives the version by stripping the matching prefix when there is
+  no new release-worthy commit.
 
 ### `<svc>-bazel` (stage: Prerequisites)
 
@@ -305,15 +316,18 @@ commits already shipped under the old prefix. The nvcf-unbound
 anchor; we then pushed only the tag and the next bump still went
 sideways for a different reason.
 
-The full anchor procedure for a service whose last upstream
-release was `<last-upstream-version>`:
+The full anchor procedure for a service whose last upstream release
+was `<last-upstream-version>` uses the service's configured
+release tag path. Existing pre-POR `<service-name>-v` anchors can remain
+in place through `legacy_tag_prefix`; the release template will use them
+as compatibility anchors and cut the next tag in the new path format.
 
 ```bash
-# 1. The version tag (matches the umbrella's tagFormat:
-#    <service-name>-v<X.Y.Z>). Push BEFORE the cutover MR merges, so
+# 1. The version tag (matches the umbrella's resolved release tag format:
+#    <service-path>/v<X.Y.Z>). Push BEFORE the cutover MR merges, so
 #    the post-merge default-branch pipeline sees a recognized
 #    predecessor instead of defaulting to 1.0.0.
-git tag -a <service-name>-v<last-upstream-version> \
+git tag -a <service-path>/v<last-upstream-version> \
   -m "anchor: <svc> cutover continuity"
 
 # 2. Fetch the existing notes ref BEFORE adding to it. `git fetch`
@@ -336,7 +350,7 @@ git fetch origin '+refs/notes/semantic-release:refs/notes/semantic-release' || t
 #    release-notes-generator run to lose its "already released"
 #    marker -- exactly the bug this section exists to prevent.
 #    Check whether a note already exists and merge by hand if so.
-TAG_SHA=$(git rev-parse <service-name>-v<last-upstream-version>^{commit})
+TAG_SHA=$(git rev-parse <service-path>/v<last-upstream-version>^{commit})
 if git notes --ref=refs/notes/semantic-release show "${TAG_SHA}" \
      > /dev/null 2>&1; then
   echo "ERROR: a semantic-release note already exists on ${TAG_SHA}" >&2
@@ -346,14 +360,14 @@ if git notes --ref=refs/notes/semantic-release show "${TAG_SHA}" \
   exit 1
 fi
 git notes --ref=refs/notes/semantic-release add -m \
-  '{"channels":[null],"name":"v<last-upstream-version>","gitHead":"'"${TAG_SHA}"'","gitTag":"<service-name>-v<last-upstream-version>"}' \
+  '{"channels":[null],"name":"v<last-upstream-version>","gitHead":"'"${TAG_SHA}"'","gitTag":"<service-path>/v<last-upstream-version>"}' \
   "${TAG_SHA}"
 
 # 4. Push both refs (ci.skip on the tag so it doesn't fire a publish
 #    pipeline; the existing artifacts at that version stay
 #    untouched). The notes push must be a fast-forward; do NOT
 #    --force, that would clobber every other service's release notes.
-git push origin <service-name>-v<last-upstream-version> -o ci.skip
+git push origin <service-path>/v<last-upstream-version> -o ci.skip
 git push origin refs/notes/semantic-release
 ```
 
@@ -379,11 +393,11 @@ The cutover MR's commit type decides whether the first
 umbrella-managed release bumps minor or patch:
 
 - `feat(<svc>): cut over to monorepo-native` -> `feat:` -> minor
-  bump. Example: anchor `<svc>-v0.5.8` plus a `feat:` cutover
-  commit produces `<svc>-v0.6.0`, not `<svc>-v0.5.9`. The patch
-  line resets to 0.
+  bump. Example: anchor `<service-path>/v0.5.8` plus a `feat:`
+  cutover commit produces `<service-path>/v0.6.0`, not
+  `<service-path>/v0.5.9`. The patch line resets to 0.
 - `chore(<svc>): cut over to monorepo-native` -> `chore:` -> patch
-  bump. Same anchor produces `<svc>-v0.5.9`.
+  bump. Same anchor produces `<service-path>/v0.5.9`.
 
 Both are defensible. The cutover changes how an artifact is built
 and released (new pipeline, new image registry token scoping,
@@ -410,9 +424,9 @@ helm-package case in NVCF-10337 follow-up.
 ### Slack notification says "tag: unknown"
 
 The `git describe` fallback used to fail on shallow CI clones. The
-template now prefers `${CI_COMMIT_TAG#<service-name>-v}` first, with
-`git describe` as a fallback. If you still see this, the tag pipeline
-fired without a matching `<service-name>-v*` tag.
+template now strips the matching configured release prefix first,
+with `git describe` as a fallback. If you still see this, the tag
+pipeline fired without a matching path-scoped or legacy service tag.
 
 ### Two slack notifications per release
 

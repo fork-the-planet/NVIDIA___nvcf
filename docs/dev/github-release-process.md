@@ -33,7 +33,9 @@ release metadata:
 
 - service id
 - service subtree path
-- service tag prefix
+- service tag format
+- legacy service tag prefix, when a release line still needs old-tag
+  compatibility
 - version-file hints for services that do not use semantic-release
 - generated/mechanical file basenames to ignore for release decisions
 
@@ -41,19 +43,26 @@ It does not contain GitLab runner tags, Vault paths, NGC registry
 destinations, `nvcf-internal` trigger details, or Slack notification
 configuration.
 
-The service tag format mirrors GitLab:
+The service tag format mirrors GitLab and uses the repo-relative
+service path:
 
 ```text
-<service-name>-v<X.Y.Z>
+<service-path>/v<X.Y.Z>
 ```
 
 Examples:
 
 ```text
-nvcf-ratelimiter-v1.15.1
-byoo-otel-collector-v0.153.3
-helm-nvca-operator-v1.11.1
+src/invocation-plane-services/ratelimiter/v1.15.1
+src/compute-plane-services/byoo-otel-collector/v0.153.3
+deploy/helm/nvca-operator/v1.11.1
 ```
+
+During the transition from the old service-prefix convention, the
+generated metadata also carries `legacy_tag_prefix`. The workflow
+uses those old tags as version anchors but creates any new tags with
+the path-scoped tag derived from the service path, unless the metadata
+declares an explicit `tag_format` override.
 
 For semantic-release services, the GitHub workflow uses the same
 release rules as the generated GitLab release jobs:
@@ -76,7 +85,8 @@ path/to/module/vX.Y.Z-rc.N
 path/to/module/vX.Y.Z-dev.N
 ```
 
-Valid service-style tags are:
+Legacy service-style tags are accepted as compatibility inputs while
+release metadata still declares `legacy_tag_prefix`:
 
 ```text
 <service-name>-vX.Y.Z

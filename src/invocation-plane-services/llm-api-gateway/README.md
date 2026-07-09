@@ -185,7 +185,7 @@ docker run --rm -p 8080:8080 \
   llm-api-gateway:dev
 ```
 
-The same image also contains `./llm-api-gateway-rate-limit-sync-worker`.
+The same image also contains `/usr/bin/llm-api-gateway-rate-limit-sync-worker`.
 
 ## Kubernetes
 

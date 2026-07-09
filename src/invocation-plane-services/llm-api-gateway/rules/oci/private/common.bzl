@@ -20,7 +20,11 @@ load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_image_index", "oci_load", "oci_push")
 load("//rules/oci:transition.bzl", "multi_arch")
 
-DEFAULT_BASE = "@ubuntu_noble"
+# Every call site in this module passes base = "@distroless_go" explicitly,
+# so DEFAULT_BASE is functionally unused; it points at a repo we actually
+# pull in MODULE.bazel so a stray call without base still resolves. Same
+# pattern as nvcf-unbound.
+DEFAULT_BASE = "@distroless_go"
 DEFAULT_PLATFORMS = [
     "//platforms:linux_arm64",
     "//platforms:linux_x86_64",
