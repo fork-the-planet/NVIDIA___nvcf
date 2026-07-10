@@ -60,9 +60,5 @@ jobs:
         with:
           python-version: '3.x'
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: azure/setup-helm@v4
-
       - name: Run dependency docs freshness check
         run: ./tools/ci/check-dependency-docs

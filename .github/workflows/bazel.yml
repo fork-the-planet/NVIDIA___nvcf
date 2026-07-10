@@ -209,6 +209,18 @@ jobs:
       # grpcs with a bearer token. When the token secret is present
       # (same-repo PRs and main pushes; never fork PRs), materialize the
       # CA cert and enable the cache; otherwise build cacheless.
+      #
+      # Reliability note: the build/test steps use --remote_download_all,
+      # not --remote_download_minimal (Build without the Bytes). BwtB
+      # keeps cache-hit outputs remote and fetches them lazily; a brief
+      # cache blip (e.g. an HTTP 502 during the matrix-start connection
+      # burst) then becomes a fatal `lost inputs with digests` because
+      # Bazel can no longer refetch them, and eviction-retries do not
+      # cover UNAVAILABLE. --remote_download_all materializes every output
+      # locally, so a transient cache error degrades to a local rebuild
+      # instead of failing CI. The cost is more egress; correctness on the
+      # public mirror wins. Revisit toward toplevel/minimal once the cache
+      # front end absorbs the connection burst without 502s.
       - name: Prepare remote cache
         if: steps.precheck.outputs.skip == 'false'
         run: |
@@ -236,8 +248,8 @@ jobs:
                    --tls_certificate="$RUNNER_TEMP/cache-ca.pem"
                    --remote_header="authorization=Bearer $CACHE_TOKEN"
                    --remote_cache_compression
-                   --remote_download_minimal
-                   --remote_timeout=120 --remote_retries=2)
+                   --remote_download_all
+                   --remote_timeout=120 --remote_retries=5)
             [ "$CACHE_UPLOAD" = "true" ] || FLAGS+=(--remote_upload_local_results=false)
           fi
           bazel build "${FLAGS[@]}" //...
@@ -256,8 +268,8 @@ jobs:
                    --tls_certificate="$RUNNER_TEMP/cache-ca.pem"
                    --remote_header="authorization=Bearer $CACHE_TOKEN"
                    --remote_cache_compression
-                   --remote_download_minimal
-                   --remote_timeout=120 --remote_retries=2)
+                   --remote_download_all
+                   --remote_timeout=120 --remote_retries=5)
             [ "$CACHE_UPLOAD" = "true" ] || FLAGS+=(--remote_upload_local_results=false)
           fi
           bazel test "${FLAGS[@]}" --flaky_test_attempts=3 //...
