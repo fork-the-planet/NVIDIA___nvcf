@@ -198,8 +198,13 @@ global:
     repository: "${REPOSITORY}"    # CHANGE: from "YOUR_ORG/YOUR_TEAM". NGC org/team or mirror path.
 
   workerEndpoints:
-    essServiceURL: ""              # Control-plane endpoints advertised into worker pods. Empty = in-cluster defaults.
-    invocationServiceURL: ""       # Empty = in-cluster default.
+    nvcfServiceURL: ""             # CHANGE (multi-cluster): "http://api.${GATEWAY_ADDR}". Worker env NVCF_FQDN.
+    nvcfGrpcServiceURL: ""         # CHANGE (multi-cluster): "http://worker-api.${GATEWAY_ADDR}". Worker env NVCF_FQDN_GRPC.
+    nvcfNatsServiceURL: ""         # CHANGE (multi-cluster): "nats://${GATEWAY_ADDR}:4222". Worker env NVCF_NATS_WORKER_URL.
+    essServiceURL: ""              # Empty = in-cluster default. Workers use this to reach the Encrypted Secrets Service.
+    nvctServiceURL: ""             # CHANGE (multi-cluster): "http://tasks.${GATEWAY_ADDR}". Worker env NVCT_FQDN.
+    nvctGrpcServiceURL: ""         # CHANGE (multi-cluster): "http://worker-tasks.${GATEWAY_ADDR}". Worker env NVCT_FQDN_GRPC.
+    invocationServiceURL: ""       # Empty = in-cluster default. Workers use this for the invocation stream address.
 
   nodeSelectors:
     enabled: false                 # Pin system workloads to labeled node pools. Leave false unless nodes are labeled.
@@ -283,8 +288,16 @@ ingress:
     routes:
       nvcfApi:
         routeAnnotations: {}       # Optional per-route annotations for the NVCF API route.
+        grpc:
+          enabled: false           # CHANGE (multi-cluster): true. Creates a GRPCRoute for worker-facing API gRPC.
+          hostnames:
+            - "worker-api.${GATEWAY_ADDR}"  # CHANGE (multi-cluster): externally resolvable hostname for the API gRPC route.
       nvctApi:
         routeAnnotations: {}       # Optional annotations for the NVCT API route.
+        grpc:
+          enabled: false           # CHANGE (multi-cluster): true. Creates a GRPCRoute for worker-facing NVCT gRPC.
+          hostnames:
+            - "worker-tasks.${GATEWAY_ADDR}"  # CHANGE (multi-cluster): externally resolvable hostname for the NVCT gRPC route.
       apiKeys:
         routeAnnotations: {}       # Optional annotations for the api-keys route.
       invocation:
@@ -314,6 +327,26 @@ ingress:
         namespace: envoy-gateway   # CHANGE: from "".
         listenerName: nats         # Gateway listener name for NATS. Keep as nats.
 ```
+
+<Info>
+Multi-cluster worker endpoints and GRPCRoutes
+
+In single-cluster deployments, leave `workerEndpoints` empty and `grpc.enabled`
+false. Worker pods resolve control-plane services through in-cluster DNS.
+
+In multi-cluster deployments, worker pods run on a separate compute cluster and
+cannot resolve in-cluster service names from the control-plane cluster. Set each
+`workerEndpoints` field to an externally resolvable address (the Gateway load
+balancer hostname with a per-service route hostname). Enable the `nvcfApi.grpc`
+and `nvctApi.grpc` GRPCRoutes so workers can reach the API and NVCT gRPC
+endpoints through the Gateway.
+
+The `selfManaged.*Override` values in the compute-plane environment file
+configure the NVCA agent's own connections to the control plane. The
+`workerEndpoints` values configure the URLs that the control plane advertises
+into launched worker pods. Both layers are required for multi-cluster function
+execution.
+</Info>
 
 ### Create the registry pull secret
 
@@ -584,22 +617,13 @@ are correct.
 | --- | --- | --- |
 | Clusters | One cluster for everything | Control plane on one cluster, NVCA on a separate GPU cluster |
 | Gateway | On the only cluster | On the control-plane cluster only |
-| Control-plane env file | Sets the three NVCA Host-header overrides | Same |
+| Worker endpoints | Empty (in-cluster DNS) | Set to externally resolvable Gateway hostnames |
+| Worker GRPCRoutes | Disabled | Enabled (`nvcfApi.grpc`, `nvctApi.grpc`) |
+| Control-plane env file | Sets the three NVCA Host-header overrides | Same, plus `workerEndpoints` and worker GRPCRoutes |
 | Compute-plane env file | Required: uses endpoints reachable from the shared cluster | Required: uses endpoints reachable from the separate compute cluster |
 | Context before `register-cluster` | Control-plane context | Compute context (so JWKS is discovered from the compute cluster) |
 | `KUBECONFIG_FILE` | Not used | Compute-scoped kubeconfig passed to `register-cluster` and `install` |
 | Verify context | Control-plane context | Compute context |
-
-## Known limitations
-
-Cross-cluster function execution is not supported by the current NVCA operator
-chart. Registration and agent health work across clusters and regions, but the
-agent injects the control plane's in-cluster service names into worker pods
-(for example `api.nvcf.svc.cluster.local`), which do not resolve from a separate
-compute cluster. Functions deployed to a remote compute cluster cannot fetch
-artifacts and will error. The `selfManaged.*Override` values configure the
-agent's own connections, not the worker pod environment. Use single-cluster for
-end-to-end function execution until worker FQDNs can be externalized.
 
 ## Troubleshooting
 
