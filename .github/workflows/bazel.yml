@@ -34,6 +34,16 @@ permissions:
   contents: read
   packages: read
 
+# Force bash for every `run:` step. GitHub Actions picks the step shell
+# per host: on the bare ubuntu-latest runner (the detect job) it is
+# bash, but inside the bazel-ci container the default resolves to
+# /bin/sh (dash), which does not support the `FLAGS=(...)` bash arrays
+# the cache steps build. Without this the cache-enabled build/test steps
+# die with `Syntax error: "(" unexpected` on every matrix row.
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: bazel-${{ github.ref }}
   cancel-in-progress: true
