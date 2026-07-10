@@ -90,6 +90,9 @@ A task that exceeds `maxRuntimeDuration` moves to
 `EXCEEDED_MAX_RUNTIME_DURATION` status. A task that is not scheduled within
 `maxQueuedDuration` moves to `EXCEEDED_MAX_QUEUED_DURATION` status.
 
+`maxRuntimeDuration` has no default or maximum: omit it and the task runs with
+no time limit.
+
 ## Secrets
 
 Secrets are passed to the container as environment variables. Provide them via
