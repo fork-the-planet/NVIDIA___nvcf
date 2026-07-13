@@ -45,7 +45,7 @@ releases:
       - template: service
 
   - name: api
-    version: 1.23.5
+    version: 1.23.8
     namespace: nvcf
     inherit:
       - template: service
@@ -77,7 +77,7 @@ releases:
 
   - name: ratelimiter
     chart: nvcf/helm-nvcf-rate-limiter
-    version: 1.0.3
+    version: 1.1.0
     namespace: nvcf
     condition: rateLimiter.enabled
     values:

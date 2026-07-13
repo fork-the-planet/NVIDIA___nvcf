@@ -307,6 +307,12 @@ ingress:
       nats:
         enabled: false
         routeAnnotations: {}
+      # ESS route. NVCF worker containers fetch function secrets from ess-api.
+      # In split/multi-cluster installs ess runs in the control plane, so
+      # compute-plane workers reach it through this route. Opt-in per environment.
+      ess:
+        enabled: false
+        routeAnnotations: {}
     gateways:
       shared:
         name: "" # must be set by the environment

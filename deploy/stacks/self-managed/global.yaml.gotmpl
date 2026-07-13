@@ -800,6 +800,7 @@ vanityGateway:
 
 nvcfGatewayRoutes:
   {{- $natsRouteEnabled := dig "ingress" "gatewayApi" "routes" "nats" "enabled" false .Values }}
+  {{- $essRouteEnabled := dig "ingress" "gatewayApi" "routes" "ess" "enabled" false .Values }}
   domain: "{{ .Values.global.domain }}"
   gateways:
     shared:
@@ -869,5 +870,11 @@ nvcfGatewayRoutes:
       enabled: {{ $natsRouteEnabled }}
       routeAnnotations:
         {{ dig "ingress" "gatewayApi" "routes" "nats" "routeAnnotations" dict .Values | toYaml | nindent 8 | trim }}
+    # ESS route attaches to the shared Gateway (backend/hostname come from chart
+    # defaults); only the enable flag and annotations are environment-driven.
+    ess:
+      enabled: {{ $essRouteEnabled }}
+      routeAnnotations:
+        {{ dig "ingress" "gatewayApi" "routes" "ess" "routeAnnotations" dict .Values | toYaml | nindent 8 | trim }}
   podMonitors:
     enabled: {{ .Values.global.observability.metrics.enabled }}
