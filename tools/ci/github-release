@@ -25,6 +25,8 @@ RELEASE_RULES = [
     {"type": "build", "release": False},
 ]
 VERSION_PLACEHOLDER = "${version}"
+INITIAL_RELEASE_VERSION = "0.1.0"
+INITIAL_RELEASE_FLOOR_VERSION = "0.0.0"
 
 
 def bool_env(name, default=False):
@@ -224,6 +226,34 @@ def synthesize_current_prefix_anchor(service):
     print(f"[github-release] {service['id']}: synthesized local compatibility anchor {anchor} -> {legacy_tag} ({sha})")
 
 
+def synthesize_initial_version_anchor(root, service):
+    if latest_service_tag(service):
+        return
+    anchor = tag_for_version(service, INITIAL_RELEASE_FLOOR_VERSION)
+    if run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{anchor}"], cwd=root, capture=True, check=False).strip():
+        return
+
+    first_commits = run(["git", "rev-list", "--reverse", "HEAD", "--", service["path"]], cwd=root, capture=True).splitlines()
+    if first_commits:
+        sha = run(
+            ["git", "rev-parse", "-q", "--verify", f"{first_commits[0]}^"],
+            cwd=root,
+            capture=True,
+            check=False,
+        ).strip() or first_commits[0]
+    else:
+        roots = run(["git", "rev-list", "--max-parents=0", "HEAD"], cwd=root, capture=True).splitlines()
+        sha = roots[-1] if roots else ""
+
+    if not sha:
+        return
+    run(["git", "tag", anchor, sha], cwd=root)
+    print(
+        f"[github-release] {service['id']}: synthesized local initial-version anchor "
+        f"{anchor} ({sha}); missing version tags start at {INITIAL_RELEASE_VERSION}"
+    )
+
+
 def only_generated_changes(root, service, generated_paths):
     service_path = service["path"]
     last_tag = latest_service_tag(service)
@@ -266,7 +296,7 @@ def write_semantic_release_files(service_dir, service_name, release_tag_format, 
 
     package_json = {
         "name": service_name,
-        "version": "1.0.0",
+        "version": INITIAL_RELEASE_VERSION,
         "private": True,
         "devDependencies": deps,
     }
@@ -459,6 +489,7 @@ def auto_release(args):
             if only_generated_changes(root, service, generated_paths):
                 continue
             synthesize_current_prefix_anchor(service)
+            synthesize_initial_version_anchor(root, service)
 
             write_semantic_release_files(
                 service_dir,
