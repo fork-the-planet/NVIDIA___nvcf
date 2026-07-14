@@ -68,6 +68,14 @@ make build
 
 See [`scripts/versions.sh`](scripts/versions.sh) for the canonical version + registry config.
 
+## External builds
+
+nvsnap is not externally buildable at this time. Its OCI base is nvsnap's own
+agent image, which is not publicly pullable, so building the images requires
+NVIDIA-internal registry access. nvsnap is a self-contained Bazel module and is
+intentionally excluded from the public build matrix; it is built only by its own
+internal CI. Tracking a public base in NVIDIA/nvcf#39.
+
 ## Container registry
 
 Built images go to `nvcr.io/0651155215864979/ncp-dev/<component>:vX.Y.Z`. To push, you need an NGC API key:
