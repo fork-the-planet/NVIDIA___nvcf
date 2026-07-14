@@ -26,7 +26,7 @@ This demo uses and modifies [this upstream example disaggregated router DGD](htt
 
 1. Create the function, using the below payload as an example, substituting in your Helm chart's values
 
-    **Note:** the `helmChartServiceName` field must contain a string of the format `<helm chart name>-frontend`, Helm chart name being the chosen name in step 1
+    **Note:** the `helmChartServiceName` field must contain a string of the format `<DGD name>-frontend`. In this example, the DGD is named `myllm`, so the service name generated is `myllm-frontend`.
 
     ```console
     $ cat <<EOF > function-create.json
@@ -34,7 +34,7 @@ This demo uses and modifies [this upstream example disaggregated router DGD](htt
       "name": "my-dynamo-operator-function",
       "inferenceUrl": "/v1/chat/completions",
       "inferencePort": 8000,
-      "helmChartServiceName": "dynamo-operator-test-frontend",
+      "helmChartServiceName": "myllm-frontend",
       "helmChart": "oci://<your-registry>/<namespace>",
       "healthProtocol": "HTTP",
       "healthUri": "/health",
@@ -63,9 +63,7 @@ This demo uses and modifies [this upstream example disaggregated router DGD](htt
           "minInstances": 1,
           "maxInstances": 1,
           "configuration": {
-            "env": {
-              "HF_TOKEN": "<YOUR HUGGINGFACE TOKEN>"
-            }
+            "hfToken": "<YOUR HUGGINGFACE TOKEN>"
           }
         }
       ]
