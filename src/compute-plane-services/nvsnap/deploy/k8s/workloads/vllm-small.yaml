@@ -35,58 +35,9 @@ spec:
   imagePullSecrets:
     - name: nvsnap-pull-secret
 
-  initContainers:
-    # Extract per-cpXY uvloop wheels into /nvsnap-lib/site-packages-cpXY/.
-    # sitecustomize picks the right dir at runtime by sys.version_info.
-    - name: get-uvloop
-      image: nvcr.io/0651155215864979/ncp-dev/uvloop-builder:v0.0.1
-      imagePullPolicy: IfNotPresent
-      command: ["/bin/sh", "-c"]
-      args:
-        - |
-          set -eu
-          for whl in /wheels/uvloop-*.whl; do
-              tag=$(echo "$whl" | grep -oE 'cp3[0-9]+' | head -1)
-              mkdir -p "/nvsnap-lib/site-packages-${tag}"
-              python3 -m zipfile -e "$whl" "/nvsnap-lib/site-packages-${tag}/"
-          done
-      volumeMounts:
-        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
-
-    # Patched libuv (uv__io_poll abort fixes post-CRIU restore)
-    - name: get-libuv
-      image: nvcr.io/0651155215864979/ncp-dev/libuv-builder:v0.0.1
-      imagePullPolicy: IfNotPresent
-      command: ["/bin/sh", "-c"]
-      args: ["cp /usr/local/lib/libuv.so* /nvsnap-lib/"]
-      volumeMounts:
-        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
-
-    # Patched libzmq (epoll reinit on CRIU restore)
-    - name: get-libzmq
-      image: nvcr.io/0651155215864979/ncp-dev/libzmq-builder:v0.0.1
-      imagePullPolicy: IfNotPresent
-      command: ["/bin/sh", "-c"]
-      args: ["cp /usr/local/lib/libzmq.so* /nvsnap-lib/"]
-      volumeMounts:
-        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
-
-    # libnvsnap_intercept.so + sitecustomize.py from the agent bundle.
-    - name: get-nvsnap
-      image: nvcr.io/0651155215864979/ncp-dev/nvsnap-agent:v0.1.3
-      imagePullPolicy: IfNotPresent
-      command: ["/bin/sh", "-c"]
-      args:
-        - |
-          set -eu
-          cp /criu-bundle/lib/libnvsnap_intercept.so /nvsnap-lib/
-          cp -r /criu-bundle/sitecustomize /nvsnap-lib/
-      volumeMounts:
-        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
-
   containers:
     - name: vllm
-      image: vllm/vllm-openai:v0.11.2
+      image: vllm/vllm-openai:v0.20.0
       imagePullPolicy: IfNotPresent
       command: ["/bin/bash", "-lc"]
       args:
@@ -94,38 +45,53 @@ spec:
           set -e
           ulimit -c unlimited
           mkdir -p /var/run/vllm
-          # libnvsnap_intercept.so must be loaded into every vLLM
-          # subprocess (worker fork). LD_PRELOAD on this container
-          # covers the parent; ld.so.preload covers all execve'd
-          # children. Patched uvloop is delivered via sitecustomize
-          # (PYTHONPATH) — no manual cp into site-packages needed.
-          if [ -f /nvsnap-lib/libnvsnap_intercept.so ]; then
-            echo "/nvsnap-lib/libnvsnap_intercept.so" > /etc/ld.so.preload
-          fi
-          vllm serve \
+          # CRIU-V2 METHOD: no nvsnap injection stack (no intercept, no patched
+          # uvloop/libuv/libzmq, no /nvsnap-lib). nvsnap_cr.so is copied into the
+          # container's OWN rootfs so its mapping lives on the root mount (a
+          # side-volume mapping fails CRIU files-reg mount lookup) and rides the
+          # agent's upperdir snapshot into the restore container automatically.
+          cp /nvsnap-cr/nvsnap_cr.so /usr/local/lib/nvsnap_cr.so
+          chmod 755 /usr/local/lib/nvsnap_cr.so
+          echo "/usr/local/lib/nvsnap_cr.so" > /etc/ld.so.preload
+          # criu-v2 convention: launch the workload in its
+          # own session via setsid — the agent dumps the GPU leader's session,
+          # never container init (pid1 can't be restored into a placeholder
+          # whose pid1 slot is occupied). Stdio goes to a rootfs file so CRIU
+          # restores those fds as plain files; bash stays pid1 to reap orphan
+          # zombies and tails the file so kubectl logs keeps working.
+          nohup setsid vllm serve \
             --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
             --host 0.0.0.0 \
             --port 8000 \
             --max-model-len 2048 \
-            --gpu-memory-utilization 0.3
+            --gpu-memory-utilization 0.3 > /vllm.out 2>&1 < /dev/null &
+          tail -F /vllm.out &
+          while true; do sleep 30; done
       env:
-        # Generic Python injection — site.py imports
-        # /nvsnap-lib/sitecustomize/sitecustomize.py which prepends
-        # /nvsnap-lib/site-packages-cpXY (cpXY = sys.version_info)
-        # to sys.path so patched uvloop wins on `import uvloop`.
-        - { name: PYTHONPATH,      value: "/nvsnap-lib/sitecustomize" }
-        - { name: LD_LIBRARY_PATH, value: "/nvsnap-lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64" }
-        - { name: LD_PRELOAD,      value: "/nvsnap-lib/libnvsnap_intercept.so" }
+        - { name: LD_LIBRARY_PATH, value: "/usr/local/nvidia/lib64:/usr/local/cuda/lib64" }
+        - { name: LD_PRELOAD,      value: "/usr/local/lib/nvsnap_cr.so" }
         - { name: PYTHONFAULTHANDLER, value: "1" }
         - { name: PYTHONUNBUFFERED,   value: "1" }
         - { name: NVSNAP_LOG_LEVEL,     value: "3" }
-        - { name: NVSNAP_ZMQ_INTERCEPT, value: "0" }
-        - { name: NVSNAP_QUIESCE_SIGNALS, value: "1" }
-        - { name: NVSNAP_QUIESCE_METADATA_ONLY, value: "1" }
         - { name: NVSNAP_SECCOMP_ENABLED, value: "0" }
         - { name: CUDA_VISIBLE_DEVICES, value: "0" }
         - { name: HF_HOME,            value: "/root/.cache/huggingface" }
-        - { name: VLLM_RPC_BASE_PATH, value: "/var/run/vllm" }
+        # In-process v1 engine: no separate EngineCore process => no cross-process
+        # RPC unix socket, which is what upstream CRIU couldn't restore
+        # (setns(mnt_ns) EINVAL in a multi-proc restorer). Must match the restore pod.
+        - { name: VLLM_ENABLE_V1_MULTIPROCESSING, value: "0" }
+        # torch TCPStore libuv backend: keep it on (stock). The criu-v2 2x2
+        # (nvsnap#107) showed the TCPStore libuv thread restores fine on
+        # single-GPU TP=1 — the only restore-breaking lever is the libuv
+        # event-loop io_uring ring below, not this. Set explicitly rather
+        # than relying on torch's default.
+        - { name: USE_LIBUV, value: "1" }
+        # libuv >=1.46 batches epoll_ctl through an internal SQPOLL io_uring
+        # ring; that ring restores its config but aborts on first
+        # epoll_ctl_flush after a cross-pod criu-v2 restore (silent SIGABRT,
+        # release-build libuv). This is the one remaining restore lever.
+        # Durable fix = SQPOLL ring restore at the CRIU layer (nvsnap#107).
+        - { name: UV_USE_IO_URING, value: "0" }
         - { name: HF_HUB_DISABLE_XET, value: "1" }
         - { name: HF_HUB_ENABLE_HF_TRANSFER, value: "0" }
         - { name: VLLM_LOGGING_LEVEL, value: "INFO" }
@@ -147,12 +113,18 @@ spec:
         privileged: true
       volumeMounts:
         - { name: shm, mountPath: /dev/shm }
-        - { name: nvsnap-lib, mountPath: /nvsnap-lib }
+        - { name: nvsnap-cr, mountPath: /nvsnap-cr }
 
   volumes:
     - name: shm
       emptyDir: { medium: Memory, sizeLimit: 16Gi }
-    - name: nvsnap-lib
-      emptyDir: {}
+    # nvsnap-cr-so holds nvsnap_cr.so, the stopgap event-loop shim (see
+    # USE_LIBUV/UV_USE_IO_URING notes above). It is provisioned by the
+    # installer, not this manifest, because it is a compiled binary artifact
+    # (built from experiments/v2/criu-integration) and is expected to go away once
+    # io_uring ring-restore lands at the CRIU layer. Create it with:
+    #   kubectl create configmap nvsnap-cr-so -n nvsnap-system     #     --from-file=nvsnap_cr.so=<path-to-built-nvsnap_cr.so>
+    - name: nvsnap-cr
+      configMap: { name: nvsnap-cr-so, defaultMode: 0755 }
 
   restartPolicy: Never

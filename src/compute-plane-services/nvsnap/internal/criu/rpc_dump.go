@@ -207,9 +207,17 @@ func (m *Manager) DumpRPC(ctx context.Context, opts DumpRPCOptions) error {
 	// go-criu spawns "criu swrk" which inherits this environment
 	// Include both container paths (/host/...) and host paths for compatibility
 	// Use sync.Once to prevent unbounded growth on repeated calls.
+	//
+	// ORDER MATTERS: the container's own libdir must come FIRST. The driver
+	// container tree ships its own libc.so.6; if it precedes the container
+	// libdir, any exec'd binary built against a newer glibc dies in the
+	// loader ("undefined symbol __tunable_is_initialized" → exit 127; this
+	// killed criu swrk). libcuda.so only exists in the driver tree, so it
+	// still resolves from there.
 	ldLibraryPathOnce.Do(func() {
-		ldPath := "/host/run/nvidia/driver/usr/lib/x86_64-linux-gnu:/host/usr/local/nvidia/lib64:" +
-			"/run/nvidia/driver/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/lib/x86_64-linux-gnu"
+		ldPath := "/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:" +
+			"/host/run/nvidia/driver/usr/lib/x86_64-linux-gnu:/host/usr/local/nvidia/lib64:" +
+			"/run/nvidia/driver/usr/lib/x86_64-linux-gnu"
 		if existing := os.Getenv("LD_LIBRARY_PATH"); existing != "" {
 			ldPath = ldPath + ":" + existing
 		}

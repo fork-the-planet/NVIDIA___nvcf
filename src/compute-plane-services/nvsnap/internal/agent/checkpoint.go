@@ -1768,6 +1768,13 @@ type CheckpointMetadata struct {
 	// Compression info (v1.5+): set when checkpoint uses transparent compression
 	Compression *streamer.CompressionInfo `json:"compression,omitempty"`
 
+	// CapturePath (v1.8+) records which capture engine produced this
+	// checkpoint ("criu-v2" for the in-namespace engine; empty for
+	// legacy CRIU). Restore dispatches on it: criu-v2 images must be
+	// restored in-namespace by the bundled CRIU, not the legacy
+	// swrk/ExtMnt path.
+	CapturePath string `json:"capturePath,omitempty"`
+
 	// Integrity (v1.6+): SHA-256 checksums for critical checkpoint files
 	Integrity *CheckpointIntegrity `json:"integrity,omitempty"`
 
@@ -1904,7 +1911,12 @@ func (a *Agent) Checkpoint(ctx context.Context, req CheckpointRequest) (*Checkpo
 		//    memory; an explicit "criu" errors, auto/rootfs redirects.
 		//  - cluster default rootfs (v0.0.48+; NVSNAP_DEFAULT_CAPTURE_PATH):
 		//    redirects unless the caller explicitly requested "criu".
-		redirect, rerr := resolveCheckpointRedirect(req.CapturePath, backend, RootfsIsDefault())
+		// criu-v2 is an explicit CRIU-engine request for redirect purposes.
+		effectivePath := req.CapturePath
+		if isCRIUV2(req.CapturePath) {
+			effectivePath = "criu"
+		}
+		redirect, rerr := resolveCheckpointRedirect(effectivePath, backend, RootfsIsDefault())
 		if rerr != nil {
 			log.WithField("requested_path", req.CapturePath).Warn(rerr.Error())
 			return nil, rerr
@@ -2110,6 +2122,10 @@ func (a *Agent) Checkpoint(ctx context.Context, req CheckpointRequest) (*Checkpo
 		// CRIU dump will capture host process memory (CPU-side only).
 		log.WithField("gpuPIDs", gpuPIDs).Info("Multi-GPU: GPU data saved during quiesce (D2H), skipping CUDA Checkpoint API")
 		checkpointedGPUPIDs = gpuPIDs
+	} else if isCRIUV2(req.CapturePath) {
+		// criu-v2: no pre-dump lock/checkpoint — the bundled cuda_plugin
+		// drives cuda-checkpoint during the in-namespace dump itself.
+		log.Info("criu-v2: GPU state handled by cuda_plugin during in-ns dump")
 	} else if len(gpuPIDs) > 0 && !disableCUDA {
 		// Phase 1 (serial): Lock every GPU process. Lock is fast (just
 		// acquires cuCheckpointProcess "lock") so serialization here costs
@@ -2379,170 +2395,190 @@ func (a *Agent) Checkpoint(ctx context.Context, req CheckpointRequest) (*Checkpo
 	// Always load CUDA plugin — it handles NVIDIA device FDs (DUMP_EXT_FILE) which CRIU
 	// cannot dump without. For interposition mode, NVSNAP_SKIP_CUDA_CHECKPOINT tells the
 	// plugin to skip PAUSE_DEVICES/CHECKPOINT_DEVICES (no cuda-checkpoint calls).
-	pluginDir := resolveCRIUPluginDir(a.config.CRIUPath, log)
-
-	if useCUDAInterposition {
-		_ = os.Setenv("NVSNAP_SKIP_CUDA_CHECKPOINT", "1")
-		defer func() { _ = os.Unsetenv("NVSNAP_SKIP_CUDA_CHECKPOINT") }()
-		log.Info("CUDA interposition: NVSNAP_SKIP_CUDA_CHECKPOINT=1 (ptrace RM restore on restore side)")
-	}
-
-	// Plan A: build explicit ExtMnt mappings from mountinfo and use RPC dump (k8s-runc-bypass style).
-	extMntMaps, dumpMountPoints, skipMounts, rootForDump, mapErr := a.buildDumpExtMnt(int(containerInfo.PID), containerInfo.RootFS)
-
-	// Keep DumpOptions for metadata reporting and as a temporary CLI fallback.
-	criuOpts := criu.DumpOptions{
-		PID:               int(containerInfo.PID),
-		ImagesDir:         checkpointDir,
-		LeaveRunning:      req.LeaveRunning,
-		ShellJob:          true,
-		Timeout:           1200,      // 20 minutes - cuda-checkpoint needs time for large GPU models
-		PluginDir:         pluginDir, // CUDA plugin handles nvidia device FDs
-		TCPEstab:          true,      // Allow dumping connected sockets (otherwise CRIU fails)
-		TcpClose:          false,     // Preserve TCP connections for inter-process communication (vLLM workers)
-		NetworkLockMethod: "skip",    // Skip iptables (may not be available in container)
-		LinkRemap:         true,      // Required for ghost files
-		FileLocks:         true,      // Many apps use file locks for coordination
-		SkipUnixSockets:   false,     // Don't skip - apps often use unix sockets for worker IPC
-		// Clean plan: avoid mnt[] wildcard; mounts handled via explicit ExtMnt in RPC dump.
-		External:     nil, // filled after computing extNet
-		SkipFsnotify: false,
-		SkipInFlight: true,
-		SkipMounts:   skipMounts,
-		LogLevel:     4,
-		// Always allow dumping processes with [uprobes] VMAs. Some kernels
-		// (e.g., OCI CRI-O nodes) have uprobes attached via observability
-		// tooling; without this flag, CRIU aborts with "PID has uprobes vma".
-		// Safe to always set — CRIU just skips the uprobe VMA (no functional
-		// impact on the dumped process or restore correctness).
-		AllowUprobes: true,
-	}
-
-	var extNet string
-	if inode, err := getNetnsInode(int(containerInfo.PID)); err == nil {
-		extNet = fmt.Sprintf("net[%d]:extNetNs", inode)
-	} else {
-		log.WithError(err).Warn("Failed to determine netns inode; network may not restore cleanly")
-	}
-	// Build list of external resources: network namespace + NVIDIA device files
-	externalResources := []string{}
-	if extNet != "" {
-		externalResources = append(externalResources, extNet)
-	} else {
-		externalResources = append(externalResources, "net[]")
-	}
-
-	// Scan for character device FDs and add them to external list.
-	// This covers nvidia, gdrdrv, and any future GPU-related drivers.
-	// The CUDA plugin's DUMP_EXT_FILE hook handles the actual save.
-	charDevices := scanCharDeviceFDs(int(containerInfo.PID), log)
-	externalResources = append(externalResources, charDevices...)
-
-	// Also scan /dev for NVIDIA device nodes (covers cases where FDs are not visible)
-	nvidiaNodes := scanNvidiaDeviceNodes(int(containerInfo.PID), log)
-	externalResources = append(externalResources, nvidiaNodes...)
-
-	// Deduplicate externals (e.g., FD + node scan overlap)
-	uniqueExternals := make([]string, 0, len(externalResources))
-	seenExternals := make(map[string]bool)
-	for _, ext := range externalResources {
-		if seenExternals[ext] {
-			continue
-		}
-		seenExternals[ext] = true
-		uniqueExternals = append(uniqueExternals, ext)
-	}
-	externalResources = uniqueExternals
-
-	log.WithFields(logrus.Fields{
-		"fdCount":   len(charDevices),
-		"nodeCount": len(nvidiaNodes),
-		"total":     len(externalResources),
-	}).Debug("Found device externals to mark")
-
-	criuOpts.External = externalResources
-
-	// Set CWD to checkpoint directory so the CUDA plugin saves nvidia-files.img there.
-	// The plugin uses CWD as fallback when opts.imgs_dir is null (RPC mode).
-	// During restore, CWD is also the checkpoint directory → file found.
-	if origCwd, err := os.Getwd(); err == nil {
-		if err := os.Chdir(checkpointDir); err == nil {
-			defer func() { _ = os.Chdir(origCwd) }()
-			log.WithField("cwd", checkpointDir).Debug("Set CWD to checkpoint directory for CUDA plugin")
-		}
-	}
-
 	var captureResult <-chan streamer.CaptureResult
-	if mapErr == nil && len(extMntMaps) > 0 && extNet != "" {
-		rpcOpts := criu.DumpRPCOptions{
-			PID:          int(containerInfo.PID),
-			ImagesDir:    checkpointDir,
-			Root:         rootForDump,
-			LeaveRunning: req.LeaveRunning,
-			ShellJob:     true,
-			PluginDir:    pluginDir,
-
-			ExtMnt:     extMntMaps,
-			External:   externalResources,
-			SkipMounts: skipMounts,
-
-			TCPEstab:        true,
-			TcpClose:        false, // Preserve inter-process TCP connections
-			FileLocks:       true,
-			LinkRemap:       true,
-			ExtUnixSk:       true,
-			ExtMasters:      true,
-			OrphanPtsMaster: true,
-			SkipInFlight:    true,
-			AllowUprobes:    true, // safe everywhere; required on kernels with uprobes-tracing tooling (OCI CRI-O)
-			Timeout:         1200,
-			GhostLimit:      512 * 1024 * 1024,
-			LogLevel:        4,
-			Stream:          os.Getenv("NVSNAP_COMPRESS_CHECKPOINT") == "1",
-		}
-
-		// Start in-process capture streamer for transparent compression
-		if rpcOpts.Stream {
-			var err error
-			captureResult, err = streamer.StartCapture(checkpointDir)
-			if err != nil {
-				log.WithError(err).Warn("Failed to start capture streamer, falling back to non-streaming")
-				rpcOpts.Stream = false
-			}
-		}
-
+	var criuOpts criu.DumpOptions // populated by the legacy path; zero for criu-v2 (flags recorded in dump.log)
+	var dumpMountPoints []string  // legacy Plan-A mountpoints; empty for criu-v2 (in-ns restore needs no ExtMnt)
+	if isCRIUV2(req.CapturePath) {
+		// criu-v2: in-namespace dump (bundle staged into the container,
+		// criu exec'd via nsenter). See checkpoint_v2.go. Post-dump steps
+		// (rootfs-diff mirror, metadata, upload) are shared with the
+		// legacy path — the artifact contract is identical.
 		_, criuSpan := tracing.Tracer().Start(ctx, "checkpoint.criu_dump")
-		criuSpan.SetAttributes(attribute.String("nvsnap.criu.mode", "rpc"))
-		if err := a.criu.DumpRPC(ctx, rpcOpts); err != nil {
+		criuSpan.SetAttributes(attribute.String("nvsnap.criu.mode", "v2-inns"))
+		if err := a.dumpV2(ctx, containerInfo, checkpointDir, sourceUpperdir, gpuPIDs, req.LeaveRunning, log); err != nil {
 			criuSpan.RecordError(err)
-			criuSpan.SetStatus(codes.Error, "CRIU dump failed (rpc)")
+			criuSpan.SetStatus(codes.Error, "CRIU dump failed (criu-v2)")
 			criuSpan.End()
-			for _, pid := range checkpointedGPUPIDs {
-				_ = a.cuda.Restore(ctx, pid)
-				_ = a.cuda.Unlock(ctx, pid)
-			}
-			return nil, fmt.Errorf("CRIU dump failed (rpc): %w", err)
+			return nil, fmt.Errorf("CRIU dump failed (criu-v2): %w", err)
 		}
 		criuSpan.End()
 	} else {
-		// CLI fallback (temporary)
-		if mapErr != nil {
-			log.WithError(mapErr).Warn("Failed to build ExtMnt mappings; falling back to CLI dump")
+		pluginDir := resolveCRIUPluginDir(a.config.CRIUPath, log)
+
+		if useCUDAInterposition {
+			_ = os.Setenv("NVSNAP_SKIP_CUDA_CHECKPOINT", "1")
+			defer func() { _ = os.Unsetenv("NVSNAP_SKIP_CUDA_CHECKPOINT") }()
+			log.Info("CUDA interposition: NVSNAP_SKIP_CUDA_CHECKPOINT=1 (ptrace RM restore on restore side)")
 		}
-		_, criuSpan := tracing.Tracer().Start(ctx, "checkpoint.criu_dump")
-		criuSpan.SetAttributes(attribute.String("nvsnap.criu.mode", "cli"))
-		if err := a.criu.Dump(ctx, criuOpts); err != nil {
-			criuSpan.RecordError(err)
-			criuSpan.SetStatus(codes.Error, "CRIU dump failed (cli)")
-			criuSpan.End()
-			for _, pid := range checkpointedGPUPIDs {
-				_ = a.cuda.Restore(ctx, pid)
-				_ = a.cuda.Unlock(ctx, pid)
+
+		// Plan A: build explicit ExtMnt mappings from mountinfo and use RPC dump (k8s-runc-bypass style).
+		extMntMaps, dmp, skipMounts, rootForDump, mapErr := a.buildDumpExtMnt(int(containerInfo.PID), containerInfo.RootFS)
+		dumpMountPoints = dmp
+
+		// Keep DumpOptions for metadata reporting and as a temporary CLI fallback.
+		criuOpts = criu.DumpOptions{
+			PID:               int(containerInfo.PID),
+			ImagesDir:         checkpointDir,
+			LeaveRunning:      req.LeaveRunning,
+			ShellJob:          true,
+			Timeout:           1200,      // 20 minutes - cuda-checkpoint needs time for large GPU models
+			PluginDir:         pluginDir, // CUDA plugin handles nvidia device FDs
+			TCPEstab:          true,      // Allow dumping connected sockets (otherwise CRIU fails)
+			TcpClose:          false,     // Preserve TCP connections for inter-process communication (vLLM workers)
+			NetworkLockMethod: "skip",    // Skip iptables (may not be available in container)
+			LinkRemap:         true,      // Required for ghost files
+			FileLocks:         true,      // Many apps use file locks for coordination
+			SkipUnixSockets:   false,     // Don't skip - apps often use unix sockets for worker IPC
+			// Clean plan: avoid mnt[] wildcard; mounts handled via explicit ExtMnt in RPC dump.
+			External:     nil, // filled after computing extNet
+			SkipFsnotify: false,
+			SkipInFlight: true,
+			SkipMounts:   skipMounts,
+			LogLevel:     4,
+			// Always allow dumping processes with [uprobes] VMAs. Some kernels
+			// (e.g., OCI CRI-O nodes) have uprobes attached via observability
+			// tooling; without this flag, CRIU aborts with "PID has uprobes vma".
+			// Safe to always set — CRIU just skips the uprobe VMA (no functional
+			// impact on the dumped process or restore correctness).
+			AllowUprobes: true,
+		}
+
+		var extNet string
+		if inode, err := getNetnsInode(int(containerInfo.PID)); err == nil {
+			extNet = fmt.Sprintf("net[%d]:extNetNs", inode)
+		} else {
+			log.WithError(err).Warn("Failed to determine netns inode; network may not restore cleanly")
+		}
+		// Build list of external resources: network namespace + NVIDIA device files
+		externalResources := []string{}
+		if extNet != "" {
+			externalResources = append(externalResources, extNet)
+		} else {
+			externalResources = append(externalResources, "net[]")
+		}
+
+		// Scan for character device FDs and add them to external list.
+		// This covers nvidia, gdrdrv, and any future GPU-related drivers.
+		// The CUDA plugin's DUMP_EXT_FILE hook handles the actual save.
+		charDevices := scanCharDeviceFDs(int(containerInfo.PID), log)
+		externalResources = append(externalResources, charDevices...)
+
+		// Also scan /dev for NVIDIA device nodes (covers cases where FDs are not visible)
+		nvidiaNodes := scanNvidiaDeviceNodes(int(containerInfo.PID), log)
+		externalResources = append(externalResources, nvidiaNodes...)
+
+		// Deduplicate externals (e.g., FD + node scan overlap)
+		uniqueExternals := make([]string, 0, len(externalResources))
+		seenExternals := make(map[string]bool)
+		for _, ext := range externalResources {
+			if seenExternals[ext] {
+				continue
 			}
-			return nil, fmt.Errorf("CRIU dump failed: %w", err)
+			seenExternals[ext] = true
+			uniqueExternals = append(uniqueExternals, ext)
 		}
-		criuSpan.End()
-	}
+		externalResources = uniqueExternals
+
+		log.WithFields(logrus.Fields{
+			"fdCount":   len(charDevices),
+			"nodeCount": len(nvidiaNodes),
+			"total":     len(externalResources),
+		}).Debug("Found device externals to mark")
+
+		criuOpts.External = externalResources
+
+		// Set CWD to checkpoint directory so the CUDA plugin saves nvidia-files.img there.
+		// The plugin uses CWD as fallback when opts.imgs_dir is null (RPC mode).
+		// During restore, CWD is also the checkpoint directory → file found.
+		if origCwd, err := os.Getwd(); err == nil {
+			if err := os.Chdir(checkpointDir); err == nil {
+				defer func() { _ = os.Chdir(origCwd) }()
+				log.WithField("cwd", checkpointDir).Debug("Set CWD to checkpoint directory for CUDA plugin")
+			}
+		}
+
+		if mapErr == nil && len(extMntMaps) > 0 && extNet != "" {
+			rpcOpts := criu.DumpRPCOptions{
+				PID:          int(containerInfo.PID),
+				ImagesDir:    checkpointDir,
+				Root:         rootForDump,
+				LeaveRunning: req.LeaveRunning,
+				ShellJob:     true,
+				PluginDir:    pluginDir,
+
+				ExtMnt:     extMntMaps,
+				External:   externalResources,
+				SkipMounts: skipMounts,
+
+				TCPEstab:        true,
+				TcpClose:        false, // Preserve inter-process TCP connections
+				FileLocks:       true,
+				LinkRemap:       true,
+				ExtUnixSk:       true,
+				ExtMasters:      true,
+				OrphanPtsMaster: true,
+				SkipInFlight:    true,
+				AllowUprobes:    true, // safe everywhere; required on kernels with uprobes-tracing tooling (OCI CRI-O)
+				Timeout:         1200,
+				GhostLimit:      512 * 1024 * 1024,
+				LogLevel:        4,
+				Stream:          os.Getenv("NVSNAP_COMPRESS_CHECKPOINT") == "1",
+			}
+
+			// Start in-process capture streamer for transparent compression
+			if rpcOpts.Stream {
+				var err error
+				captureResult, err = streamer.StartCapture(checkpointDir)
+				if err != nil {
+					log.WithError(err).Warn("Failed to start capture streamer, falling back to non-streaming")
+					rpcOpts.Stream = false
+				}
+			}
+
+			_, criuSpan := tracing.Tracer().Start(ctx, "checkpoint.criu_dump")
+			criuSpan.SetAttributes(attribute.String("nvsnap.criu.mode", "rpc"))
+			if err := a.criu.DumpRPC(ctx, rpcOpts); err != nil {
+				criuSpan.RecordError(err)
+				criuSpan.SetStatus(codes.Error, "CRIU dump failed (rpc)")
+				criuSpan.End()
+				for _, pid := range checkpointedGPUPIDs {
+					_ = a.cuda.Restore(ctx, pid)
+					_ = a.cuda.Unlock(ctx, pid)
+				}
+				return nil, fmt.Errorf("CRIU dump failed (rpc): %w", err)
+			}
+			criuSpan.End()
+		} else {
+			// CLI fallback (temporary)
+			if mapErr != nil {
+				log.WithError(mapErr).Warn("Failed to build ExtMnt mappings; falling back to CLI dump")
+			}
+			_, criuSpan := tracing.Tracer().Start(ctx, "checkpoint.criu_dump")
+			criuSpan.SetAttributes(attribute.String("nvsnap.criu.mode", "cli"))
+			if err := a.criu.Dump(ctx, criuOpts); err != nil {
+				criuSpan.RecordError(err)
+				criuSpan.SetStatus(codes.Error, "CRIU dump failed (cli)")
+				criuSpan.End()
+				for _, pid := range checkpointedGPUPIDs {
+					_ = a.cuda.Restore(ctx, pid)
+					_ = a.cuda.Unlock(ctx, pid)
+				}
+				return nil, fmt.Errorf("CRIU dump failed: %w", err)
+			}
+			criuSpan.End()
+		}
+
+	} // end legacy (non-criu-v2) dump path
 
 	// Wait for capture streamer to finish (if active)
 	var compressionInfo *streamer.CompressionInfo
@@ -2692,6 +2728,9 @@ func (a *Agent) Checkpoint(ctx context.Context, req CheckpointRequest) (*Checkpo
 		Compression:     compressionInfo,
 		// Deprecated but kept for compatibility
 		GPUPID: gpuPID,
+	}
+	if isCRIUV2(req.CapturePath) {
+		metadata.CapturePath = CapturePathCRIUV2
 	}
 
 	// Calculate checkpoint size (skip integrity checksums — too slow for 28 GB+)
@@ -3217,7 +3256,6 @@ func validateCheckpoint(checkpointDir string, hasGPU bool, log *logrus.Entry) er
 		"inventory.img",
 		"pstree.img",
 		"files.img",
-		"core-1.img",
 		"metadata.json",
 	}
 
@@ -3229,6 +3267,14 @@ func validateCheckpoint(checkpointDir string, hasGPU bool, log *logrus.Entry) er
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			missing = append(missing, f)
 		}
+	}
+
+	// Core images are named core-<pid>.img per dumped task. The legacy
+	// engine dumps container init (always pid 1); criu-v2 dumps the
+	// workload session, whose leader pid is arbitrary. Require at least
+	// one, whatever the pid.
+	if cores, _ := filepath.Glob(filepath.Join(checkpointDir, "core-*.img")); len(cores) == 0 {
+		missing = append(missing, "core-*.img")
 	}
 
 	// GPU validation: verify CRIU dump completed with CUDA plugin active.

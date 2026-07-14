@@ -200,14 +200,13 @@ func shouldSkipMount(mp string) bool {
 	if strings.HasPrefix(mp, "/run/nvidia-") || strings.HasPrefix(mp, "/run/nvidia/") {
 		return true
 	}
-	if strings.HasPrefix(mp, "/usr/lib/x86_64-linux-gnu/") {
-		base := mp[len("/usr/lib/x86_64-linux-gnu/"):]
-		if strings.HasPrefix(base, "libnvidia-") ||
-			strings.HasPrefix(base, "libcuda") ||
-			strings.HasPrefix(base, "libnv-") {
-			return true
-		}
-	}
+	// NOTE (upstream criu): driver lib file bind-mounts (libnvidia-*, libcuda*,
+	// libnv-*) are NOT skipped anymore. The workload maps them (pynvml loads
+	// libnvidia-ml), and a mapped file on a skip-mnt'd mount fails dump on
+	// current CRIU ("Can't lookup mount") — the old fork tolerated it,
+	// upstream does not. They ride ExtMnt like every other mount; same-node
+	// restore resolves the identical path via CDI re-injection.
+	// Cross-driver-version restore will need a path remap instead of a skip.
 	return false
 }
 

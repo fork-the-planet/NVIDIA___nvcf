@@ -46,15 +46,22 @@ HOST_FALLBACK_PATHS="\
 /usr/local/nvidia/lib64:\
 /usr/lib/x86_64-linux-gnu"
 
-LD_PATH=""
+# Resolve our own directory BEFORE touching LD_LIBRARY_PATH — readlink/dirname
+# themselves die once the path is exported (host/driver dirs ship their own
+# libc.so.6; mixing it with this container's ld-linux aborts with
+# "undefined symbol __tunable_is_initialized").
+DIR="$(dirname "$(readlink -f "$0")")"
+
+# Container's own libdir FIRST so libc/libm resolve from this container; the
+# host/driver dirs after it only supply libs missing here (libcuda.so.1).
+LD_PATH="/usr/lib/x86_64-linux-gnu"
 if [ -n "${NVSNAP_CUDA_LIB_DIR:-}" ]; then
-    LD_PATH="${NVSNAP_CUDA_LIB_DIR}"
+    LD_PATH="${LD_PATH}:${NVSNAP_CUDA_LIB_DIR}"
 fi
-LD_PATH="${LD_PATH:+${LD_PATH}:}${FALLBACK_PATHS}:${HOST_FALLBACK_PATHS}"
+LD_PATH="${LD_PATH}:${FALLBACK_PATHS}:${HOST_FALLBACK_PATHS}"
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
     LD_PATH="${LD_PATH}:${LD_LIBRARY_PATH}"
 fi
 export LD_LIBRARY_PATH="${LD_PATH}"
 
-DIR="$(dirname "$(readlink -f "$0")")"
 exec "${DIR}/cuda-checkpoint.real" "$@"

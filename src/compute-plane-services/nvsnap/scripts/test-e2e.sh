@@ -599,8 +599,18 @@ if matches:
     step_done "Capture (rootfs)" "OK"
 else
     log_info "Step 7: Creating checkpoint..."
-    CHECKPOINT_OUTPUT=$(${SCRIPT_DIR}/checkpoint.sh create $POD_NAME $CONTAINER_NAME $NAMESPACE 2>&1)
-    CHECKPOINT_RC=$?
+    # criu-v2 must be requested explicitly per checkpoint — the agent only
+    # takes the in-namespace engine via capturePath (or its own
+    # NVSNAP_CRIU_V2=1 env). Plain criu keeps the no-override behavior.
+    # The `|| CHECKPOINT_RC=$?` guard matters: under set -e a plain failing
+    # command substitution kills the whole script before any diagnostics
+    # below can print (first criu-v2 run died silently this way).
+    CHECKPOINT_RC=0
+    if [ "$CAPTURE_PATH" = "criu-v2" ]; then
+        CHECKPOINT_OUTPUT=$(NVSNAP_CAPTURE_PATH=criu-v2 ${SCRIPT_DIR}/checkpoint.sh create $POD_NAME $CONTAINER_NAME $NAMESPACE 2>&1) || CHECKPOINT_RC=$?
+    else
+        CHECKPOINT_OUTPUT=$(${SCRIPT_DIR}/checkpoint.sh create $POD_NAME $CONTAINER_NAME $NAMESPACE 2>&1) || CHECKPOINT_RC=$?
+    fi
 
     # The agent now refuses CRIU for Riva/Triton-backed NIMs (see
     # internal/agent/nim_backend.go). On redirect (exit 42), the
@@ -703,6 +713,30 @@ fi
 # and was removed when 5d landed peer-fanout + nvsnap-blobstore.
 
 kubectl apply -f "$RESTORE_MANIFEST"
+
+# criu-v2: the restore pod is a dumb reaper placeholder — the agent drives
+# the restore. Wait for Running (never Ready on its own), then POST
+# /v1/restore to the agent on the checkpoint node; the readiness probe
+# flips once the restored engine serves /v1/models again.
+if [ "$CAPTURE_PATH" = "criu-v2" ]; then
+    log_info "criu-v2: waiting for placeholder pod Running..."
+    kubectl wait --for=jsonpath='{.status.phase}'=Running \
+        pod/$RESTORE_POD_NAME -n $NAMESPACE --timeout=600s || fail "criu-v2 placeholder Running"
+    AGENT_POD=$(kubectl get pods -n $NAMESPACE -l app=nvsnap-agent \
+        --field-selector "spec.nodeName=$POD_NODE" -o jsonpath='{.items[0].metadata.name}')
+    [ -n "$AGENT_POD" ] || fail "criu-v2 restore (no agent pod on $POD_NODE)"
+    log_info "criu-v2: agent-driven restore via $AGENT_POD (synchronous, up to 21min)..."
+    RESTORE_RESP=$(kubectl exec -n $NAMESPACE "$AGENT_POD" -c agent -- \
+        curl -s --max-time 1260 -X POST "http://localhost:8081/v1/restore" \
+        -H 'Content-Type: application/json' \
+        -d "{\"checkpointId\":\"$CHECKPOINT_ID\",\"placeholderPodName\":\"$RESTORE_POD_NAME\",\"placeholderNamespace\":\"$NAMESPACE\"}") || true
+    if ! printf '%s' "$RESTORE_RESP" | grep -q '"newContainerId"'; then
+        log_error "agent /v1/restore failed: $RESTORE_RESP"
+        kubectl logs -n $NAMESPACE "$AGENT_POD" -c agent --tail=40 || true
+        fail "criu-v2 agent restore"
+    fi
+    log_info "criu-v2: agent restore returned: $RESTORE_RESP"
+fi
 
 log_info "Waiting for restore pod ready (up to ${RESTORE_READY_TIMEOUT}s)..."
 log_info "  (readiness probe polls /v1/models — succeeds only when serving)"

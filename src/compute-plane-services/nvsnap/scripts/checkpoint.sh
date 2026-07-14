@@ -223,9 +223,9 @@ cmd_create() {
     local capture_path_line=""
     if [[ -n "${NVSNAP_CAPTURE_PATH:-}" ]]; then
         case "$NVSNAP_CAPTURE_PATH" in
-            criu|rootfs) capture_path_line="    \"capturePath\": \"${NVSNAP_CAPTURE_PATH}\","
+            criu|criu-v2|rootfs) capture_path_line="    \"capturePath\": \"${NVSNAP_CAPTURE_PATH}\","
                          echo "Capture path override: $NVSNAP_CAPTURE_PATH" ;;
-            *) echo "Error: NVSNAP_CAPTURE_PATH must be 'criu' or 'rootfs' (got '$NVSNAP_CAPTURE_PATH')" >&2
+            *) echo "Error: NVSNAP_CAPTURE_PATH must be 'criu', 'criu-v2', or 'rootfs' (got '$NVSNAP_CAPTURE_PATH')" >&2
                return 1 ;;
         esac
     fi

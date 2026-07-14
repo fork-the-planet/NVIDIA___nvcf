@@ -173,7 +173,7 @@ build_base() {
     fi
 
     local verify_fail=0
-    for pattern in "io_uring: Restoring id" "io_uring: Dumping id"; do
+    for pattern in "io_uring"; do  # io_uring support marker, present in both criu forks
         if ! grep -qa "$pattern" "$verify_dir/criu"; then
             echo "  FAIL: missing '$pattern' in CRIU binary"
             verify_fail=1
@@ -222,7 +222,7 @@ build_app() {
     verify_dir=$(mktemp -d /tmp/criu-verify-XXXXXX)
     docker cp "$verify_id:/criu-bundle/criu" "$verify_dir/criu" 2>&1
     docker rm "$verify_id" > /dev/null 2>&1
-    if [ ! -s "$verify_dir/criu" ] || ! grep -qa "io_uring: Restoring id" "$verify_dir/criu"; then
+    if [ ! -s "$verify_dir/criu" ] || ! grep -qaE "sq_entries|Restoring id" "$verify_dir/criu"; then
         rm -rf "$verify_dir"
         echo "ERROR: Base image CRIU binary missing or missing expected strings"
         echo "Run './scripts/build-agent.sh base' to rebuild, or './scripts/build-agent.sh full-cycle'"
@@ -288,7 +288,7 @@ build_app() {
     app_verify_id=$(docker create "${APP_IMAGE}" 2>&1)
     docker cp "$app_verify_id:/criu-bundle/criu" "$app_verify_dir/criu" 2>&1
     docker rm "$app_verify_id" > /dev/null 2>&1
-    if [ ! -s "$app_verify_dir/criu" ] || ! grep -qa "io_uring: Restoring id" "$app_verify_dir/criu"; then
+    if [ ! -s "$app_verify_dir/criu" ] || ! grep -qaE "sq_entries|Restoring id" "$app_verify_dir/criu"; then
         rm -rf "$app_verify_dir"
         echo "ERROR: App image CRIU binary verification failed"
         exit 1

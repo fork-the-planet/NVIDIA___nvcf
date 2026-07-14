@@ -561,6 +561,14 @@ func (a *Agent) Restore(ctx context.Context, req RestoreRequest) (*RestoreResult
 		}
 	}
 
+	// criu-v2 checkpoints restore in-namespace with the bundled CRIU —
+	// none of the legacy ExtMnt/JoinNs/inherit-fd choreography below
+	// applies. The shared placeholder prep above (pod-IP alias, unix-sk
+	// dirs, rootfs-diff + mount replay) has already run.
+	if metadata.CapturePath == CapturePathCRIUV2 {
+		return a.restoreV2(ctx, &metadata, checkpointDir, placeholderInfo, startTime, log)
+	}
+
 	// Step 3: Configure CRIU restore
 	log.Info("Restoring process using CRIU")
 	pluginDir := resolveCRIUPluginDir(a.config.CRIUPath, log)

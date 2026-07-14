@@ -202,11 +202,14 @@ func (m *Manager) Dump(ctx context.Context, opts DumpOptions) error {
 	// When running in container: use /host/run paths (mounted from host)
 	// On bare metal: use /run paths directly
 	cmd.Env = os.Environ()
+	// ORDER MATTERS: container libdir first — the driver tree ships its own
+	// libc.so.6 and putting it first kills newer-glibc binaries in the loader
+	// (exit 127). libcuda.so only exists in the driver tree so it still resolves.
 	if m.inContainer {
 		// Container has /host/run mounted from host's /run
-		cmd.Env = append(cmd.Env, "LD_LIBRARY_PATH=/host/run/nvidia/driver/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/lib/x86_64-linux-gnu")
+		cmd.Env = append(cmd.Env, "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/host/run/nvidia/driver/usr/lib/x86_64-linux-gnu")
 	} else {
-		cmd.Env = append(cmd.Env, "LD_LIBRARY_PATH=/run/nvidia/driver/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/lib/x86_64-linux-gnu")
+		cmd.Env = append(cmd.Env, "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/run/nvidia/driver/usr/lib/x86_64-linux-gnu")
 	}
 
 	var stdout, stderr bytes.Buffer
