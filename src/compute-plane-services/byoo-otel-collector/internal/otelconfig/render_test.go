@@ -122,19 +122,25 @@ service:
                 host: "${env:OTEL_POD_IP:-0.0.0.0}"
                 port: 18888
     resource:
-      function.id: test-function-id
-      function.version.id: test-function-version-id
-      service.name: byoo-otel-collector
-      service.namespace: test-namespace
+      attributes:
+        - name: service.namespace
+          value: test-namespace
+        - name: service.name
+          value: byoo-otel-collector
+        - name: function.id
+          value: test-function-id
+        - name: function.version.id
+          value: test-function-version-id
     traces:
       processors:
         - batch:
             exporter:
               otlp:
                 protocol: grpc
-                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}
+                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}
                 headers:
-                  lightstep-access-token: ${env:OTEL_TRACING_ACCESS_TOKEN}
+                  - name: lightstep-access-token
+                    value: ${env:OTEL_TRACING_ACCESS_TOKEN}
   pipelines:
     traces:
       receivers:
@@ -147,7 +153,7 @@ service:
         - batch
   extensions:
     - healthcheckv2
-    - cgroupruntime
+    - cgroup_runtime
 `, tracesTelemetryName, tracesTelemetryName, tracesTelemetryName)
 	return []byte(internalTelemetryYAMLString)
 }
@@ -177,18 +183,23 @@ service:
                 host: "${env:OTEL_POD_IP:-0.0.0.0}"
                 port: 18888
     resource:
-      service.name: byoo-otel-collector
-      service.namespace: test-namespace
-      task.id: test-task-id
+      attributes:
+        - name: service.namespace
+          value: test-namespace
+        - name: service.name
+          value: byoo-otel-collector
+        - name: task.id
+          value: test-task-id
     traces:
       processors:
         - batch:
             exporter:
               otlp:
                 protocol: grpc
-                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}
+                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}
                 headers:
-                  lightstep-access-token: ${env:OTEL_TRACING_ACCESS_TOKEN}
+                  - name: lightstep-access-token
+                    value: ${env:OTEL_TRACING_ACCESS_TOKEN}
   pipelines:
     traces:
       receivers:
@@ -201,7 +212,7 @@ service:
         - batch
   extensions:
     - healthcheckv2
-    - cgroupruntime
+    - cgroup_runtime
 `, tracesTelemetryName, tracesTelemetryName, tracesTelemetryName)
 	return []byte(internalTelemetryYAMLString)
 }

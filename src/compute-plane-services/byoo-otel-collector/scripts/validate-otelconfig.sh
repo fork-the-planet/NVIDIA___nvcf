@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-OTEL_COLLECTOR_VERSION=${OTEL_COLLECTOR_VERSION:-"968b0f9f"}
+OTEL_COLLECTOR_VERSION=${OTEL_COLLECTOR_VERSION:-}
 
 set -euo pipefail
 
@@ -30,6 +30,14 @@ ensure_otelcol_binary() {
         return
     fi
 
+    mkdir -p _output/bin
+    if [ -z "${OTEL_COLLECTOR_VERSION:-}" ]; then
+        echo "Building otelcol-contrib from checked-in otelcol module"
+        GOWORK=off CGO_ENABLED="${CGO_ENABLED:-0}" GOMAXPROCS="${GOMAXPROCS:-2}" \
+            go -C otelcol build -trimpath -o ../_output/bin/otelcol-contrib .
+        return
+    fi
+
     if [ -z "${NGC_CLI_API_KEY:-}" ]; then
         echo "Error: NGC_CLI_API_KEY environment variable for production is required"
         exit 1
@@ -38,17 +46,46 @@ ensure_otelcol_binary() {
     export NGC_CLI_ORG=qtfpt1h0bieu
     export NGC_CLI_TEAM=nvcf-core
     echo "Downloading otelcol-contrib from NGC otelcol-contrib:${OTEL_COLLECTOR_VERSION}"
-    mkdir -p _output/bin
     otel_path=$(ngc registry resource download-version qtfpt1h0bieu/nvcf-core/otelcol-contrib:${OTEL_COLLECTOR_VERSION} | grep Downloaded | grep -o '/.*$')
     mv "${otel_path}/otelcol-contrib" _output/bin/
     chmod +x _output/bin/otelcol-contrib
+}
+
+run_with_timeout() {
+    local seconds="$1"
+    shift
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${seconds}" "$@"
+        return
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "${seconds}" "$@"
+        return
+    fi
+
+    "$@" &
+    local pid=$!
+    (
+        sleep "${seconds}"
+        kill -TERM "${pid}" 2>/dev/null
+        sleep 1
+        kill -KILL "${pid}" 2>/dev/null
+    ) &
+    local timer=$!
+
+    wait "${pid}"
+    local exit_code=$?
+    kill "${timer}" 2>/dev/null || true
+    wait "${timer}" 2>/dev/null || true
+    return "${exit_code}"
 }
 
 validate_otel_config() {
     local config_path="$1"
 
     set +e
-    timeout_output=$(timeout 2 ./_output/bin/otelcol-contrib --config="$config_path" 2>&1)
+    timeout_output=$(run_with_timeout 2 ./_output/bin/otelcol-contrib --config="$config_path" 2>&1)
     exit_code=$?
     set -e
 
@@ -70,7 +107,7 @@ reset_runtime_dirs() {
 patch_template() {
     local template_path="$1"
     cp "${template_path}" "${template_path}.bk"
-    sed -i 's@/var/run/secrets/kubernetes.io/serviceaccount/@_output/test/@g' "${template_path}"
+    perl -0pi -e 's@/var/run/secrets/kubernetes.io/serviceaccount/@_output/test/@g' "${template_path}"
 }
 
 restore_template() {
@@ -87,7 +124,7 @@ run_vm_container() {
 
         echo "Generating configs for GFN container task..."
         go run scripts/generate-otelconfig.go "$input_file" _output/otelconfigs vm container task
-        sed -i 's@/var/run/secrets/kubernetes.io/serviceaccount/@_output/test/@g' _output/otelconfigs/config.task_vm_container.yaml
+        perl -0pi -e 's@/var/run/secrets/kubernetes.io/serviceaccount/@_output/test/@g' _output/otelconfigs/config.task_vm_container.yaml
 
         echo "Validate configs ..."
         ./_output/bin/otelcol-contrib validate --config=_output/otelconfigs/config.task_vm_container.yaml
@@ -96,7 +133,7 @@ run_vm_container() {
 
         echo "Generating configs for GFN container function..."
         go run scripts/generate-otelconfig.go "$input_file" _output/otelconfigs vm container function
-        sed -i 's@/var/run/secrets/kubernetes.io/serviceaccount/@_output/test/@g' _output/otelconfigs/config.function_vm_container.yaml
+        perl -0pi -e 's@/var/run/secrets/kubernetes.io/serviceaccount/@_output/test/@g' _output/otelconfigs/config.function_vm_container.yaml
 
         echo "Validate configs ..."
         ./_output/bin/otelcol-contrib validate --config=_output/otelconfigs/config.function_vm_container.yaml

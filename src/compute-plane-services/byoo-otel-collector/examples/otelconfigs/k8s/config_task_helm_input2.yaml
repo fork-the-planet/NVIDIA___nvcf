@@ -153,7 +153,7 @@ receivers:
             - targets:
                 - ${env:OTEL_POD_IP:-0.0.0.0}:18888
 exporters:
-  otlphttp/GRAFANA_CLOUD-Grafana_prd-logs:
+  otlp_http/GRAFANA_CLOUD-Grafana_prd-logs:
     auth:
       authenticator: basicauth/GRAFANA_CLOUD-Grafana_prd-logs
     endpoint: endpoint
@@ -166,11 +166,11 @@ exporters:
       enabled: true
       num_consumers: 10
       queue_size: 1000
-  otlphttp/GRAFANA_CLOUD-Grafana_prd-metrics:
+  otlp_http/GRAFANA_CLOUD-Grafana_prd-metrics:
     auth:
       authenticator: basicauth/GRAFANA_CLOUD-Grafana_prd-metrics
     endpoint: endpoint
-  otlphttp/GRAFANA_CLOUD-Grafana_prd-traces:
+  otlp_http/GRAFANA_CLOUD-Grafana_prd-traces:
     auth:
       authenticator: basicauth/GRAFANA_CLOUD-Grafana_prd-traces
     endpoint: endpoint
@@ -215,7 +215,7 @@ processors:
     check_interval: 1s
     limit_percentage: 80
     spike_limit_percentage: 10
-  metricstransform:
+  metrics_transform:
     transforms:
       - action: update
         include: ^.*$
@@ -259,7 +259,7 @@ extensions:
     client_auth:
       password: ${file:/etc/byoo-otel-collector/secrets/Grafana_prd-apiKey}
       username: ${file:/etc/byoo-otel-collector/secrets/Grafana_prd-instanceId}
-  cgroupruntime:
+  cgroup_runtime:
     gomaxprocs:
       enabled: true
     gomemlimit:
@@ -293,24 +293,29 @@ service:
                 host: ${env:OTEL_POD_IP:-0.0.0.0}
                 port: 18888
     resource:
-      service.name: byoo-otel-collector
-      service.namespace: sr-fake-namespace
-      task.id: taskid123
+      attributes:
+        - name: service.namespace
+          value: sr-fake-namespace
+        - name: service.name
+          value: byoo-otel-collector
+        - name: task.id
+          value: taskid123
     traces:
       processors:
         - batch:
             exporter:
               otlp:
-                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}
+                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}
                 headers:
-                  lightstep-access-token: ${env:OTEL_TRACING_ACCESS_TOKEN}
+                  - name: lightstep-access-token
+                    value: ${env:OTEL_TRACING_ACCESS_TOKEN}
                 protocol: grpc
   pipelines:
     logs:
       receivers:
         - otlp
       exporters:
-        - otlphttp/GRAFANA_CLOUD-Grafana_prd-logs
+        - otlp_http/GRAFANA_CLOUD-Grafana_prd-logs
       processors:
         - memory_limiter
         - attributes/add-metadata
@@ -320,25 +325,25 @@ service:
         - otlp
         - prometheus
       exporters:
-        - otlphttp/GRAFANA_CLOUD-Grafana_prd-metrics
+        - otlp_http/GRAFANA_CLOUD-Grafana_prd-metrics
       processors:
         - memory_limiter
         - filter/metrics
         - resource
-        - metricstransform
+        - metrics_transform
         - batch
     traces:
       receivers:
         - otlp
       exporters:
-        - otlphttp/GRAFANA_CLOUD-Grafana_prd-traces
+        - otlp_http/GRAFANA_CLOUD-Grafana_prd-traces
       processors:
         - memory_limiter
         - attributes/add-metadata
         - batch
   extensions:
     - healthcheckv2
-    - cgroupruntime
+    - cgroup_runtime
     - basicauth/GRAFANA_CLOUD-Grafana_prd-logs
     - basicauth/GRAFANA_CLOUD-Grafana_prd-metrics
     - basicauth/GRAFANA_CLOUD-Grafana_prd-traces

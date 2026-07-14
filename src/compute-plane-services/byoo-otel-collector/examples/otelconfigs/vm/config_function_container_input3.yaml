@@ -153,7 +153,7 @@ exporters:
       enabled: true
       num_consumers: 10
       queue_size: 1000
-  otlphttp/GRAFANA_CLOUD-something-e2e-grafana-all-types-http-metrics:
+  otlp_http/GRAFANA_CLOUD-something-e2e-grafana-all-types-http-metrics:
     auth:
       authenticator: basicauth/GRAFANA_CLOUD-something-e2e-grafana-all-types-http-metrics
     endpoint: endpoint
@@ -201,7 +201,7 @@ processors:
     check_interval: 1s
     limit_percentage: 80
     spike_limit_percentage: 10
-  metricstransform:
+  metrics_transform:
     transforms:
       - action: update
         include: ^.*$
@@ -240,7 +240,7 @@ extensions:
     client_auth:
       password: ${file:/etc/byoo-otel-collector/secrets/something-e2e-grafana-all-types-http-apiKey}
       username: ${file:/etc/byoo-otel-collector/secrets/something-e2e-grafana-all-types-http-instanceId}
-  cgroupruntime:
+  cgroup_runtime:
     gomaxprocs:
       enabled: true
     gomemlimit:
@@ -274,18 +274,24 @@ service:
                 host: ${env:OTEL_POD_IP:-0.0.0.0}
                 port: 18888
     resource:
-      function.id: fake-function-id
-      function.version.id: fake-function-version-id
-      service.name: byoo-otel-collector
-      service.namespace: sr-fake-namespace
+      attributes:
+        - name: service.namespace
+          value: sr-fake-namespace
+        - name: service.name
+          value: byoo-otel-collector
+        - name: function.id
+          value: fake-function-id
+        - name: function.version.id
+          value: fake-function-version-id
     traces:
       processors:
         - batch:
             exporter:
               otlp:
-                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}
+                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}
                 headers:
-                  lightstep-access-token: ${env:OTEL_TRACING_ACCESS_TOKEN}
+                  - name: lightstep-access-token
+                    value: ${env:OTEL_TRACING_ACCESS_TOKEN}
                 protocol: grpc
   pipelines:
     logs:
@@ -302,14 +308,14 @@ service:
         - otlp
         - prometheus
       exporters:
-        - otlphttp/GRAFANA_CLOUD-something-e2e-grafana-all-types-http-metrics
+        - otlp_http/GRAFANA_CLOUD-something-e2e-grafana-all-types-http-metrics
       processors:
         - memory_limiter
         - filter/metrics
         - resource
-        - metricstransform
+        - metrics_transform
         - batch
   extensions:
     - healthcheckv2
-    - cgroupruntime
+    - cgroup_runtime
     - basicauth/GRAFANA_CLOUD-something-e2e-grafana-all-types-http-metrics

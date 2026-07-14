@@ -206,7 +206,7 @@ processors:
     check_interval: 1s
     limit_percentage: 80
     spike_limit_percentage: 10
-  metricstransform:
+  metrics_transform:
     transforms:
       - action: update
         include: ^.*$
@@ -238,7 +238,7 @@ processors:
       - action: delete
         key: service.instance.id
 extensions:
-  cgroupruntime:
+  cgroup_runtime:
     gomaxprocs:
       enabled: true
     gomemlimit:
@@ -272,17 +272,22 @@ service:
                 host: ${env:OTEL_POD_IP:-0.0.0.0}
                 port: 18888
     resource:
-      service.name: byoo-otel-collector
-      service.namespace: sr-fake-namespace
-      task.id: taskid123
+      attributes:
+        - name: service.namespace
+          value: sr-fake-namespace
+        - name: service.name
+          value: byoo-otel-collector
+        - name: task.id
+          value: taskid123
     traces:
       processors:
         - batch:
             exporter:
               otlp:
-                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}
+                endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}
                 headers:
-                  lightstep-access-token: ${env:OTEL_TRACING_ACCESS_TOKEN}
+                  - name: lightstep-access-token
+                    value: ${env:OTEL_TRACING_ACCESS_TOKEN}
                 protocol: grpc
   pipelines:
     metrics:
@@ -295,7 +300,7 @@ service:
         - memory_limiter
         - filter/metrics
         - resource
-        - metricstransform
+        - metrics_transform
         - batch
     traces:
       receivers:
@@ -308,4 +313,4 @@ service:
         - batch
   extensions:
     - healthcheckv2
-    - cgroupruntime
+    - cgroup_runtime

@@ -179,7 +179,7 @@ processors:
         value: "${env:NVCT_TASK_ID:-unknown}"
       {{ end }}
 
-  metricstransform:
+  metrics_transform:
     transforms:
       - include: ^.*$
         match_type: regexp
@@ -222,7 +222,7 @@ processors:
           {{ end }} 
 
 extensions:
-  cgroupruntime:
+  cgroup_runtime:
     gomaxprocs:
       enabled: true
     gomemlimit:
