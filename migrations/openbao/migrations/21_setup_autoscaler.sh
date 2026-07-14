@@ -59,11 +59,9 @@ VAULT_JWT_AUTH_ROLE_POLICIES="${VAULT_JWT_AUTH_ROLE_POLICIES},${VAULT_POLICY_BAS
 #-------------------------------------------
 # Add Access to NVCF API via JWT Secret Role
 #
-# The autoscaler signs tokens against the NVCF API issuer to make scaling
-# requests (admin:scale_function) and to fetch per-function scaling configs
-# (autoscaler:fetch_config). Both scopes ride on a single token, matching the
-# autoscaler OAuth2 client which requests
-# "admin:scale_function autoscaler:fetch_config".
+# The autoscaler signs tokens against the NVCF API issuer to call NVCF gRPC
+# autoscaler APIs with the unified autoscaler:auth scope. autoscaler:fetch_config
+# is deprecated and should not be requested by the function autoscaler.
 #-------------------------------------------
 
 NVCF_API_SERVICE_ACCOUNT_NAMESPACE="nvcf"
@@ -71,7 +69,7 @@ NVCF_API_SERVICE_ACCOUNT_NAME="nvcf-api"
 NVCF_API_SERVICE_NAME="api"
 NVCF_API_SECRET_BASE_PATH="services/${NVCF_API_SERVICE_ACCOUNT_NAME}"
 NVCF_API_SECRET_POLICY_PATH="services-${NVCF_API_SERVICE_ACCOUNT_NAME}"
-SCOPES="admin:scale_function,autoscaler:fetch_config"
+SCOPES="autoscaler:auth"
 
 #-------------------------------------------
 # Create JWT Secret Role for NVCF API JWT Signer

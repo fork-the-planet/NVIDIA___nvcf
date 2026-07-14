@@ -39,6 +39,7 @@ pub struct CachedToken {
 #[derive(Debug, Clone)]
 pub struct OAuth2Client {
     pub oauth2_api_url: String,
+    pub scope: String,
     pub secrets_watcher: Arc<SecretFileWatcher>,
     pub http_client: reqwest_middleware::ClientWithMiddleware,
     pub token_cache: Arc<RwLock<Option<CachedToken>>>,
@@ -47,10 +48,12 @@ pub struct OAuth2Client {
 impl OAuth2Client {
     pub fn new(
         oauth2_api_url: String,
+        scope: String,
         secrets_watcher: Arc<SecretFileWatcher>,
     ) -> Result<Self, anyhow::Error> {
         Self::with_timeouts(
             oauth2_api_url,
+            scope,
             secrets_watcher,
             DEFAULT_HTTP_TIMEOUT,
             TOKEN_REFRESH_INTERVAL,
@@ -59,12 +62,14 @@ impl OAuth2Client {
 
     pub fn with_timeouts(
         oauth2_api_url: String,
+        scope: String,
         secrets_watcher: Arc<SecretFileWatcher>,
         http_timeout: Duration,
         token_refresh_interval: Duration,
     ) -> Result<Self, anyhow::Error> {
         let client = Self {
             oauth2_api_url: oauth2_api_url.to_string(),
+            scope,
             secrets_watcher,
             http_client: reqwest_middleware::ClientBuilder::new(
                 ClientBuilder::new().timeout(http_timeout).build().unwrap(),
@@ -83,6 +88,7 @@ impl OAuth2Client {
     fn start_token_refresh_task(&self, token_refresh_interval: Duration) {
         let token_cache = self.token_cache.clone();
         let oauth2_api_url = self.oauth2_api_url.clone();
+        let scope = self.scope.clone();
         let secrets_watcher = self.secrets_watcher.clone();
         let http_client = self.http_client.clone();
         tracing::info!("Starting token refresh task for OAuth2 client");
@@ -113,6 +119,7 @@ impl OAuth2Client {
                     if let Err(e) = Self::refresh_token_internal(
                         &token_cache,
                         &oauth2_api_url,
+                        &scope,
                         &secrets_watcher,
                         &http_client,
                     )
@@ -143,6 +150,7 @@ impl OAuth2Client {
         Self::refresh_token_internal(
             &self.token_cache,
             &self.oauth2_api_url,
+            &self.scope,
             &self.secrets_watcher,
             &self.http_client,
         )
@@ -152,6 +160,7 @@ impl OAuth2Client {
     async fn refresh_token_internal(
         token_cache: &Arc<RwLock<Option<CachedToken>>>,
         oauth2_api_url: &str,
+        scope: &str,
         secrets_watcher: &Arc<SecretFileWatcher>,
         http_client: &reqwest_middleware::ClientWithMiddleware,
     ) -> Result<String, Box<dyn std::error::Error>> {
@@ -164,6 +173,7 @@ impl OAuth2Client {
 
         let (new_token, expires_in) = Self::get_token_request_internal(
             oauth2_api_url,
+            scope,
             &nvcf_creds.client_id,
             &nvcf_creds.client_secret,
             http_client,
@@ -187,6 +197,7 @@ impl OAuth2Client {
 
     async fn get_token_request_internal(
         oauth2_api_url: &str,
+        scope: &str,
         client_id: &str,
         client_secret: &str,
         http_client: &ClientWithMiddleware,
@@ -195,10 +206,7 @@ impl OAuth2Client {
         let token_url = format!("{}/token", oauth2_api_url);
         tracing::debug!("Fetching token from {}", token_url);
 
-        let params = [
-            ("grant_type", "client_credentials"),
-            ("scope", "admin:scale_function autoscaler:fetch_config"),
-        ];
+        let params = [("grant_type", "client_credentials"), ("scope", scope)];
 
         let response = http_client
             .post(&token_url)
@@ -271,10 +279,12 @@ impl OAuth2Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockito::Server;
+    use mockito::{Matcher, Server};
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::fs;
+
+    const TEST_SCOPE: &str = "autoscaler:auth";
 
     async fn create_test_secrets_file() -> (TempDir, std::path::PathBuf) {
         let temp_dir = TempDir::new().unwrap();
@@ -300,8 +310,12 @@ mod tests {
         let (_temp_dir, secrets_file) = create_test_secrets_file().await;
         let secrets_watcher = SecretFileWatcher::new(&secrets_file).await.unwrap();
 
-        let oauth2_client =
-            OAuth2Client::new("https://test.com".to_string(), Arc::new(secrets_watcher)).unwrap();
+        let oauth2_client = OAuth2Client::new(
+            "https://test.com".to_string(),
+            TEST_SCOPE.to_string(),
+            Arc::new(secrets_watcher),
+        )
+        .unwrap();
 
         // Test that the credentials are properly loaded
         let secrets = oauth2_client.secrets_watcher.get_config();
@@ -316,8 +330,12 @@ mod tests {
         let (_temp_dir, secrets_file) = create_test_secrets_file().await;
         let secrets_watcher = SecretFileWatcher::new(&secrets_file).await.unwrap();
 
-        let oauth2_client =
-            OAuth2Client::new("https://test.com".to_string(), Arc::new(secrets_watcher)).unwrap();
+        let oauth2_client = OAuth2Client::new(
+            "https://test.com".to_string(),
+            TEST_SCOPE.to_string(),
+            Arc::new(secrets_watcher),
+        )
+        .unwrap();
 
         // Test cache expiration logic
         let cached_token = CachedToken {
@@ -344,6 +362,10 @@ mod tests {
         // Mock successful OAuth2 token response
         let mock = server
             .mock("POST", "/token")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("grant_type=client_credentials".to_string()),
+                Matcher::Regex("scope=autoscaler%3Aauth".to_string()),
+            ]))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -360,6 +382,7 @@ mod tests {
         let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
         let result = OAuth2Client::get_token_request_internal(
             &server.url(),
+            TEST_SCOPE,
             "test_client_id",
             "test_client_secret",
             &client,
@@ -396,6 +419,7 @@ mod tests {
         let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
         let result = OAuth2Client::get_token_request_internal(
             &server.url(),
+            TEST_SCOPE,
             "invalid_client_id",
             "invalid_client_secret",
             &client,
@@ -433,7 +457,12 @@ mod tests {
             .create_async()
             .await;
 
-        let oauth2_client = OAuth2Client::new(server.url(), Arc::new(secrets_watcher)).unwrap();
+        let oauth2_client = OAuth2Client::new(
+            server.url(),
+            TEST_SCOPE.to_string(),
+            Arc::new(secrets_watcher),
+        )
+        .unwrap();
 
         // First call should fetch token from mock server
         let token1 = oauth2_client.get_jwt_token().await;
@@ -487,7 +516,12 @@ mod tests {
             .create_async()
             .await;
 
-        let oauth2_client = OAuth2Client::new(server.url(), Arc::new(secrets_watcher)).unwrap();
+        let oauth2_client = OAuth2Client::new(
+            server.url(),
+            TEST_SCOPE.to_string(),
+            Arc::new(secrets_watcher),
+        )
+        .unwrap();
 
         // Get first token
         let token1 = oauth2_client.get_jwt_token().await.unwrap();

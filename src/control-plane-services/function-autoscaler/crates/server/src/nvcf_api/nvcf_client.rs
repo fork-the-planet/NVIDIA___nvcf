@@ -67,6 +67,9 @@ fn parse_function_status(status: &str) -> Option<FunctionStatus> {
 pub struct NvcfApiSettings {
     /// Base URL for the OAuth2 client API used for authentication
     pub oauth2_token_api_address: String,
+    /// Space-delimited OAuth2 scopes requested for NVCF API gRPC calls
+    #[serde(default = "default_oauth2_token_scope")]
+    pub oauth2_token_scope: String,
     /// gRPC endpoint for the NVCF API's Autoscaler service
     pub nvcf_api_grpc_address: String,
     #[serde(default)]
@@ -85,6 +88,9 @@ fn default_auth_http_timeout() -> u64 {
 }
 fn default_token_refresh_interval() -> u64 {
     180
+}
+fn default_oauth2_token_scope() -> String {
+    "autoscaler:auth".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +117,7 @@ impl Default for NvcfApiSettings {
     fn default() -> Self {
         Self {
             oauth2_token_api_address: "".to_string(),
+            oauth2_token_scope: default_oauth2_token_scope(),
             nvcf_api_grpc_address: "http://localhost:50051".to_string(),
             disable_auth: true,
             dry_run: false,
@@ -211,6 +218,7 @@ impl NvcfApiService {
             Some(
                 oauth2_client::OAuth2Client::with_timeouts(
                     nvcf_api_settings.oauth2_token_api_address,
+                    nvcf_api_settings.oauth2_token_scope,
                     secrets_watcher,
                     Duration::from_secs(nvcf_api_settings.auth_http_timeout_seconds),
                     Duration::from_secs(nvcf_api_settings.token_refresh_interval_seconds),
@@ -694,6 +702,7 @@ impl NvcfApiService {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use uuid::Uuid;
 
     use super::*;
@@ -735,6 +744,44 @@ mod tests {
         assert_eq!(parse_function_status(""), None);
         assert_eq!(parse_function_status("SOME_NEW_STATUS"), None);
         assert_eq!(parse_function_status("active"), None);
+    }
+
+    #[test]
+    fn test_nvcf_api_settings_default_uses_grpc_autoscaler_scope() {
+        let settings = NvcfApiSettings::default();
+
+        assert_eq!(settings.oauth2_token_scope, "autoscaler:auth");
+        assert!(!settings.oauth2_token_scope.contains("admin:scale_function"));
+        assert!(!settings
+            .oauth2_token_scope
+            .contains("autoscaler:fetch_config"));
+    }
+
+    #[test]
+    fn test_nvcf_api_settings_deserialization_defaults_scope_when_missing() {
+        let settings: NvcfApiSettings = serde_json::from_value(json!({
+            "oauth2_token_api_address": "https://oauth.example.test",
+            "nvcf_api_grpc_address": "https://grpc.example.test",
+            "disable_auth": false,
+            "dry_run": false
+        }))
+        .unwrap();
+
+        assert_eq!(settings.oauth2_token_scope, default_oauth2_token_scope());
+    }
+
+    #[test]
+    fn test_nvcf_api_settings_deserialization_preserves_configured_scope() {
+        let settings: NvcfApiSettings = serde_json::from_value(json!({
+            "oauth2_token_api_address": "https://oauth.example.test",
+            "oauth2_token_scope": "custom:scale custom:fetch",
+            "nvcf_api_grpc_address": "https://grpc.example.test",
+            "disable_auth": false,
+            "dry_run": false
+        }))
+        .unwrap();
+
+        assert_eq!(settings.oauth2_token_scope, "custom:scale custom:fetch");
     }
 
     #[tokio::test]

@@ -161,6 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scaling_settings = initialize_scaling_settings(
         config.scaling.clone(),
         config.nvcf_api.oauth2_token_api_address.clone(),
+        config.nvcf_api.oauth2_token_scope.clone(),
         config.nvcf_api.nvcf_api_grpc_address.clone(),
         secrets_file_watcher.clone(),
     )
@@ -367,6 +368,7 @@ async fn handler_404() -> impl IntoResponse {
 async fn initialize_scaling_settings(
     mut settings: ScalingSettings,
     oauth2_token_api_address: String,
+    oauth2_token_scope: String,
     nvcf_api_grpc_address: String,
     secrets_watcher: Arc<SecretFileWatcher>,
 ) -> ScalingSettings {
@@ -385,7 +387,11 @@ async fn initialize_scaling_settings(
             tracing::info!("Cache configuration: TTL={}s", config.ttl_seconds);
 
             // Create OAuth2 client for gRPC auth (same auth mechanism as NVCF API)
-            let oauth2_client = match OAuth2Client::new(oauth2_token_api_address, secrets_watcher) {
+            let oauth2_client = match OAuth2Client::new(
+                oauth2_token_api_address,
+                oauth2_token_scope,
+                secrets_watcher,
+            ) {
                 Ok(client) => Arc::new(client),
                 Err(e) => {
                     tracing::error!("Failed to create OAuth2 client for policy cache: {}. Falling back to default thresholds.", e);

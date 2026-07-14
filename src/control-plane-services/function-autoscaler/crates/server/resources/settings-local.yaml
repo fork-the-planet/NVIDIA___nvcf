@@ -31,6 +31,7 @@ secrets_path: "local_env/vault/secrets.json"
 tracing_key: ""
 nvcf_api:
   oauth2_token_api_address: ""
+  oauth2_token_scope: "autoscaler:auth"
   nvcf_api_grpc_address: "http://localhost:50051"
   disable_auth: true
   dry_run: true
