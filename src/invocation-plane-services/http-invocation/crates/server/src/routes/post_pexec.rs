@@ -453,8 +453,7 @@ pub(crate) async fn handle_streaming_response(
             response?
         }
         _ = tokio::time::sleep(poll_duration + Duration::from_secs(2)) => {
-            tracing::warn!("generating gateway timeout response for request id {request_id}");
-            StatusCode::GATEWAY_TIMEOUT.into_response()
+            gateway_timeout_response(function_id, request_id)
         }
     };
 
@@ -500,6 +499,16 @@ pub(crate) async fn handle_streaming_response(
         },
     );
     Ok(Response::from_parts(parts, Body::new(recorded_body)))
+}
+
+fn gateway_timeout_response(function_id: Uuid, request_id: RequestId) -> Response {
+    tracing::warn!("generating gateway timeout response for request id {request_id}");
+    metrics::record_nvcf_application_error(
+        StatusCode::GATEWAY_TIMEOUT.as_str().to_string(),
+        Some(function_id.to_string()),
+    );
+    Span::current().record("app_error", "true");
+    StatusCode::GATEWAY_TIMEOUT.into_response()
 }
 
 #[tracing::instrument(level = Level::TRACE, skip(s3_service))]
@@ -599,10 +608,44 @@ impl Drop for FnOnDrop {
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use metrics_util::MetricKind;
     use std::time::Duration;
     use testcontainers_modules::nats::Nats;
     use testcontainers_modules::testcontainers::core::Mount;
     use testcontainers_modules::testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+
+    #[test]
+    fn gateway_timeout_response_records_function_error_metric() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let function_id = Uuid::new_v4();
+
+        ::metrics::with_local_recorder(&recorder, || {
+            let response = gateway_timeout_response(function_id, RequestId::new());
+            assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        });
+
+        let metric_value = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find_map(|(key, _, _, value)| {
+                let matches = key.kind() == MetricKind::Counter
+                    && key.key().name() == "app.invocation.error"
+                    && key
+                        .key()
+                        .labels()
+                        .any(|label| label.key() == "http_status_code" && label.value() == "504")
+                    && key.key().labels().any(|label| {
+                        label.key() == "function_id" && label.value() == function_id.to_string()
+                    });
+                matches.then_some(value)
+            })
+            .expect("gateway timeout response should record app.invocation.error by function_id");
+
+        assert_eq!(metric_value, DebugValue::Counter(1));
+    }
 
     async fn make_nats_service() -> (Arc<NatsService>, async_nats::Client, ContainerAsync<Nats>) {
         let container = Nats::default()

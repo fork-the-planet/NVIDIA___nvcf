@@ -238,8 +238,11 @@ pub fn record_invocation_start(function_id: String, function_version_id: String,
 }
 
 // errors that happened in the nvcf system, as opposed to inference errors
-pub fn record_nvcf_application_error(status_code: String) {
-    let labels = [("http_status_code", status_code)];
+pub fn record_nvcf_application_error(status_code: String, function_id: Option<String>) {
+    let labels = [
+        ("http_status_code", status_code),
+        ("function_id", function_id.unwrap_or_default()),
+    ];
     counter!(FUNCTION_INVOCATION_ERROR.name, &labels).increment(1);
 }
 
@@ -329,4 +332,40 @@ fn register_counter(metric: Metric) {
 
 fn register_histogram(metric: Metric) {
     metrics::describe_histogram!(metric.name, metric.description);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use metrics_util::MetricKind;
+
+    #[test]
+    fn application_error_uses_empty_function_id_when_context_is_missing() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_nvcf_application_error("504".to_string(), None);
+        });
+
+        let metrics = snapshotter.snapshot().into_vec();
+        let (_, _, _, value) = metrics
+            .iter()
+            .find(|(key, _, _, _)| {
+                key.kind() == MetricKind::Counter
+                    && key.key().name() == "app.invocation.error"
+                    && key
+                        .key()
+                        .labels()
+                        .any(|label| label.key() == "http_status_code" && label.value() == "504")
+                    && key
+                        .key()
+                        .labels()
+                        .any(|label| label.key() == "function_id" && label.value().is_empty())
+            })
+            .expect("app.invocation.error should include an empty function_id label");
+
+        assert_eq!(value, &DebugValue::Counter(1));
+    }
 }

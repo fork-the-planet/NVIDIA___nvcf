@@ -156,6 +156,20 @@ def tag_exists_for_version(service, version):
     return ""
 
 
+def existing_tag_for_version(root, service, version):
+    for prefix in tag_prefixes(service):
+        tag = f"{prefix}{version}"
+        existing = run(
+            ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
+            cwd=root,
+            capture=True,
+            check=False,
+        ).strip()
+        if existing:
+            return tag
+    return ""
+
+
 def tag_sha(root, tag):
     return run(["git", "rev-list", "-n", "1", tag], cwd=root, capture=True).strip()
 
@@ -403,6 +417,11 @@ def publish_tag_for_version(root, service, version, dry_run, draft, reason):
 
 def publish_version_file_release(root, service, dry_run, draft):
     version = validate_version_file(root, service)
+    existing = existing_tag_for_version(root, service, version)
+    if existing:
+        existing_sha = tag_sha(root, existing)
+        print(f"[github-release] {service['id']}: {existing} already exists at {existing_sha}; skipping")
+        return
     publish_tag_for_version(root, service, version, dry_run, draft, f"{service.get('version_file') or 'version file'}")
 
 
