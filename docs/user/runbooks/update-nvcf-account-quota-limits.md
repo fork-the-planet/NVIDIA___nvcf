@@ -13,8 +13,8 @@ The following limits can be updated using the same method:
 
 | Field | Description | Max |
 |-------|-------------|-----|
-| `maxFunctionsAllowed` | Maximum number of functions | unlimited |
-| `maxTasksAllowed` | Maximum number of tasks | unlimited |
+| `maxFunctionsAllowed` | Maximum number of functions | 2147483647 |
+| `maxTasksAllowed` | Maximum number of tasks | 2147483647 |
 | `maxTelemetriesAllowed` | Maximum number of telemetries | 50 |
 | `maxRegistryCredentialsAllowed` | Maximum number of registry credentials | 50 |
 
