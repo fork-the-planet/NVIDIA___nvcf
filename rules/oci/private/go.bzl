@@ -40,6 +40,7 @@ def _go_oci_image_impl(name, visibility, binary, base, entrypoint, registry, tag
     # the rules_pkg default-0644 startup-failure pattern. Forcing 0755 here closes that
     # latent hole at zero cost for the current callers.
     pkg_tar(
+        extension = "tar.gz",  # gzip the layer (Docker parity; rules_oci ships pkg_tar as-is)
         name = layer_name,
         srcs = [binary],
         mode = "0755",

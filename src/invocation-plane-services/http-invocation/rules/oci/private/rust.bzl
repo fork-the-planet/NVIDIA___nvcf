@@ -17,6 +17,7 @@ def _rust_oci_image_impl(name, visibility, binary, binary_path, base, entrypoint
 
     layer_name = name + "_layer"
     pkg_tar(
+        extension = "tar.gz",  # gzip the layer (Docker parity; rules_oci ships pkg_tar as-is)
         name = layer_name,
         srcs = [binary],
         package_dir = "/",

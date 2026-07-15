@@ -32,6 +32,7 @@ def _go_oci_image_impl(name, visibility, binary, base, entrypoint, registry, tag
     # assembled. strip_prefix.from_pkg("") strips the binary's own
     # package path, regardless of where this macro is called from.
     pkg_tar(
+        extension = "tar.gz",  # gzip the layer (Docker parity; rules_oci ships pkg_tar as-is)
         name = layer_name,
         srcs = [binary],
         package_dir = "/",

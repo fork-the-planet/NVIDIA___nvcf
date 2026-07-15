@@ -52,6 +52,7 @@ def _go_oci_image_impl(name, visibility, binary, base, entrypoint, binary_path, 
             visibility = ["//visibility:private"],
         )
         pkg_tar(
+            extension = "tar.gz",  # gzip the layer (Docker parity; rules_oci ships pkg_tar as-is)
             name = layer_name,
             srcs = [":" + files_name],
             # Layer visibility matches the image's so the calling
@@ -62,6 +63,7 @@ def _go_oci_image_impl(name, visibility, binary, base, entrypoint, binary_path, 
         default_entry = [binary_path]
     else:
         pkg_tar(
+            extension = "tar.gz",  # gzip the layer (Docker parity; rules_oci ships pkg_tar as-is)
             name = layer_name,
             srcs = [binary],
             package_dir = "/",
