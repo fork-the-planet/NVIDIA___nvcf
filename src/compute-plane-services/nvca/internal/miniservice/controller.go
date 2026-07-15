@@ -203,7 +203,8 @@ func BuildController(ctx context.Context,
 			}
 			return c, err
 		},
-		newPermissionsChecker: newSelfSubjectAccessReviewPermissionsChecker,
+		newPermissionsChecker:             newSelfSubjectAccessReviewPermissionsChecker,
+		failedWorkloadUpdateRevisionCache: map[string]error{},
 	}
 
 	if r.regITCache == nil {

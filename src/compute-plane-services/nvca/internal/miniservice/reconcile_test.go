@@ -3728,7 +3728,7 @@ func createNamespaceDefaultSA(t *testing.T, ctx context.Context, r *Reconciler, 
 	require.NoError(t, err)
 }
 
-var newFakePermissionsChecker = func(map[apischema.GroupVersionKind]error) permissionCheckerFunc {
+var newFakePermissionsChecker = func(map[apischema.GroupVersionKind]error, []string) permissionCheckerFunc {
 	return func(context.Context, client.Client, apischema.GroupVersionKind, string) error {
 		return nil
 	}
@@ -4659,7 +4659,7 @@ func Test_newSelfSubjectAccessReviewPermissionsChecker(t *testing.T) {
 		Build()
 
 	caniCache := map[apischema.GroupVersionKind]error{}
-	checkPerms := newSelfSubjectAccessReviewPermissionsChecker(caniCache)
+	checkPerms := newSelfSubjectAccessReviewPermissionsChecker(caniCache, requiredRBACVerbsWrite)
 
 	podGVK := apischema.GroupVersionKind{Version: "v1", Kind: "Pod"}
 	podTermErr := reconcile.TerminalError(resourceAccesssDeniedError{
@@ -4670,7 +4670,7 @@ func Test_newSelfSubjectAccessReviewPermissionsChecker(t *testing.T) {
 	if assert.Contains(t, caniCache, podGVK) {
 		assert.Equal(t, podTermErr, caniCache[podGVK])
 	}
-	for _, verb := range requiredRBACVerbs {
+	for _, verb := range requiredRBACVerbsWrite {
 		err = c.Delete(ctx, &authorizationv1.SelfSubjectAccessReview{ObjectMeta: metav1.ObjectMeta{Name: verb + "-pods"}})
 		require.NoError(t, err)
 	}
@@ -4688,12 +4688,12 @@ func Test_newSelfSubjectAccessReviewPermissionsChecker(t *testing.T) {
 	if assert.Contains(t, caniCache, podGVK) {
 		assert.Equal(t, podTermErr, caniCache[podGVK])
 	}
-	for _, verb := range requiredRBACVerbs {
+	for _, verb := range requiredRBACVerbsWrite {
 		err = c.Delete(ctx, &authorizationv1.SelfSubjectAccessReview{ObjectMeta: metav1.ObjectMeta{Name: verb + "-pods"}})
 		require.NoError(t, err)
 	}
 
-	for _, verb := range requiredRBACVerbs {
+	for _, verb := range requiredRBACVerbsWrite {
 		err := c.Create(ctx, &authorizationv1.SelfSubjectAccessReview{
 			ObjectMeta: metav1.ObjectMeta{Name: verb + "-pods"},
 			Status: authorizationv1.SubjectAccessReviewStatus{

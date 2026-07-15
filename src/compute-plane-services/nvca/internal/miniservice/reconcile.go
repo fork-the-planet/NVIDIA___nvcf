@@ -28,6 +28,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NVIDIA/nvcf/src/libraries/go/lib/pkg/icms-translate/translate/common"
@@ -105,8 +106,12 @@ type Reconciler struct {
 	// Creates a client.Client that performs request on behalf of a specific user,
 	// in this case a namespace's service account.
 	newImpersonatingClient func(namespace string) (client.Client, error)
-	// Creatse a function that checks permissions for resources, caching responses per GVK in caniCache.
-	newPermissionsChecker func(caniCache map[schema.GroupVersionKind]error) permissionCheckerFunc
+	// Creatse a function that checks verb permissions for resources, caching responses per GVK in caniCache.
+	newPermissionsChecker func(caniCache map[schema.GroupVersionKind]error, verbs []string) permissionCheckerFunc
+
+	// Cache of failed workload update attempts by revision to avoid unnecessary expensive operations like rendering.
+	failedWorkloadUpdateRevisionCache     map[string]error
+	failedWorkloadUpdateRevisionCacheLock sync.RWMutex
 }
 
 // permissionCheckerFunc checks if c can perform a minimal set of actions on an object
@@ -302,6 +307,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 }
 
 func isTerminal(err error) bool { return errors.Is(err, reconcile.TerminalError(nil)) }
+
+// unwrapTerminalError unwraps err if terminal until a non-terminal error is found.
+func unwrapTerminalError(err error) error {
+	for err != nil {
+		if !isTerminal(err) {
+			return err
+		}
+		err = errors.Unwrap(err)
+	}
+	return err
+}
 
 func normalizeMiniServicePhase(phase v1alpha1.MiniServicePhase) string {
 	if phase == "" {
@@ -779,6 +795,70 @@ func needsWorkloadUpdate(ms *v1alpha1.MiniService) bool {
 		ms.Status.Revision > 0
 }
 
+func (r *Reconciler) prepareUpdateWorkload(ctx context.Context,
+	ms *v1alpha1.MiniService,
+	icmsReq *nvcav2beta1.ICMSRequest,
+) ([]client.Object, []v1alpha1.ResourceStatus, string, string, error) {
+	log := logf.FromContext(ctx)
+
+	log.Info("Preparing MiniService workload update", "revision", ms.Status.Revision)
+
+	funcLaunchSpec := icmsReq.Spec.CreationMsgInfo.FunctionLaunchSpecification
+	taskLaunchSpec := icmsReq.Spec.CreationMsgInfo.TaskLaunchSpecification
+	if funcLaunchSpec == nil && taskLaunchSpec == nil {
+		return nil, nil, "", "", reconcile.TerminalError(
+			fmt.Errorf("both function and task launch specs are empty in ICMSRequest %s", icmsReq.Name))
+	}
+
+	functionName, taskName, err := getFunctionNameAndTaskName(funcLaunchSpec, taskLaunchSpec)
+	if err != nil {
+		return nil, nil, "", "", reconcile.TerminalError(fmt.Errorf("failed to get function name and task name: %w", err))
+	}
+
+	objsData, isRendered, err := r.getRenderedData(ctx, ms)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+
+	if !isRendered {
+		// To avoid unnecessary re-renders, cache failed render attempts by revision.
+		failedWorkloadUpdateRevisionCacheKey := fmt.Sprintf("%s-%d", ms.Name, ms.Status.Revision)
+
+		r.failedWorkloadUpdateRevisionCacheLock.RLock()
+		failed := r.failedWorkloadUpdateRevisionCache[failedWorkloadUpdateRevisionCacheKey]
+		r.failedWorkloadUpdateRevisionCacheLock.RUnlock()
+		if failed != nil {
+			return nil, nil, "", "", failed
+		}
+
+		if objsData, err = r.render(ctx, ms, icmsReq); err != nil {
+			r.failedWorkloadUpdateRevisionCacheLock.Lock()
+			r.failedWorkloadUpdateRevisionCache[failedWorkloadUpdateRevisionCacheKey] = err
+			r.failedWorkloadUpdateRevisionCacheLock.Unlock()
+			return nil, nil, "", "", err
+		}
+
+		// Clear the cache on a successful render for prior revisions to this MiniService
+		// so entries don't accumulate indefinitely.
+		r.failedWorkloadUpdateRevisionCacheLock.Lock()
+		maps.DeleteFunc(r.failedWorkloadUpdateRevisionCache, func(k string, _ error) bool {
+			return strings.HasPrefix(k, ms.Name+"-")
+		})
+		r.failedWorkloadUpdateRevisionCacheLock.Unlock()
+
+		if err := r.saveRenderedData(ctx, ms, objsData); err != nil {
+			return nil, nil, "", "", err
+		}
+	}
+
+	workloadObjs, resources, err := decodeObjects(ctx, r.Decoder, objsData)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+
+	return workloadObjs, resources, functionName, taskName, nil
+}
+
 // doUpdateWorkload performs a workload update for a MiniService, doing almost the same operations as doInstall,
 // but without infra install steps. It assumes that the MiniService is already in the Running phase,
 // but a recent change to Helm values has been detected and MiniService transitioned to the Installing phase.
@@ -788,39 +868,19 @@ func (r *Reconciler) doUpdateWorkload(ctx context.Context,
 ) (reconcile.Result, error) {
 	log := logf.FromContext(ctx)
 
+	workloadObjs, resources, functionName, taskName, err := r.prepareUpdateWorkload(ctx, ms, icmsReq)
+	if err != nil {
+		// Workload preparation may result in terminal errors that would cause workload cleanup.
+		// To let the un-updated workload continue running, warn the user with a non-terminal error.
+		if isTerminal(err) {
+			err = unwrapTerminalError(err)
+			log.Error(err, "Failed to prepare update workload with terminal error. MiniService must be updated with new values to progress update")
+		}
+		return reconcile.Result{}, err
+	}
+
 	log.Info("Updating MiniService workload", "revision", ms.Status.Revision)
 
-	funcLaunchSpec := icmsReq.Spec.CreationMsgInfo.FunctionLaunchSpecification
-	taskLaunchSpec := icmsReq.Spec.CreationMsgInfo.TaskLaunchSpecification
-	if funcLaunchSpec == nil && taskLaunchSpec == nil {
-		return reconcile.Result{}, reconcile.TerminalError(
-			fmt.Errorf("both function and task launch specs are empty in ICMSRequest %s", icmsReq.Name))
-	}
-
-	functionName, taskName, err := getFunctionNameAndTaskName(funcLaunchSpec, taskLaunchSpec)
-	if err != nil {
-		return reconcile.Result{}, reconcile.TerminalError(fmt.Errorf("failed to get function name and task name: %w", err))
-	}
-
-	objsData, isRendered, err := r.getRenderedData(ctx, ms)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-
-	if !isRendered {
-		if objsData, err = r.render(ctx, ms, icmsReq); err != nil {
-			return reconcile.Result{}, err
-		}
-
-		if err := r.saveRenderedData(ctx, ms, objsData); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-
-	workloadObjs, resources, err := decodeObjects(ctx, r.Decoder, objsData)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
 	// Update the resources status in the MiniService status.
 	updateResourcesStatus(ms, resources)
 
@@ -858,8 +918,12 @@ func (r *Reconciler) doUpdateWorkload(ctx context.Context,
 		return reconcile.Result{}, err
 	}
 
-	err = r.applySSAWorkload(ctx, ms, genericWorkloadMutator, workloadObjs...)
-	if err != nil {
+	if err := r.applySSAWorkload(ctx, ms, genericWorkloadMutator, workloadObjs...); err != nil {
+		if isTerminal(err) {
+			err = unwrapTerminalError(err)
+			log.Error(err, "Failed to apply workload objects with terminal error. MiniService must be updated with new values to progress update; "+
+				"successfully applied objects prior to this error may need to be cleaned up manually")
+		}
 		return reconcile.Result{}, err
 	}
 
@@ -1424,7 +1488,7 @@ func (r *Reconciler) applySSA(ctx context.Context,
 	})
 
 	caniCache := map[schema.GroupVersionKind]error{}
-	checkPermissions := r.newPermissionsChecker(caniCache)
+	checkPermissions := r.newPermissionsChecker(caniCache, requiredRBACVerbsWrite)
 
 	rm := c.RESTMapper()
 	for _, obj := range objs {
@@ -1471,6 +1535,7 @@ func (r *Reconciler) applySSA(ctx context.Context,
 		}
 		log.V(1).Info("Applied object via Server-Side Apply", "gvk", gvk, "name", obj.GetName())
 	}
+
 	return nil
 }
 
@@ -1489,7 +1554,7 @@ func (r *Reconciler) create(ctx context.Context,
 
 	// Cache permissions errors per GVK to reduce requests to the API server.
 	caniCache := map[schema.GroupVersionKind]error{}
-	checkPermissions := r.newPermissionsChecker(caniCache)
+	checkPermissions := r.newPermissionsChecker(caniCache, requiredRBACVerbsWrite)
 
 	rm := c.RESTMapper()
 	for _, obj := range objs {
@@ -1541,10 +1606,13 @@ func (r *Reconciler) create(ctx context.Context,
 }
 
 var (
-	// The minimal list of verbs to check prior to using the caching client.
+	// The list of verbs to check prior to using the caching client for read operations.
 	// This list is intentionally not exhaustive; other client methods will return more descriptive errors
 	// if the corresponding verb is not permitted for a resource.
-	requiredRBACVerbs = []string{"get", "list", "watch"}
+	requiredRBACVerbsRead = []string{"get", "list", "watch"}
+
+	// The list of verbs to check prior to using the caching client for write operations.
+	requiredRBACVerbsWrite = []string{"get", "list", "watch", "create", "update", "patch", "delete"}
 )
 
 type resourceAccesssDeniedError struct {
@@ -1561,7 +1629,7 @@ func (e resourceAccesssDeniedError) Error() string {
 // preventing unrecoverable cache errors when RBAC is missing.
 // It checks permissions with Kubernetes SelfSubjectAccessReview objects.
 // See https://github.com/kubernetes-sigs/controller-runtime/issues/550
-func newSelfSubjectAccessReviewPermissionsChecker(caniCache map[schema.GroupVersionKind]error) permissionCheckerFunc {
+func newSelfSubjectAccessReviewPermissionsChecker(caniCache map[schema.GroupVersionKind]error, verbs []string) permissionCheckerFunc {
 	return func(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, namespace string) error {
 		log := logf.FromContext(ctx).WithValues("gvk", gvk.String(), "namespace", namespace)
 
@@ -1576,7 +1644,7 @@ func newSelfSubjectAccessReviewPermissionsChecker(caniCache map[schema.GroupVers
 		}
 
 		hasBadVerbs := false
-		for _, verb := range requiredRBACVerbs {
+		for _, verb := range verbs {
 			ssar := &authorizationv1.SelfSubjectAccessReview{
 				Spec: authorizationv1.SelfSubjectAccessReviewSpec{
 					ResourceAttributes: &authorizationv1.ResourceAttributes{

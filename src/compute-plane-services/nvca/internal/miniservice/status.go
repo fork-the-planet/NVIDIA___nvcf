@@ -159,7 +159,7 @@ func (r *Reconciler) doStatus(
 
 	// Cache permissions errors per GVK to reduce requests to the API server.
 	caniCache := map[schema.GroupVersionKind]error{}
-	checkPermissions := r.newPermissionsChecker(caniCache)
+	checkPermissions := r.newPermissionsChecker(caniCache, requiredRBACVerbsRead)
 
 	// Pre-load pods, replicaSets, and events once for the duration of this reconcile.
 	// The list functions will transparently return cached data when statusContext is in context.
