@@ -399,12 +399,16 @@ path_has_skipped_dir_component() {
 # Main
 # ---------------------------------------------------------------------------
 
-if [[ ! -f "${IMPORTS_MANIFEST}" ]]; then
-    echo "missing ${IMPORTS_MANIFEST}" >&2
-    exit 1
+# imports.yaml is intentionally not published to the OSS mirror, so on GitHub
+# it is absent. It only groups the failure output by import path; the header
+# check itself does not need it. Fall back to top-level directory grouping when
+# it is missing, matching how check-private-go-module-paths and
+# collect-dependencies handle the same absence, instead of hard-failing.
+if [[ -f "${IMPORTS_MANIFEST}" ]]; then
+    load_imports
+else
+    echo "note: ${IMPORTS_MANIFEST} absent (OSS mirror); grouping headers by top-level directory" >&2
 fi
-
-load_imports
 discover_oss_allowlists
 discover_chart_roots
 
