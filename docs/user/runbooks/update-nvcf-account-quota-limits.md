@@ -40,6 +40,9 @@ If `nvcf-cli` is available and configured, use the `admin accounts update`
 subcommand:
 
 ```bash
+export NVCF_CLI_ENABLE_ADMIN=1
+nvcf-cli api-key generate --for function \
+  --scopes invoke_function,list_functions,queue_details,list_functions_details,account_setup
 nvcf-cli admin accounts update --nca-id nvcf-default --max-functions 50
 ```
 
@@ -47,8 +50,8 @@ Sibling flags for other limits:
 
 | Flag | Limit |
 |------|-------|
-| `--max-functions` | Maximum number of functions |
-| `--max-tasks` | Maximum number of tasks |
+| `--max-functions` | Maximum number of functions (cap 2147483647) |
+| `--max-tasks` | Maximum number of tasks (cap 2147483647) |
 | `--max-telemetries` | Maximum number of telemetries (cap 50) |
 | `--max-registry-credentials` | Maximum number of registry credentials (cap 50) |
 

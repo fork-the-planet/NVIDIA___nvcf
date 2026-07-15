@@ -21,7 +21,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
@@ -74,6 +77,25 @@ func TestServerTelemetryMiddlewareRecordsStatusAndRouteMetrics(t *testing.T) {
 		"openai_model_name":         attribute.StringValue("meta/llama-3"),
 		"function_id":               attribute.StringValue("func-123"),
 	}))
+}
+
+func TestAddOpenAIRequestMetricAttributesCopiesModelName(t *testing.T) {
+	const value = "meta/llama-3"
+	// Model names parsed by goccy/go-json can share the request body's backing storage.
+	backing := strings.Repeat("x", 1<<20) + value
+	modelName := backing[len(backing)-len(value):]
+	labeler := &otelhttp.Labeler{}
+	ctx := otelhttp.ContextWithLabeler(context.Background(), labeler)
+
+	AddOpenAIRequestMetricAttributes(ctx, modelName, "")
+
+	attrs := labeler.Get()
+	require.Len(t, attrs, 1)
+	require.Equal(t, openAIModelNameAttribute, attrs[0].Key)
+	got := attrs[0].Value.AsString()
+	require.Equal(t, modelName, got)
+	require.False(t, unsafe.StringData(modelName) == unsafe.StringData(got))
+	runtime.KeepAlive(backing)
 }
 
 func serve(handler http.Handler, method, path string) {

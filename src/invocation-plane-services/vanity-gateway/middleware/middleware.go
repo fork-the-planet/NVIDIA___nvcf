@@ -20,6 +20,7 @@ package middleware
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -63,7 +64,8 @@ func metricAttributesFromRequest(r *http.Request) []attribute.KeyValue {
 func AddOpenAIRequestMetricAttributes(ctx context.Context, modelName, functionID string) {
 	attrs := make([]attribute.KeyValue, 0, 2)
 	if modelName != "" {
-		attrs = append(attrs, openAIModelNameAttribute.String(modelName))
+		// Detach model names decoded from request bodies before the metric SDK retains them.
+		attrs = append(attrs, openAIModelNameAttribute.String(strings.Clone(modelName)))
 	}
 	if functionID != "" {
 		attrs = append(attrs, functionIDAttribute.String(functionID))
