@@ -95,6 +95,7 @@ go_test(
         "//proxy/internal/test",
         "//proxy/invocation",
         "//proxy/worker",
+        "@com_github_carlmjohnson_versioninfo//:versioninfo",
         "@com_github_google_uuid//:uuid",
         "@com_github_gorilla_websocket//:websocket",
         "@org_golang_google_grpc//:grpc",

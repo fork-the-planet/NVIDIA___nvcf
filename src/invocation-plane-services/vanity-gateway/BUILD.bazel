@@ -60,9 +60,17 @@ go_library(
     ],
     importpath = "ai-api-gateway-service",
     visibility = ["//visibility:private"],
+    # Build-time stamping, resolved by tools/workspace_status.sh when bazel
+    # is invoked with --stamp (the CI release jobs pass it). STABLE_VERSION
+    # is the release semver, which is also the primary container tag, so the
+    # reported service.version matches the image tag. gateway.GetVersion()
+    # prefers the APP_VERSION env var, then this stamped value, then the Go
+    # VCS build info (absent under Bazel).
+    x_defs = {
+        "ai-api-gateway-service/gateway.version": "{STABLE_VERSION}",
+    },
     deps = [
         "//gateway",
-        "@com_github_carlmjohnson_versioninfo//:versioninfo",
         "@com_github_go_logr_zapr//:zapr",
         "@com_github_nvidia_nvcf_go//pkg/nvkit/config",
         "@com_github_nvidia_nvcf_go//pkg/nvkit/logs",

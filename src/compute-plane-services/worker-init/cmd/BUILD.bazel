@@ -21,6 +21,18 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/worker-init/cmd",
     visibility = ["//visibility:private"],
+    # Build-time stamping into the shared worker utils version variable,
+    # resolved by tools/workspace_status.sh when bazel is invoked with
+    # --stamp (the CI release jobs pass it). utils.Version feeds the
+    # service.version tracing attribute; its init() fallbacks read Go VCS
+    # build info, which rules_go binaries never carry, so without this the
+    # value stays "unknown". STABLE_VERSION is the release semver, which is
+    # also the primary container tag. The init() fallbacks only overwrite
+    # the linker-set value when VCS build info is present, so stamping is
+    # safe under Bazel.
+    x_defs = {
+        "github.com/NVIDIA/nvcf/src/libraries/go/worker/utils.Version": "{STABLE_VERSION}",
+    },
     deps = ["//service"],
 )
 

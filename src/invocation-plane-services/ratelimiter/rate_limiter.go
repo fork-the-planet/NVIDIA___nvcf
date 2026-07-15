@@ -34,7 +34,6 @@ import (
 
 	"github.com/auth0/go-jwt-middleware/v2/jwks"
 	"github.com/auth0/go-jwt-middleware/v2/validator"
-	"github.com/carlmjohnson/versioninfo"
 	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/auth"
@@ -867,7 +866,7 @@ func MakeGrpcServer(rateLimiter *RateLimiter, listener net.Listener, logger logg
 		AccessToken: rateLimiterConfig.TracingAccessToken,
 		Attributes: tracing.Attributes{
 			ServiceName:    "nvcf-rate-limiter-service",
-			ServiceVersion: versioninfo.Revision,
+			ServiceVersion: getVersion(),
 			Extra: map[string]string{
 				"host.id": hostName,
 				"host.ip": rateLimiterConfig.PodIP,

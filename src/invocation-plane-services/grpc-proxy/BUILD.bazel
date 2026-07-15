@@ -34,16 +34,15 @@ go_library(
     srcs = ["main.go"],
     importpath = "nvcf-grpc-proxy",
     visibility = ["//visibility:private"],
-    # Build-time stamping. Mirrors the existing Dockerfile's go build
-    # behavior; values are resolved by tools/workspace_status.sh when
-    # bazel is invoked with --stamp.
+    # Build-time stamping, resolved by tools/workspace_status.sh when bazel
+    # is invoked with --stamp (the CI release jobs pass it). STABLE_VERSION
+    # is the release semver (NVCF_VERSION / tag), which is also the primary
+    # container tag pushed by the release pipeline, so the reported
+    # service.version matches the image tag. proxy.getVersion() prefers the
+    # VERSION env var, then this stamped value, then the Go VCS build info
+    # (absent under Bazel).
     x_defs = {
-        "main.Version": "{STABLE_VERSION}",
-        "main.GitCommit": "{STABLE_GIT_COMMIT}",
-        "main.GitBranch": "{STABLE_GIT_BRANCH}",
-        "main.BuildDate": "{BUILD_DATE}",
-        "main.BuildUser": "{STABLE_BUILD_USER}",
-        "main.GoVersion": "{STABLE_GO_VERSION}",
+        "nvcf-grpc-proxy/proxy.version": "{STABLE_VERSION}",
     },
     deps = [
         "//proxy",

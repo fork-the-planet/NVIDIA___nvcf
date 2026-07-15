@@ -295,8 +295,16 @@ func NewNVCFProxy(logger *logs.ZapLogger, config Config) (*NVCFProxy, error) {
 	}, nil
 }
 
+// version is injected at link time via x_defs in the root BUILD.bazel when
+// building with --stamp. Unstamped builds leave the placeholder or an empty
+// string, so getVersion falls through to versioninfo.
+var version string
+
 func getVersion() string {
-	if version := os.Getenv("VERSION"); version != "" {
+	if v := os.Getenv("VERSION"); v != "" {
+		return v
+	}
+	if version != "" && !strings.Contains(version, "{") {
 		return version
 	}
 	return versioninfo.Revision

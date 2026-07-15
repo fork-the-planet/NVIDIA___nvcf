@@ -137,6 +137,7 @@ func NewNVCFGateway(logger *logs.ZapLogger, config Config) (*NVCFGateway, error)
 			AdminAddr: "0.0.0.0:10083",
 			BaseServerConfig: &servers.BaseServerConfig{
 				ServiceName: "gdn-nvcf-ai-api-gateway-service",
+				Version:     GetVersion(),
 				Tracing: tracing.OTELConfig{
 					Enabled:     otelUrl.Host != "",
 					Endpoint:    otelUrl.Host,

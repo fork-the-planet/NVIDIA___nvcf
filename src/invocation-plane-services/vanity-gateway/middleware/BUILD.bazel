@@ -5,8 +5,8 @@ go_library(
     srcs = [
         "host.go",
         "logging.go",
-        "middleware.go",
         "metrics.go",
+        "middleware.go",
         "shadow_guard.go",
     ],
     importpath = "ai-api-gateway-service/middleware",

@@ -16,7 +16,11 @@ limitations under the License.
 */
 package proxy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/carlmjohnson/versioninfo"
+)
 
 func TestTracingEnabledCondition(t *testing.T) {
 	tests := []struct {
@@ -160,6 +164,49 @@ func Test_getConnectPathsHTTP1(t *testing.T) {
 			}
 			if got.HTTP1 != tt.want {
 				t.Errorf("getConnectPaths() HTTP1 = %v, want %v", got.HTTP1, tt.want)
+			}
+		})
+	}
+}
+
+func Test_getVersion(t *testing.T) {
+	tests := []struct {
+		name           string
+		env            string
+		stampedVersion string
+		want           string
+	}{
+		{
+			name:           "env var wins over stamped version",
+			env:            "env-1.2.3",
+			stampedVersion: "1.30.0",
+			want:           "env-1.2.3",
+		},
+		{
+			name:           "stamped version used when env unset",
+			stampedVersion: "1.30.0",
+			want:           "1.30.0",
+		},
+		{
+			name: "falls back to versioninfo when nothing stamped",
+			want: versioninfo.Revision,
+		},
+		{
+			name:           "unresolved stamp placeholder is ignored",
+			stampedVersion: "{STABLE_VERSION}",
+			want:           versioninfo.Revision,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("VERSION", tt.env)
+			}
+			old := version
+			version = tt.stampedVersion
+			defer func() { version = old }()
+			if got := getVersion(); got != tt.want {
+				t.Errorf("getVersion() = %v, want %v", got, tt.want)
 			}
 		})
 	}

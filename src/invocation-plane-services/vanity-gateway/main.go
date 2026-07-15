@@ -18,12 +18,10 @@ limitations under the License.
 package main
 
 import (
-	"os"
 	"reflect"
 
 	"ai-api-gateway-service/gateway"
 
-	"github.com/carlmjohnson/versioninfo"
 	"github.com/go-logr/zapr"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -59,7 +57,7 @@ func NewRootCommand(zapLogger *logs.ZapLogger) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:          "gateway",
 		Short:        "NVCF Vanity Gateway Service",
-		Version:      getVersion(),
+		Version:      gateway.GetVersion(),
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			v, err := config.InitConfig(cmd, cfgFile, "", "")
@@ -96,9 +94,3 @@ func NewRootCommand(zapLogger *logs.ZapLogger) *cobra.Command {
 	return rootCmd
 }
 
-func getVersion() string {
-	if version := os.Getenv("APP_VERSION"); version != "" {
-		return version
-	}
-	return versioninfo.Revision
-}
