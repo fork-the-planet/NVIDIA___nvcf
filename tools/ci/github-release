@@ -487,6 +487,11 @@ def auto_release(args):
         f"draft={str(draft).lower()} service_filter={service_filter or '<all>'}"
     )
 
+    # Services whose dry-run preview could not compute a version. While the
+    # workflow is inert (dry-run / auto-tagging disabled) these are reported but
+    # must not fail the job; publish mode below still fails hard.
+    dry_run_failures = []
+
     for service in metadata.get("services", []):
         if service_filter and service_filter not in {service["id"], service["service_name"]}:
             continue
@@ -527,11 +532,25 @@ def auto_release(args):
                 elif code == 0 and no_release_output(output):
                     print(f"[github-release] {service['id']}: no release-worthy commits")
                 else:
-                    raise SystemExit(f"{service['id']}: semantic-release dry-run produced no NEXT_VERSION")
+                    # Preview could not compute a version (for example the
+                    # semantic-release child was killed on a large history).
+                    # Do not fail the inert workflow on a preview; record it so
+                    # it is visible and gets resolved before the cutover.
+                    reason = f"semantic-release dry-run exited {code} with no NEXT_VERSION"
+                    print(f"[github-release] WARNING: {service['id']}: {reason}; continuing (dry-run preview)")
+                    dry_run_failures.append((service["id"], reason))
             else:
                 run(["npx", "semantic-release", "--no-ci"], cwd=service_dir)
         finally:
             print("::endgroup::")
+
+    if dry_run and dry_run_failures:
+        print(
+            f"[github-release] dry-run preview: {len(dry_run_failures)} service(s) "
+            "could not compute a version (non-fatal while inert):"
+        )
+        for sid, reason in dry_run_failures:
+            print(f"[github-release]   - {sid}: {reason}")
 
 
 def parse_release_tag(tag, metadata):

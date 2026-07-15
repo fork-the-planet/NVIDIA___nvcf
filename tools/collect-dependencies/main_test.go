@@ -304,3 +304,15 @@ func resetGlobalsForTest() {
 	goModDownloadHintLogged = false
 	helmMissingLogged = false
 }
+
+func TestImportPathsFromManifestMissingReturnsEmpty(t *testing.T) {
+	// On the OSS mirror imports.yaml is intentionally absent; the reader must
+	// treat that as "no synthetic imports" rather than erroring.
+	got, err := importPathsFromManifest(filepath.Join(t.TempDir(), "imports.yaml"))
+	if err != nil {
+		t.Fatalf("expected no error for missing imports.yaml, got %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no import paths, got %v", got)
+	}
+}

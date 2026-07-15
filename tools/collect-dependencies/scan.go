@@ -27,6 +27,11 @@ import (
 func importPathsFromManifest(path string) ([]string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// imports.yaml is intentionally absent on the OSS mirror. With no
+			// synthetic-import manifest there are no import roots to scan.
+			return nil, nil
+		}
 		return nil, err
 	}
 	var mf manifestFile

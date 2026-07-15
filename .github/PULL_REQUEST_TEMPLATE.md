@@ -16,9 +16,17 @@
 <!--list steps you took to verify this change-->
 <!--Is QA Needed?-->
 
-## Issues: (use one of the action keywords Closes / Fixes / Resolves / Relates to)
-- Closes #XXX
-- If no issues are associated, use NO-REF
+## Issues
+<!--
+Required: link an associated issue. Enforced by the pr-issue-check job.
+Write ONE of the following on the line below this comment:
+  - a GitHub issue with an action keyword: "Closes #123", "Fixes #123",
+    "Resolves NVIDIA/nvcf#123", or "Relates to #123"
+  - a tracker key: "NVCF-1234"
+  - "NO-REF" if no issue genuinely applies (use sparingly, per AGENTS.md)
+Text inside HTML comments does not count, so replace the line below.
+-->
+
 
 ## Checklist
 - [ ] I am familiar with the [Contributing Guidelines](../CONTRIBUTING.md).

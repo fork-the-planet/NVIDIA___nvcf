@@ -209,9 +209,15 @@ func findRepoRoot() (string, error) {
 		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
 			return dir, nil
 		}
+		// Fall back to the .git marker for the repo root. imports.yaml is
+		// intentionally absent on the OSS mirror; there importPathsFromManifest
+		// returns no imports, so dependency scanning still runs over the tree.
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, nil
+		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", fmt.Errorf("imports.yaml not found (started from %s)", wd)
+			return "", fmt.Errorf("neither imports.yaml nor .git found (started from %s)", wd)
 		}
 		dir = parent
 	}
