@@ -27,6 +27,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"nvcf-cli/internal/selfhosted"
 	"nvcf-cli/internal/selfhosted/controlplaneprofile"
@@ -607,30 +608,39 @@ func TestComputePlaneRegisterStopsBeforeSISOnReachabilityFailure(t *testing.T) {
 	assert.ErrorIs(t, err, assert.AnError)
 }
 
-func TestTransportTLSValuesSystemOmitsTrustMaterial(t *testing.T) {
-	got := transportTLSValues(controlplaneprofile.TransportTLS{
+func TestTransportTLSAgentConfigValuesSystemOmitsTrustMaterial(t *testing.T) {
+	got, err := transportTLSAgentConfigValues(controlplaneprofile.TransportTLS{
 		TrustMode:              controlplaneprofile.TrustModeSystem,
 		TrustBundleFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		TrustBundlePEM:         "-----BEGIN CERTIFICATE-----\nignored\n-----END CERTIFICATE-----\n",
 	})
+	require.NoError(t, err)
 
 	require.NotNil(t, got)
-	assert.Equal(t, controlplaneprofile.TrustModeSystem, got.TrustMode)
-	assert.Empty(t, got.TrustBundleFingerprint)
-	assert.Empty(t, got.TrustBundlePem)
+	assert.Contains(t, got.MergeConfig, "trustMode: system")
+	assert.NotContains(t, got.MergeConfig, "trustBundleFingerprint")
+	assert.NotContains(t, got.MergeConfig, "trustBundlePem")
 }
 
-func TestTransportTLSValuesBundleIncludesTrustMaterial(t *testing.T) {
-	got := transportTLSValues(controlplaneprofile.TransportTLS{
+func TestTransportTLSAgentConfigValuesBundleIncludesTrustMaterial(t *testing.T) {
+	got, err := transportTLSAgentConfigValues(controlplaneprofile.TransportTLS{
 		TrustMode:              controlplaneprofile.TrustModeBundle,
 		TrustBundleFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		TrustBundlePEM:         "-----BEGIN CERTIFICATE-----\nrendered\n-----END CERTIFICATE-----\n",
 	})
+	require.NoError(t, err)
 
 	require.NotNil(t, got)
-	assert.Equal(t, controlplaneprofile.TrustModeBundle, got.TrustMode)
-	assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", got.TrustBundleFingerprint)
-	assert.Equal(t, "-----BEGIN CERTIFICATE-----\nrendered\n-----END CERTIFICATE-----\n", got.TrustBundlePem)
+	var mergeConfig map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(got.MergeConfig), &mergeConfig))
+	workload, ok := mergeConfig["workload"].(map[string]any)
+	require.True(t, ok)
+	transportTLS, ok := workload["transportTLS"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, controlplaneprofile.TrustModeBundle, transportTLS["trustMode"])
+	assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", transportTLS["trustBundleFingerprint"])
+	assert.Equal(t, "-----BEGIN CERTIFICATE-----\nrendered\n-----END CERTIFICATE-----\n", transportTLS["trustBundlePem"])
+	assert.NotContains(t, transportTLS, "installerImage")
 }
 
 func TestComputePlaneChartFromStack(t *testing.T) {
@@ -782,6 +792,51 @@ func TestReadNVCAValuesMetadata(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "gpu-c", meta.ClusterName)
 		assert.Equal(t, "nca-from-generated", meta.NCAID)
+	})
+
+	t.Run("generated values render transport trust through agent config merge", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "gpu-d-register-values.yaml")
+		require.NoError(t, writeComputePlaneNVCAValues(computePlaneNVCAValuesRequest{
+			Path:           path,
+			ClusterName:    "gpu-d",
+			NCAID:          "nca-from-generated",
+			Region:         "us-west-1",
+			IdentitySource: "psat",
+			Registration: &selfhosted.RegisterResponse{
+				ClusterID:      "cluster-id",
+				ClusterGroupID: "group-id",
+			},
+			TransportTLS: controlplaneprofile.TransportTLS{
+				TrustMode:              controlplaneprofile.TrustModeBundle,
+				TrustBundleFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				TrustBundlePEM:         "-----BEGIN CERTIFICATE-----\nrendered\n-----END CERTIFICATE-----\n",
+			},
+		}))
+
+		body, err := os.ReadFile(path)
+		require.NoError(t, err)
+
+		var values map[string]any
+		require.NoError(t, yaml.Unmarshal(body, &values))
+		selfManaged, ok := values["selfManaged"].(map[string]any)
+		require.True(t, ok)
+		assert.NotContains(t, selfManaged, "transportTls")
+
+		agentConfig, ok := values["agentConfig"].(map[string]any)
+		require.True(t, ok)
+		mergeConfig, ok := agentConfig["mergeConfig"].(string)
+		require.True(t, ok)
+
+		var merged map[string]any
+		require.NoError(t, yaml.Unmarshal([]byte(mergeConfig), &merged))
+		workload, ok := merged["workload"].(map[string]any)
+		require.True(t, ok)
+		transportTLS, ok := workload["transportTLS"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, controlplaneprofile.TrustModeBundle, transportTLS["trustMode"])
+		assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", transportTLS["trustBundleFingerprint"])
+		assert.Equal(t, "-----BEGIN CERTIFICATE-----\nrendered\n-----END CERTIFICATE-----\n", transportTLS["trustBundlePem"])
+		assert.NotContains(t, transportTLS, "installerImage")
 	})
 
 	t.Run("typo in known field surfaces a decode error", func(t *testing.T) {

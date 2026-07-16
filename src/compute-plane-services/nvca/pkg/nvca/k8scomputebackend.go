@@ -161,7 +161,7 @@ func (c K8sComputeBackend) ApplyCreationMessage(ctx context.Context, req *nvcav2
 
 	metrics := nvcametrics.FromContext(ctx)
 
-	switch req.Spec.Action {
+	switch req.Spec.Action.Normalize() {
 	case common.FunctionCreationAction:
 		switch c.detectRequestType(req) {
 		case ftMiniService:
@@ -988,6 +988,10 @@ func (c K8sComputeBackend) CreatePodArtifactInstances(ctx context.Context, pod *
 	if pod.Spec.Affinity != nil {
 		pod.Spec.Affinity.PodAffinity = nil
 		pod.Spec.Affinity.PodAntiAffinity = nil
+	}
+
+	if err := c.prepareTransportTLSForPod(ctx, pod); err != nil {
+		return nil, err
 	}
 
 	needsEnforcement := !c.enabledAttrs.Empty()

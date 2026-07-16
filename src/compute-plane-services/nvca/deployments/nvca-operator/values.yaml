@@ -291,8 +291,6 @@ helmManaged:
 ## @section Self Managed NVCF Backend Configuration
 ## Only used when ngcConfig.clusterSource is "self-managed"
 ## All values below are under the 'selfManaged:' key, e.g. 'selfManaged.nvcaVersion'
-## selfManaged.transportTls is generated from the reviewed control-plane profile.
-## It carries public worker transport trust only; NVCA creates namespace-local trust bundles.
 selfManaged:
   ## @param selfManaged.nvcaVersion (REQUIRED) Version of the NVCFBackend to use
   nvcaVersion: ""
@@ -326,20 +324,6 @@ selfManaged:
   natsURL: ""
   ## @param selfManaged.natsHostOverride Optional TLS SNI host override for selfManaged.natsURL when using a tls or wss NATS URL.
   natsHostOverride: ""
-  ## @param selfManaged.transportTls.trustMode Worker transport TLS trust mode from the control-plane profile. Use "system" for system roots or "bundle" for a pinned public trust bundle.
-  ## @param selfManaged.transportTls.trustBundleConfigMapName ConfigMap name created in each worker namespace for bundle mode.
-  ## @param selfManaged.transportTls.trustBundleKey ConfigMap data key containing the PEM trust bundle.
-  ## @param selfManaged.transportTls.trustBundleFingerprint Canonical nvcf-trust-bundle-v1 fingerprint of trustBundlePem.
-  ## @param selfManaged.transportTls.trustBundlePem Public PEM trust bundle used when trustMode is "bundle". Do not put private keys or service leaf material here.
-  ## @param selfManaged.transportTls.installerImage Optional NVCA-owned trust-bundle installer image override. Leave empty to use the resolved nvca image for the cluster.
-  transportTls:
-    trustMode: "system"
-    trustBundleConfigMapName: "nvcf-transport-trust-bundle"
-    trustBundleKey: "nvcf-ca-bundle.pem"
-    trustBundleFingerprint: ""
-    trustBundlePem: ""
-    installerImage: ""
-
 ## @section Node Selector Configuration
 ## @param nodeSelector.key Node-selector Label key
 ## @param nodeSelector.value Node-selector Label value

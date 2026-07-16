@@ -558,6 +558,7 @@ type AgentConfig struct {
 	OTelCollectorConfig                                    *OTelCollectorConfig         `json:"otelCollectorConfig,omitempty"`
 	NATSURL                                                *string                      `json:"natsURL,omitempty"`
 	NATSHostOverride                                       *string                      `json:"natsHostOverride,omitempty"`
+	LLMRequestRouterAddress                                string                       `json:"llmRequestRouterAddress,omitempty"`
 	HelmReValStageOAuthTokenURL                            string                       `json:"helmReValStageOAuthTokenURL,omitempty"`
 	HelmReValStageOAuthPublicKeysetEndpoint                string                       `json:"helmReValStageOAuthPublicKeysetEndpoint,omitempty"`
 	HelmReValProdOAuthTokenURL                             string                       `json:"helmReValProdOAuthTokenURL,omitempty"`

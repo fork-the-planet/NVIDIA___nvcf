@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -4908,6 +4909,43 @@ func mockAddSharedClusterNodePublisherFunc(context.Context, cache.SharedIndexInf
 	return &atomic.Bool{}, func() bool { return true }, nil
 }
 
+func TestSyncICMSRequestNormalizesLegacyCreationActions(t *testing.T) {
+	ctx := newTestContext()
+
+	for _, action := range []common.MessageAction{
+		common.MessageAction("RequestInstances"),
+		common.MessageAction("RequestInstancesForTask"),
+	} {
+		t.Run(string(action), func(t *testing.T) {
+			req := &nvcav2beta1.ICMSRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sr-" + strings.ToLower(string(action)),
+					Namespace: RequestsNamespace,
+				},
+				Spec: nvcav2beta1.ICMSRequestSpec{
+					Action: action,
+				},
+				Status: nvcav2beta1.ICMSRequestStatus{
+					LastStatusUpdated: &metav1.Time{Time: core.GetCurrentTime(ctx)},
+					RequestStatus:     nvcav2beta1.ICMSRequestStatusPending,
+					Instances:         map[string]nvcav2beta1.InstanceStatus{},
+				},
+			}
+			helper := &recordingCreationHelper{}
+			bc := &BackendK8sCache{
+				clients: &kubeclients.KubeClients{
+					BART: fakebartclient.NewSimpleClientset(req),
+				},
+				icmsRequestHelper: helper,
+			}
+
+			require.NoError(t, bc.syncICMSRequest(ctx, req.DeepCopy()))
+			assert.Equal(t, 1, helper.creationCalls)
+			assert.Equal(t, action, helper.lastAction)
+		})
+	}
+}
+
 // noopICMSRequestHelper provides no-op implementations of every ICMSRequestHelper
 // method. Embed it in test stubs so they only need to override the methods they
 // actually exercise.
@@ -4942,6 +4980,18 @@ func (noopICMSRequestHelper) HandleInstanceStatusPreconditionFailure(context.Con
 }
 func (noopICMSRequestHelper) PurgeInstanceID(context.Context, *nvcav2beta1.ICMSRequest, map[string]nvcav2beta1.InstanceStatus, string) bool {
 	return false
+}
+
+type recordingCreationHelper struct {
+	noopICMSRequestHelper
+	creationCalls int
+	lastAction    common.MessageAction
+}
+
+func (h *recordingCreationHelper) ApplyCreationMessage(_ context.Context, req *nvcav2beta1.ICMSRequest) error {
+	h.creationCalls++
+	h.lastAction = req.Spec.Action
+	return nil
 }
 
 // terminatedSet is a minimal ICMSRequestHelper for scheduler workload metric tests.

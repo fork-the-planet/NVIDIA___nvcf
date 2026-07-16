@@ -811,6 +811,18 @@ func Test_translateFunctionLaunchSpecification(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, gotArtifactsHelmChart, 6)
 
+	legacyReqContainer := reqContainer.DeepCopy()
+	legacyReqContainer.Name = "sr-legacy-request-instances"
+	legacyReqContainer.Spec.Action = common.MessageAction("RequestInstances")
+	legacyReqContainer.Spec.CreationMsgInfo.CreationQueueMessageMetadata.Action = common.MessageAction("RequestInstances")
+	_, err = kc.clients.BART.NvcaV2beta1().ICMSRequests(legacyReqContainer.Namespace).Create(ctx, legacyReqContainer, metav1.CreateOptions{})
+	require.NoError(t, err)
+	err = kc.ApplyCreationMessage(ctx, legacyReqContainer)
+	require.NoError(t, err)
+	gotLegacyReq, err := kc.clients.BART.NvcaV2beta1().ICMSRequests(legacyReqContainer.Namespace).Get(ctx, legacyReqContainer.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Len(t, gotLegacyReq.Spec.CreationMsgInfo.LaunchArtifacts, 3)
+
 	// For coverage
 	_, err = kc.clients.BART.NvcaV2beta1().ICMSRequests(reqContainer.Namespace).Create(ctx, reqContainer, metav1.CreateOptions{})
 	require.NoError(t, err)

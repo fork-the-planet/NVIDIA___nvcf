@@ -26,55 +26,44 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func marshalSelfManaged(t *testing.T, sm SelfManagedValues) string {
+func marshalValues(t *testing.T, values Values) string {
 	t.Helper()
-	body, err := yaml.Marshal(Values{SelfManaged: sm})
+	body, err := yaml.Marshal(values)
 	require.NoError(t, err)
 	return string(body)
 }
 
 // TestTransportTLSOmittedWhenNil verifies that an absent transportTls renders
-// no selfManaged.transportTls block, so the nvca-operator chart applies its
-// default (trustMode: system).
+// no legacy selfManaged.transportTls block.
 func TestTransportTLSOmittedWhenNil(t *testing.T) {
-	out := marshalSelfManaged(t, SelfManagedValues{IdentitySource: "psat", TransportTLS: nil})
+	out := marshalValues(t, Values{SelfManaged: SelfManagedValues{IdentitySource: "psat"}})
 	require.NotContains(t, out, "transportTls")
 }
 
-// TestTransportTLSSystemRendersModeOnly verifies system mode renders only the
-// trustMode (no fingerprint/PEM).
-func TestTransportTLSSystemRendersModeOnly(t *testing.T) {
-	out := marshalSelfManaged(t, SelfManagedValues{
-		IdentitySource: "psat",
-		TransportTLS:   &TransportTLSValues{TrustMode: "system"},
-	})
-	require.Contains(t, out, "trustMode: system")
-	require.NotContains(t, out, "trustBundleFingerprint")
-	require.NotContains(t, out, "trustBundlePem")
-}
-
-// TestTransportTLSBundleRendersFingerprintAndPEM verifies bundle mode renders
-// the fingerprint and PEM unchanged for the chart to carry to the worker pods.
-func TestTransportTLSBundleRendersFingerprintAndPEM(t *testing.T) {
+// TestTransportTLSAgentConfigMergeRendersFingerprintAndPEM verifies bundle mode
+// renders the fingerprint and PEM under agentConfig.mergeConfig for NVCA config
+// merging rather than under selfManaged.* Helm values.
+func TestTransportTLSAgentConfigMergeRendersFingerprintAndPEM(t *testing.T) {
 	pem := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
-	out := marshalSelfManaged(t, SelfManagedValues{
-		IdentitySource: "psat",
-		TransportTLS: &TransportTLSValues{
-			TrustMode:              "bundle",
-			TrustBundleFingerprint: "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			TrustBundlePem:         pem,
+	out := marshalValues(t, Values{
+		SelfManaged: SelfManagedValues{IdentitySource: "psat"},
+		AgentConfig: &AgentConfigValues{
+			MergeConfig: "workload:\n  transportTLS:\n    trustMode: bundle\n    trustBundleFingerprint: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n    trustBundlePem: |\n      " + pem,
 		},
 	})
+	require.Contains(t, out, "agentConfig:")
+	require.Contains(t, out, "mergeConfig:")
 	require.Contains(t, out, "trustMode: bundle")
 	require.Contains(t, out, "trustBundleFingerprint: sha256:0123456789abcdef")
 	require.Contains(t, out, "-----BEGIN CERTIFICATE-----")
+	require.NotContains(t, out, "transportTls:")
 }
 
 // TestAgentRequestRouterAddressRendered verifies agent.llm.requestRouterAddress
 // is rendered when set and the agent section is omitted entirely when nil.
 func TestAgentRequestRouterAddressRendered(t *testing.T) {
 	// Nil agent section is omitted.
-	require.NotContains(t, marshalSelfManaged(t, SelfManagedValues{IdentitySource: "psat"}), "agent:")
+	require.NotContains(t, marshalValues(t, Values{SelfManaged: SelfManagedValues{IdentitySource: "psat"}}), "agent:")
 
 	body, err := yaml.Marshal(Values{
 		Agent: &AgentValues{LLM: &AgentLLMValues{RequestRouterAddress: "llm-request-router.nvcf-cp.internal:50071"}},
@@ -87,7 +76,7 @@ func TestAgentRequestRouterAddressRendered(t *testing.T) {
 }
 
 // TestWriteFileRoundTrip verifies WriteFile emits parseable YAML carrying the
-// transport trust block.
+// agent config merge block.
 func TestWriteFileRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nvca-values.yaml")
 	require.NoError(t, WriteFile(path, Values{
@@ -95,13 +84,13 @@ func TestWriteFileRoundTrip(t *testing.T) {
 		ClusterGroupID: "g-1",
 		SelfManaged: SelfManagedValues{
 			IdentitySource: "psat",
-			TransportTLS:   &TransportTLSValues{TrustMode: "system"},
 		},
+		AgentConfig: &AgentConfigValues{MergeConfig: "workload:\n  transportTLS:\n    trustMode: system\n"},
 	}))
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
 	var got Values
 	require.NoError(t, yaml.Unmarshal(body, &got))
-	require.NotNil(t, got.SelfManaged.TransportTLS)
-	require.Equal(t, "system", got.SelfManaged.TransportTLS.TrustMode)
+	require.NotNil(t, got.AgentConfig)
+	require.Contains(t, got.AgentConfig.MergeConfig, "trustMode: system")
 }

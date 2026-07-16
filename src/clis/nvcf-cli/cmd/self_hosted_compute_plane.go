@@ -170,14 +170,15 @@ func readNVCAValuesMetadata(path string) (nvcaValuesMetadata, error) {
 // alias the CLI has historically tolerated. Unknown keys fail decode so
 // operator typos do not silently zero out cluster identity.
 type nvcaValuesMetadataDoc struct {
-	ClusterName    string                 `yaml:"clusterName,omitempty"`
-	ClusterID      string                 `yaml:"clusterID,omitempty"`
-	ClusterGroupID string                 `yaml:"clusterGroupID,omitempty"`
-	NCAID          string                 `yaml:"ncaID,omitempty"`
-	NCAIDLower     string                 `yaml:"ncaId,omitempty"`
-	Region         string                 `yaml:"region,omitempty"`
-	SelfManaged    nvca.SelfManagedValues `yaml:"selfManaged,omitempty"`
-	Agent          *nvca.AgentValues      `yaml:"agent,omitempty"`
+	ClusterName    string                  `yaml:"clusterName,omitempty"`
+	ClusterID      string                  `yaml:"clusterID,omitempty"`
+	ClusterGroupID string                  `yaml:"clusterGroupID,omitempty"`
+	NCAID          string                  `yaml:"ncaID,omitempty"`
+	NCAIDLower     string                  `yaml:"ncaId,omitempty"`
+	Region         string                  `yaml:"region,omitempty"`
+	SelfManaged    nvca.SelfManagedValues  `yaml:"selfManaged,omitempty"`
+	Agent          *nvca.AgentValues       `yaml:"agent,omitempty"`
+	AgentConfig    *nvca.AgentConfigValues `yaml:"agentConfig,omitempty"`
 }
 
 func stringMapValue(values map[string]any, key string) string {
@@ -533,6 +534,10 @@ type computePlaneNVCAValuesRequest struct {
 }
 
 func writeComputePlaneNVCAValues(req computePlaneNVCAValuesRequest) error {
+	agentConfig, err := transportTLSAgentConfigValues(req.TransportTLS)
+	if err != nil {
+		return err
+	}
 	return nvca.WriteFile(req.Path, nvca.Values{
 		ClusterName:    req.ClusterName,
 		ClusterID:      req.Registration.ClusterID,
@@ -547,9 +552,9 @@ func writeComputePlaneNVCAValues(req computePlaneNVCAValuesRequest) error {
 			ReValServiceHostHeaderOverride: req.Hosts.ReVal,
 			NATSURL:                        req.Endpoints.NATSURL,
 			NATSHostOverride:               req.Hosts.NATS,
-			TransportTLS:                   transportTLSValues(req.TransportTLS),
 		},
-		Agent: agentValues(req.RequestRouterAddress),
+		Agent:       agentValues(req.RequestRouterAddress),
+		AgentConfig: agentConfig,
 	})
 }
 
@@ -565,22 +570,41 @@ func agentValues(requestRouterAddress string) *nvca.AgentValues {
 	return &nvca.AgentValues{LLM: &nvca.AgentLLMValues{RequestRouterAddress: addr}}
 }
 
-// transportTLSValues renders the control-plane profile's transportTls into the
-// nvca-operator values (contract C-2). The profile transportTls has already
-// been validated by controlplaneprofile.ParseAndValidate (cert-only PEM and, in
-// bundle mode, a recomputed/matched fingerprint), so it is rendered unchanged:
-// bundle carries the fingerprint + PEM; system carries only the mode; an absent
-// transportTls renders nothing and the chart defaults trustMode to system.
-func transportTLSValues(t controlplaneprofile.TransportTLS) *nvca.TransportTLSValues {
+type transportTLSAgentConfig struct {
+	Workload transportTLSWorkloadConfig `yaml:"workload,omitempty"`
+}
+
+type transportTLSWorkloadConfig struct {
+	TransportTLS *transportTLSConfig `yaml:"transportTLS,omitempty"`
+}
+
+type transportTLSConfig struct {
+	TrustMode              string `yaml:"trustMode"`
+	TrustBundleFingerprint string `yaml:"trustBundleFingerprint,omitempty"`
+	TrustBundlePEM         string `yaml:"trustBundlePem,omitempty"`
+}
+
+// transportTLSAgentConfigValues renders the control-plane profile's
+// transportTls into the NVCA agent config merge fragment (contract C-2). The
+// profile transportTls has already been validated by
+// controlplaneprofile.ParseAndValidate. The installer image is intentionally not
+// rendered by the CLI; the operator defaults it to the resolved NVCA image.
+func transportTLSAgentConfigValues(t controlplaneprofile.TransportTLS) (*nvca.AgentConfigValues, error) {
 	if strings.TrimSpace(t.TrustMode) == "" {
-		return nil
+		return nil, nil
 	}
-	values := &nvca.TransportTLSValues{TrustMode: t.TrustMode}
+	transportTLS := &transportTLSConfig{TrustMode: t.TrustMode}
 	if t.TrustMode == controlplaneprofile.TrustModeBundle {
-		values.TrustBundleFingerprint = t.TrustBundleFingerprint
-		values.TrustBundlePem = t.TrustBundlePEM
+		transportTLS.TrustBundleFingerprint = t.TrustBundleFingerprint
+		transportTLS.TrustBundlePEM = t.TrustBundlePEM
 	}
-	return values
+	body, err := yaml.Marshal(transportTLSAgentConfig{
+		Workload: transportTLSWorkloadConfig{TransportTLS: transportTLS},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal transport TLS agent config: %w", err)
+	}
+	return &nvca.AgentConfigValues{MergeConfig: string(body)}, nil
 }
 
 func computePlaneChartFromStack(stackPath string) (chart, version string, err error) {

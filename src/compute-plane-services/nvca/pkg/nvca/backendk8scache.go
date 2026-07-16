@@ -2602,6 +2602,7 @@ func (c *BackendK8sCache) syncICMSRequest(ctx context.Context, req *nvcav2beta1n
 		return nil
 	}
 
+	requestAction := req.Spec.Action.Normalize()
 	var err error
 	var purgeAttempted bool
 	switch req.Status.RequestStatus {
@@ -2618,7 +2619,7 @@ func (c *BackendK8sCache) syncICMSRequest(ctx context.Context, req *nvcav2beta1n
 		}
 		fallthrough
 	case nvcav2beta1new.ICMSRequestStatusInProgress, nvcav2beta1new.ICMSRequestStatusCachingInProgress:
-		switch req.Spec.Action {
+		switch requestAction {
 		case common.FunctionCreationAction, common.TaskCreationAction:
 			if c.icmsRequestHelper.AllInstancesTerminatedAndReported(ctx, req) {
 				// this occurs when the backend goes unhealthy

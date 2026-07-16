@@ -1283,6 +1283,7 @@ func (bc *BackendK8sCache) setupAgentConfigConfigMap(
 	if err != nil {
 		return fmt.Errorf("get agent config to merge: %w", err)
 	}
+	bc.defaultTransportTLSInstallerImage(nb, &mergeCfg)
 
 	cb, err := encodeAgentConfig(cfg, mergeCfg, nb.Spec.AgentConfig.NATSURL, agentHostOverrideConfig(nb, bc.envType))
 	if err != nil {
@@ -1302,6 +1303,17 @@ func (bc *BackendK8sCache) setupAgentConfigConfigMap(
 	}
 
 	return bc.createOrUpdateConfigMap(ctx, s)
+}
+
+func (bc *BackendK8sCache) defaultTransportTLSInstallerImage(nb *nvidiaiov1.NVCFBackend, cfg *nvcaconfig.Config) {
+	if cfg == nil || cfg.Workload.TransportTLS == nil {
+		return
+	}
+	transportTLS := cfg.Workload.TransportTLS
+	if transportTLS.TrustMode != nvcaconfig.TrustModeBundle || strings.TrimSpace(transportTLS.InstallerImage) != "" {
+		return
+	}
+	transportTLS.InstallerImage = bc.getNVCAImagePathFromConfig(nb)
 }
 
 type agentHostOverrides struct {
@@ -1650,6 +1662,7 @@ func (bc *BackendK8sCache) mergeAgentConfigs(nb *nvidiaiov1.NVCFBackend) nvidiai
 		WebhookResources:                                       &corev1.ResourceRequirements{},
 		OTelCollectorResources:                                 &corev1.ResourceRequirements{},
 		ByooResources:                                          &corev1.ResourceRequirements{},
+		LLMRequestRouterAddress:                                nb.Spec.AgentConfig.LLMRequestRouterAddress,
 		HelmReValStageOAuthTokenURL:                            nb.Spec.AgentConfig.HelmReValStageOAuthTokenURL,
 		HelmReValStageOAuthPublicKeysetEndpoint:                nb.Spec.AgentConfig.HelmReValStageOAuthPublicKeysetEndpoint,
 		HelmReValProdOAuthTokenURL:                             nb.Spec.AgentConfig.HelmReValProdOAuthTokenURL,
@@ -2291,6 +2304,7 @@ func (bc *BackendK8sCache) newAgentConfig(ctx context.Context, nb *nvidiaiov1.NV
 	if err != nil {
 		return cfg, err
 	}
+	llmRequestRouterAddress := effectiveConfig.LLMRequestRouterAddress
 
 	var featureFlags []string
 	if ffs := bc.getNVCAFeatureFlags(nb); ffs != "" {
@@ -2342,7 +2356,8 @@ func (bc *BackendK8sCache) newAgentConfig(ctx context.Context, nb *nvidiaiov1.NV
 			TLSSecretName: NVCAWebhookTLSCertSecretName,
 		},
 		Workload: nvcaconfig.WorkloadConfig{
-			Tolerations: append([]corev1.Toleration(nil), bc.workloadTolerations...),
+			DefaultStargateAddress: llmRequestRouterAddress,
+			Tolerations:            append([]corev1.Toleration(nil), bc.workloadTolerations...),
 		},
 		Authz: nvcaconfig.AuthzConfig{
 			TokenURL:             tokenURL,
@@ -2351,7 +2366,6 @@ func (bc *BackendK8sCache) newAgentConfig(ctx context.Context, nb *nvidiaiov1.NV
 		},
 		Tracing: nvcaconfig.TracingConfig{},
 	}
-
 	// Apply worker config
 	if effectiveConfig.NVCFWorkerConfig.WorkerDegradationPeriod != 0 {
 		cfg.Workload.WorkerDegradationTimeout = effectiveConfig.NVCFWorkerConfig.WorkerDegradationPeriod

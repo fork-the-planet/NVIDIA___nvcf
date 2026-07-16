@@ -598,6 +598,10 @@ func (r *Reconciler) doInstall(ctx context.Context,
 		return reconcile.Result{}, err
 	}
 
+	if err := r.prepareTransportTLSForWorkloads(ctx, ms, workloadObjs); err != nil {
+		return reconcile.Result{}, err
+	}
+
 	if err := r.ensureApplyPrerequisites(ctx,
 		ms, icmsReq,
 		infraObjectMutators, genericInfraMutator,

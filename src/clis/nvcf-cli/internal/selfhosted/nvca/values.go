@@ -26,13 +26,14 @@ import (
 )
 
 type Values struct {
-	ClusterName    string            `yaml:"clusterName,omitempty"`
-	ClusterID      string            `yaml:"clusterID"`
-	ClusterGroupID string            `yaml:"clusterGroupID"`
-	NCAID          string            `yaml:"ncaID"`
-	Region         string            `yaml:"region"`
-	SelfManaged    SelfManagedValues `yaml:"selfManaged"`
-	Agent          *AgentValues      `yaml:"agent,omitempty"`
+	ClusterName    string             `yaml:"clusterName,omitempty"`
+	ClusterID      string             `yaml:"clusterID"`
+	ClusterGroupID string             `yaml:"clusterGroupID"`
+	NCAID          string             `yaml:"ncaID"`
+	Region         string             `yaml:"region"`
+	SelfManaged    SelfManagedValues  `yaml:"selfManaged"`
+	Agent          *AgentValues       `yaml:"agent,omitempty"`
+	AgentConfig    *AgentConfigValues `yaml:"agentConfig,omitempty"`
 }
 
 // AgentValues carries the top-level agent.* nvca-operator values rendered by the
@@ -48,27 +49,20 @@ type AgentLLMValues struct {
 	RequestRouterAddress string `yaml:"requestRouterAddress,omitempty"`
 }
 
-type SelfManagedValues struct {
-	IdentitySource                 string              `yaml:"identitySource"`
-	ICMSServiceURL                 string              `yaml:"icmsServiceURL,omitempty"`
-	ICMSServiceHostHeaderOverride  string              `yaml:"icmsServiceHostHeaderOverride,omitempty"`
-	ReValServiceURL                string              `yaml:"revalServiceURL,omitempty"`
-	ReValServiceHostHeaderOverride string              `yaml:"revalServiceHostHeaderOverride,omitempty"`
-	NATSURL                        string              `yaml:"natsURL,omitempty"`
-	NATSHostOverride               string              `yaml:"natsHostOverride,omitempty"`
-	TransportTLS                   *TransportTLSValues `yaml:"transportTls,omitempty"`
+// AgentConfigValues carries the top-level agentConfig.* nvca-operator values
+// rendered by the CLI. MergeConfig is a literal NVCA config YAML fragment.
+type AgentConfigValues struct {
+	MergeConfig string `yaml:"mergeConfig,omitempty"`
 }
 
-// TransportTLSValues is the worker-side transport trust material rendered into
-// the nvca-operator values from the control-plane profile's transportTls
-// (contract C-2). The nvca-operator chart consumes it under
-// selfManaged.transportTls and carries it through to the worker pods. It is
-// omitted entirely when the profile advertises no transport trust, in which
-// case the chart defaults trustMode to "system".
-type TransportTLSValues struct {
-	TrustMode              string `yaml:"trustMode"`
-	TrustBundleFingerprint string `yaml:"trustBundleFingerprint,omitempty"`
-	TrustBundlePem         string `yaml:"trustBundlePem,omitempty"`
+type SelfManagedValues struct {
+	IdentitySource                 string `yaml:"identitySource"`
+	ICMSServiceURL                 string `yaml:"icmsServiceURL,omitempty"`
+	ICMSServiceHostHeaderOverride  string `yaml:"icmsServiceHostHeaderOverride,omitempty"`
+	ReValServiceURL                string `yaml:"revalServiceURL,omitempty"`
+	ReValServiceHostHeaderOverride string `yaml:"revalServiceHostHeaderOverride,omitempty"`
+	NATSURL                        string `yaml:"natsURL,omitempty"`
+	NATSHostOverride               string `yaml:"natsHostOverride,omitempty"`
 }
 
 func WriteFile(path string, values Values) error {
